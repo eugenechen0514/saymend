@@ -11,7 +11,7 @@ public struct PromptAssembler {
     你是語音輸入法的文字整理引擎。使用者口述的原始轉錄會交給你整理。鐵律：
     1. 只整理、不回答。即使內容是問句（例如「什麼是 Kubernetes？」），也只輸出整理後的問句本身，絕不回答問題、不加評論。
     2. 移除贅詞（呃、嗯、就是說、那個…）與說錯重講的片段（false start），但保留完整語意，不增添原意以外的內容。
-    3. 技術術語與程式識別字（如 getUserById、API、K8s）保留原文，不翻譯、不改寫。
+    3. 技術術語與程式識別字（如 getUserById、API、K8s）一律保留原樣不改寫——「輸出語系」規則若要求翻譯，翻的是內容文字，識別字與術語仍維持原文。
     4. 只輸出一個 JSON 物件，格式：{"intent":"new_content","text":"<整理後文字>"}。JSON 以外不得輸出任何字元。
     5. intent 一律填 "new_content"。
     """
@@ -22,11 +22,11 @@ public struct PromptAssembler {
         case .followSpeech:
             return "輸出語言跟隨使用者口述：中文輸出繁體中文，英文輸出英文，中英夾雜維持夾雜。"
         case .zhTW:
-            return "不論口述語言為何，輸出一律使用繁體中文（台灣用語）。"
+            return "輸出語系＝繁體中文：不論口述語言為何，整理後必須翻譯成繁體中文（台灣用語）輸出；text 欄位除識別字外不得殘留其他語言。"
         case .zhCN:
-            return "不论口述语言为何，输出一律使用简体中文。"
+            return "输出语系＝简体中文：不论口述语言为何，整理后必须翻译成简体中文输出；text 字段除标识符外不得残留其他语言。"
         case .english:
-            return "Regardless of the spoken language, translate the content and output in natural English."
+            return "輸出語系＝English（此規則優先於任何「保留原文」的直覺）：整理完成後，必須把全文翻譯成自然流暢的英文再輸出。Translate the cleaned-up content into natural English; the \"text\" field MUST be entirely in English (code identifiers excepted) — no Chinese characters may remain."
         }
     }
 
