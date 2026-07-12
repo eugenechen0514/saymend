@@ -4,14 +4,23 @@ import SpeeckinkCore
 
 /// Apple SpeechAnalyzer 引擎（規格 §4.2 主引擎，macOS 26+）。
 /// 全專案唯一碰 Speech framework 的檔案；SDK 簽名若有出入照官方文件改這裡，介面不動。
+/// 共享狀態（analyzer/inputContinuation/pumpTask）由 stateLock 序列化：
+/// 背景 pump Task 寫入、cancel() 可能從 MainActor 進來，.v5 模式編譯器不會擋這個競爭。
 final class SpeechAnalyzerEngine: ASREngine {
+    private let stateLock = NSLock()
     private var analyzer: SpeechAnalyzer?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
     private var pumpTask: Task<Void, Never>?
 
+    private func withState<T>(_ body: (inout SpeechAnalyzer?, inout AsyncStream<AnalyzerInput>.Continuation?, inout Task<Void, Never>?) -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body(&analyzer, &inputContinuation, &pumpTask)
+    }
+
     func start(audio: AsyncStream<AudioChunk>, localeIdentifier: String) -> AsyncStream<TranscriptEvent> {
         AsyncStream { continuation in
-            let task = Task {
+            let task = Task { [weak self] in
                 do {
                     let locale = Locale(identifier: localeIdentifier)
                     let transcriber = SpeechTranscriber(
@@ -25,14 +34,14 @@ final class SpeechAnalyzerEngine: ASREngine {
                         try await request.downloadAndInstall()
                     }
                     let analyzer = SpeechAnalyzer(modules: [transcriber])
-                    self.analyzer = analyzer
+                    self?.withState { a, _, _ in a = analyzer }
 
                     guard let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
                         continuation.finish()
                         return
                     }
                     let (inputSequence, inputBuilder) = AsyncStream.makeStream(of: AnalyzerInput.self)
-                    self.inputContinuation = inputBuilder
+                    self?.withState { _, c, _ in c = inputBuilder }
                     try await analyzer.start(inputSequence: inputSequence)
 
                     // 結果讀取：volatile／finalized 直接對應 TranscriptEvent
@@ -72,16 +81,21 @@ final class SpeechAnalyzerEngine: ASREngine {
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
-            self.pumpTask = task
+            withState { _, _, p in p = task }
         }
     }
 
     func cancel() {
-        inputContinuation?.finish()
-        pumpTask?.cancel()
-        let analyzer = self.analyzer
-        Task { try? await analyzer?.cancelAndFinishNow() }
-        self.analyzer = nil
+        let (analyzer, continuation, pump) = withState { a, c, p -> (SpeechAnalyzer?, AsyncStream<AnalyzerInput>.Continuation?, Task<Void, Never>?) in
+            let snapshot = (a, c, p)
+            a = nil
+            c = nil
+            return snapshot
+        }
+        continuation?.finish()
+        pump?.cancel()
+        // 實際 SDK 的 cancelAndFinishNow() 非 throwing（M1 編譯警告來源），不再包 try?
+        Task { await analyzer?.cancelAndFinishNow() }
     }
 
     private static func convert(_ buffer: AVAudioPCMBuffer,
