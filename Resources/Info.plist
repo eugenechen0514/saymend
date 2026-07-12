@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>io.speeckink.app</string>
+    <key>CFBundleName</key>
+    <string>Speeckink</string>
+    <key>CFBundleExecutable</key>
+    <string>Speeckink</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Speeckink 需要麥克風進行語音輸入。</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Speeckink 使用裝置端語音辨識將語音轉為文字。</string>
+</dict>
+</plist>

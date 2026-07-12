@@ -1,0 +1,23 @@
+# Speeckink
+
+macOS 語音輸入工具：說完即成稿，改稿用嘴不用滑鼠（M1 為核心聽寫；口頭修正見規格 M2）。
+
+## 需求
+- macOS 26+（SpeechAnalyzer）
+- Xcode 26 toolchain
+- 一個 OpenAI-compatible LLM 端點（雲端或本地 Ollama／LM Studio）
+
+## 建置與執行
+    ./Scripts/make-app.sh
+    open build/Speeckink.app
+
+首次啟動請允許：輔助使用、麥克風、語音辨識。ad-hoc 簽章重建後可能需重新授權輔助使用。
+
+## 使用
+- 按住「右 Cmd」說話，放開即潤飾上屏；短按切換鎖定聽寫，再短按結束。
+- 聽寫中按 Esc 取消目前段落。
+- 設計規格：docs/superpowers/specs/2026-07-12-speeckink-design.md
+
+## 開發
+    swift test          # 核心邏輯全部單元測試
+    swift build         # 編譯
