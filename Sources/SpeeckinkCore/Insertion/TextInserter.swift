@@ -8,4 +8,6 @@ public protocol TextInserter: AnyObject {
 public enum InserterError: Error, Equatable {
     case unsupported
     case postFailed
+    case replaceFailedRestored     // 替換失敗，但原文已回復（鐵律守住）
+    case lostText(String)          // 原文救不回來；呼叫端以剪貼簿急救
 }
