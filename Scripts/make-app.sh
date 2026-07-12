@@ -1,6 +1,7 @@
 #!/bin/zsh
-# 組出 build/Speeckink.app：SwiftPM 產物 + Info.plist + 資源 bundle + ad-hoc 簽章。
-# 注意：ad-hoc 簽章每次重簽，輔助功能授權可能需在系統設定重新勾選。
+# 組出 build/Speeckink.app：SwiftPM 產物 + Info.plist + 資源 bundle + 簽章。
+# 簽章優先用穩定的 Apple Development 憑證（TCC 授權可跨重建保留）；
+# 找不到憑證才退回 ad-hoc（每次重簽，輔助使用授權會失效需重勾）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -15,5 +16,7 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 # SwiftyOpenCC 等資源 bundle（Bundle.module 會在 Contents/Resources 找）
 cp -R .build/release/*.bundle "$APP/Contents/Resources/" 2>/dev/null || true
 
-codesign --force --sign - "$APP"
+IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/{print $2; exit}')
+codesign --force --sign "${IDENTITY:--}" "$APP"
+echo "簽章身分：${IDENTITY:-ad-hoc}"
 echo "完成 → $APP"
