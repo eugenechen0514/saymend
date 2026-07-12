@@ -18,8 +18,11 @@ final class AudioCapture: AudioCaptureService {
         self.continuation = continuation
 
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            continuation.yield(AudioChunk(buffer: buffer))
-            if let level = Self.rmsLevel(buffer) {
+            // tap buffer 的 backing store 僅在此 callback 期間有效；非同步 pump 端會延後讀取，
+            // 必須深拷貝一份再 yield，否則讀到被 AVAudioEngine 回收／覆寫的樣本，辨識輸入損毀。
+            guard let copy = Self.copyBuffer(buffer) else { return }
+            continuation.yield(AudioChunk(buffer: copy))
+            if let level = Self.rmsLevel(copy) {
                 DispatchQueue.main.async { self?.levelHandler?(level) }
             }
         }
@@ -41,6 +44,24 @@ final class AudioCapture: AudioCaptureService {
         engine.stop()
         continuation?.finish()
         continuation = nil
+    }
+
+    /// 深拷貝 tap buffer（同格式、同 frameLength），使樣本可跨執行緒延後安全讀取。
+    private static func copyBuffer(_ src: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: src.format, frameCapacity: src.frameCapacity) else { return nil }
+        copy.frameLength = src.frameLength
+        let channels = Int(src.format.channelCount)
+        let frames = Int(src.frameLength)
+        if let s = src.floatChannelData, let d = copy.floatChannelData {
+            for ch in 0..<channels { memcpy(d[ch], s[ch], frames * MemoryLayout<Float>.size) }
+        } else if let s = src.int16ChannelData, let d = copy.int16ChannelData {
+            for ch in 0..<channels { memcpy(d[ch], s[ch], frames * MemoryLayout<Int16>.size) }
+        } else if let s = src.int32ChannelData, let d = copy.int32ChannelData {
+            for ch in 0..<channels { memcpy(d[ch], s[ch], frames * MemoryLayout<Int32>.size) }
+        } else {
+            return nil
+        }
+        return copy
     }
 
     /// 0...1 的音量位準
