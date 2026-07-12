@@ -1,0 +1,75 @@
+import Testing
+@testable import SpeeckinkCore
+
+@Test func beginResetsStateAndStoresAnchor() {
+    var l = SessionLedger()
+    l.begin(axAnchor: 42)
+    #expect(l.isActive)
+    #expect(l.sessionText == "")
+    #expect(l.axAnchor == 42)
+    #expect(!l.frozen)
+    #expect(!l.canUndo)
+}
+
+@Test func commitPushesVersionAndUpdatesText() {
+    var l = SessionLedger()
+    l.begin(axAnchor: nil)
+    l.commit("你好。")
+    #expect(l.sessionText == "你好。")
+    #expect(l.canUndo)
+    l.commit("你好。今天天氣好。")
+    #expect(l.sessionText == "你好。今天天氣好。")
+}
+
+@Test func undoRestoresPreviousVersions() {
+    var l = SessionLedger()
+    l.begin(axAnchor: nil)
+    l.commit("A")
+    l.commit("AB")
+    let step1 = l.undo()
+    #expect(step1?.from == "AB")
+    #expect(step1?.to == "A")
+    #expect(l.sessionText == "A")
+    let step2 = l.undo()
+    #expect(step2?.from == "A")
+    #expect(step2?.to == "")
+    #expect(l.sessionText == "")
+    #expect(l.undo() == nil)          // 堆疊空
+    #expect(!l.canUndo)
+}
+
+@Test func correctionThenUndoRoundTrip() {
+    var l = SessionLedger()
+    l.begin(axAnchor: 7)
+    l.commit("呃你好")                  // 第一句落定
+    l.commit("你好。")                  // 修正落定（全文替換）
+    let u = l.undo()
+    #expect(u?.from == "你好。")
+    #expect(u?.to == "呃你好")
+}
+
+@Test func freezeAndArchive() {
+    var l = SessionLedger()
+    l.begin(axAnchor: nil)
+    l.commit("X")
+    l.freeze()
+    #expect(l.frozen)
+    #expect(l.isActive)               // 凍結仍算存活（文字定稿但 session 未清）
+    l.archive()
+    #expect(!l.isActive)
+    #expect(l.sessionText == "")
+    #expect(!l.frozen)
+    #expect(l.axAnchor == nil)
+    #expect(!l.canUndo)
+}
+
+@Test func beginAfterArchiveStartsFresh() {
+    var l = SessionLedger()
+    l.begin(axAnchor: 1)
+    l.commit("舊")
+    l.archive()
+    l.begin(axAnchor: nil)
+    #expect(l.sessionText == "")
+    #expect(!l.canUndo)
+    #expect(l.axAnchor == nil)
+}
