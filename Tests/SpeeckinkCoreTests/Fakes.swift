@@ -35,22 +35,35 @@ final class FakeASR: ASREngine {
 }
 
 /// 可手動放行的假潤飾服務
+///
+/// release() 與 polish() 的登記順序無關（order-independent latch）：因 polish 以
+/// fire-and-forget Task 派發，其任務體要等主 actor 讓出才起跑，呼叫端（測試）可能在
+/// 任務登記 gate *之前* 就呼叫 release()。此時把 release 記入 pendingReleases，待 polish
+/// 起跑看到額度即直接放行，避免因純值 continuation 尚未登記而永久卡死。
 final class GatedPolisher: PolishServing, @unchecked Sendable {
     var outcome: PolishOutcome = .polished("（潤飾）")
     private(set) var calls: [String] = []
     /// 若設為 false，polish 立即回傳；true 時等 release() 才回
     var gated = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var pendingReleases = 0
     func polish(utteranceRaw: String) async -> PolishOutcome {
         calls.append(utteranceRaw)
         if gated {
-            await withCheckedContinuation { waiters.append($0) }
+            if pendingReleases > 0 {
+                pendingReleases -= 1          // 先前已放行，直接通過
+            } else {
+                await withCheckedContinuation { waiters.append($0) }
+            }
         }
         return outcome
     }
     func release() {
-        waiters.forEach { $0.resume() }
-        waiters.removeAll()
+        if waiters.isEmpty {
+            pendingReleases += 1              // 尚無等待者：記帳，供之後的 polish 使用
+        } else {
+            waiters.removeFirst().resume()    // 逐一放行，維持一次 release 對應一次 polish
+        }
     }
 }
 
