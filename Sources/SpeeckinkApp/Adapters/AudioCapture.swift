@@ -11,6 +11,8 @@ final class AudioCapture: AudioCaptureService {
 
     func start() throws -> AsyncStream<AudioChunk> {
         let input = engine.inputNode
+        // 防禦性移除：確保 bus 0 沒有前一次殘留的 tap（removeTap 對空 bus 是 no-op，冪等）。
+        input.removeTap(onBus: 0)
         let format = input.outputFormat(forBus: 0)
         let (stream, continuation) = AsyncStream.makeStream(of: AudioChunk.self)
         self.continuation = continuation
@@ -22,7 +24,15 @@ final class AudioCapture: AudioCaptureService {
             }
         }
         engine.prepare()
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            // start 失敗要回滾已安裝的 tap，否則下次 installTap 在同一 bus 會拋 NSException 崩潰。
+            input.removeTap(onBus: 0)
+            continuation.finish()
+            self.continuation = nil
+            throw error
+        }
         return stream
     }
 
