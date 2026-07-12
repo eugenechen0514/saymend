@@ -32,7 +32,7 @@ public final class PolishService: PolishServing {
         do {
             let raw = try await provider.complete(
                 system: assembler.systemPrompt(),
-                user: assembler.userPayload(utteranceRaw: utteranceRaw),
+                user: assembler.userPayload(utteranceRaw: utteranceRaw, sessionText: ""),
                 timeout: Self.timeout
             )
             guard let envelope = EnvelopeParser.parse(raw), !envelope.text.isEmpty else {
