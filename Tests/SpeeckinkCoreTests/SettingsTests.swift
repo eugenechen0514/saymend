@@ -56,7 +56,11 @@ private func freshSettings() -> (AppSettings, UserDefaults) {
     #expect(HotkeyChoice.rightControl.keyCode == 62)
 }
 
-@Test func keychainStoreRoundTrip() throws {
+@Test(
+    "真 Keychain 整合測試（預設跳過；SPEECKINK_KEYCHAIN_TESTS=1 才啟用，避免 headless 環境卡解鎖對話框）",
+    .enabled(if: ProcessInfo.processInfo.environment["SPEECKINK_KEYCHAIN_TESTS"] == "1")
+)
+func keychainStoreRoundTrip() throws {
     // 整合測試：使用真 Keychain（login keychain），跑完清掉
     let store = KeychainStore(service: "io.speeckink.tests")
     try store.set("v1", forKey: "t")
