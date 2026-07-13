@@ -1,12 +1,16 @@
 import Foundation
 @testable import SpeeckinkCore
 
+enum FakeAudioError: Error { case startFailed }
+
 final class FakeAudio: AudioCaptureService {
     var levelHandler: ((Float) -> Void)?
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    var failNextStart = false
     var continuation: AsyncStream<AudioChunk>.Continuation?
     func start() throws -> AsyncStream<AudioChunk> {
+        if failNextStart { failNextStart = false; throw FakeAudioError.startFailed }
         startCount += 1
         let (stream, cont) = AsyncStream.makeStream(of: AudioChunk.self)
         continuation = cont
@@ -41,29 +45,50 @@ final class FakeASR: ASREngine {
 /// 任務登記 gate *之前* 就呼叫 release()。此時把 release 記入 pendingReleases，待 process
 /// 起跑看到額度即直接放行，避免因純值 continuation 尚未登記而永久卡死。
 final class GatedIntentService: IntentServing, @unchecked Sendable {
+    private let lock = NSLock()
     var outcome: IntentOutcome = .newContent("（潤飾）")
+    /// 佇列化 outcome：非空時每次 process 依序取出（模擬逐句不同結果）；空則用 outcome
+    var outcomeQueue: [IntentOutcome] = []
+    /// 佇列化 gate：非空時每次 process 依序取出決定該句是否等 release()；空則用 gated
+    var gateQueue: [Bool] = []
     private(set) var calls: [(raw: String, session: String)] = []
     /// 若設為 false，process 立即回傳；true 時等 release() 才回
     var gated = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var pendingReleases = 0
+    // 多個 utterance 的 process() 會在不同 executor 執行緒併發進來（controller 的 LLM 呼叫刻意平行），
+    // 共享陣列必須上鎖，否則 continuation 可能遺失造成測試永久卡住。
     func process(utteranceRaw: String, sessionText: String) async -> IntentOutcome {
-        calls.append((utteranceRaw, sessionText))
-        if gated {
-            if pendingReleases > 0 {
-                pendingReleases -= 1
-            } else {
-                await withCheckedContinuation { waiters.append($0) }
+        let (thisOutcome, thisGated): (IntentOutcome, Bool) = lock.withLock {
+            calls.append((utteranceRaw, sessionText))
+            let o = outcomeQueue.isEmpty ? outcome : outcomeQueue.removeFirst()
+            let g = gateQueue.isEmpty ? gated : gateQueue.removeFirst()
+            return (o, g)
+        }
+        if thisGated {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                let proceedNow: Bool = lock.withLock {
+                    if pendingReleases > 0 {
+                        pendingReleases -= 1
+                        return true
+                    }
+                    waiters.append(cont)
+                    return false
+                }
+                if proceedNow { cont.resume() }
             }
         }
-        return outcome
+        return thisOutcome
     }
     func release() {
-        if waiters.isEmpty {
-            pendingReleases += 1
-        } else {
-            waiters.removeFirst().resume()
+        let waiter: CheckedContinuation<Void, Never>? = lock.withLock {
+            if waiters.isEmpty {
+                pendingReleases += 1
+                return nil
+            }
+            return waiters.removeFirst()
         }
+        waiter?.resume()
     }
 }
 

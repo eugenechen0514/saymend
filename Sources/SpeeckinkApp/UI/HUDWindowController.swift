@@ -8,6 +8,9 @@ final class HUDWindowController: HUDPresenting {
     private let model = HUDModel()
     private var panel: NSPanel?
     private var hideTask: Task<Void, Never>?
+    /// notice 自動隱藏後要回復的持久狀態：延續窗（lingering）期間的 notice（已修正／已復原…）
+    /// 不能把「可修正＋復原鈕」整個藏掉——listening 靠 volatile 事件自然回復，lingering 得手動回復。
+    private var persistentState: HUDState = .hidden
 
     /// HUD 復原按鈕回呼（app 組裝時指到 controller.undoRequested）
     var onUndoTap: (() -> Void)? {
@@ -21,18 +24,23 @@ final class HUDWindowController: HUDPresenting {
         hideTask?.cancel()
         switch state {
         case .hidden:
+            persistentState = .hidden
             panel?.orderOut(nil)
-        case .listening:
-            show()
-        case .lingering:
+        case .listening, .lingering:
+            persistentState = state
             show()
         case .notice:
             show()
             hideTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(2500))
-                guard !Task.isCancelled else { return }
-                self?.model.state = .hidden
-                self?.panel?.orderOut(nil)
+                guard !Task.isCancelled, let self else { return }
+                if case .lingering = self.persistentState {
+                    self.model.state = .lingering   // 延續窗還有效：把「可修正／復原」顯示回來
+                    self.show()
+                } else {
+                    self.model.state = .hidden
+                    self.panel?.orderOut(nil)
+                }
             }
         }
     }

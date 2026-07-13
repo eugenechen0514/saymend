@@ -67,32 +67,23 @@ public final class InsertionCoordinator {
                                with newText: String,
                                axAnchor: Int?) throws -> SessionReplaceOutcome {
         guard commandSnapshot.counter == insertCounter else { return .tailAdvanced }
-        // AX 優先，且「先驗證、再退指令、最後替換」的三步順序：
-        // (1) verify 不動手 → mismatch 時欄位分毫未動；
-        // (2) keystroke 退掉尾端的指令話語（此刻游標仍在欄位末端，退格刪的就是指令）；
-        // (3) AX 範圍替換 session——替換後游標落在新文字之後＝欄位末端，狀態乾淨。
-        // 若先替換再退指令，AX 會把游標留在新 session 與指令話語之間，退格就會刪錯字。
+        // AX 優先：把「session 全文＋緊隨其後的指令話語」視為單一範圍，一次驗證、一次替換成 newText，
+        // 全程不發任何鍵盤事件——CGEvent（事件佇列）與 AX（mach port）是兩條通道，目標 App 忙碌時
+        // 服務順序無保證：若混用，遲到的退格可能改吃剛替換完的新文字（終審 finding）。
+        // mismatch 或兩步間變動時欄位皆分毫未動，直接中止或退 keystroke 全套。
         if let ax = rangeReplacer, let anchor = axAnchor {
-            switch ax.verifyRange(location: anchor, expected: expectedSessionText) {
+            let combined = expectedSessionText + commandSnapshot.text
+            switch ax.verifyRange(location: anchor, expected: combined) {
             case .mismatch:
                 return .fieldMismatch
             case .unsupported:
                 break   // 全程退 keystroke 路徑
             case .replaced:   // ＝驗證通過
-                if commandSnapshot.length > 0 {
-                    try keystroke.deleteBackward(count: commandSnapshot.length)
-                }
-                switch ax.replaceVerifiedRange(location: anchor, expected: expectedSessionText, with: newText) {
-                case .replaced:
+                if ax.replaceVerifiedRange(location: anchor, expected: combined, with: newText) == .replaced {
                     insertCounter += 1
                     return .replaced
-                case .mismatch, .unsupported:
-                    // 罕見：兩步之間狀況變了；指令已退掉、session 仍是尾端 → keystroke 補完
-                    try deleteAndRetype(expectedLength: expectedSessionText.count,
-                                        originalText: expectedSessionText,
-                                        newText: newText)
-                    return .replaced
                 }
+                // 極罕見：兩步之間狀況變了；此時什麼都沒動，退 keystroke 全套
             }
         }
         // keystroke 尾端路徑：退指令話語＋刪 session 全文＋重打

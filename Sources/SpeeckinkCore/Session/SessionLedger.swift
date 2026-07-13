@@ -5,6 +5,9 @@ public struct SessionLedger {
     public private(set) var frozen = false
     public private(set) var axAnchor: Int?
     public private(set) var isActive = false
+    /// session 世代：每次 begin 遞增（延續窗 resume 不會 begin，故不變）。
+    /// controller 的在途 LLM outcome 以此判別歸屬——archive→begin 後，舊世代 outcome 一律丟棄。
+    public private(set) var generation = 0
     private var versions: [String] = []
 
     public init() {}
@@ -17,6 +20,7 @@ public struct SessionLedger {
         versions = []
         frozen = false
         isActive = true
+        generation &+= 1
         self.axAnchor = axAnchor
     }
 

@@ -67,6 +67,8 @@ public final class DictationController {
     private var archiveAfterDrain = false
     /// 遞增 session 序號：readerTask 事件過濾，避免跨 session 污染
     private(set) var sessionID = 0
+    /// 在途（已派發、尚未 dispatch 完成）的意圖任務數：undo 按鈕的在途防護（測試經 @testable 檢視）
+    private(set) var pendingIntents = 0
 
     public init(audio: any AudioCaptureService,
                 asr: any ASREngine,
@@ -126,6 +128,12 @@ public final class DictationController {
             archiveSession()                // 延續窗中按 Esc＝提前定稿（吞掉 Esc 由熱鍵層處理）
             return
         }
+        if case .finishing = internalPhase {
+            // 排空窗中按 Esc＝中止排空並定稿——否則 Esc 被熱鍵層吞掉又無作用，整顆蒸發
+            asr.cancel()
+            archiveSession()
+            return
+        }
         guard case .listening = internalPhase else { return }
         segmenter.hardReset()
         asr.cancel()
@@ -162,6 +170,11 @@ public final class DictationController {
         guard ledger.isActive, !ledger.frozen else { return }
         guard coordinator.currentUtteranceLength == 0 else {
             hud.present(.notice("說完這句再復原"))   // 半句進行中，尾端不是可回退狀態
+            return
+        }
+        guard pendingIntents == 0 else {
+            // 最後一句的 LLM 仍在途：欄位尾端還掛著未落定的原文，此刻按長度回退必吃錯字（終審 critical）
+            hud.present(.notice("說完這句再復原"))
             return
         }
         guard ledger.canUndo else {
@@ -273,6 +286,7 @@ public final class DictationController {
                 }
             }
         } catch {
+            ledger.archive()   // 不留 idle＋isActive 的孤兒帳本（活動偵測在 idle 下不設防）
             internalPhase = .idle
             hud.present(.notice("無法啟動麥克風"))
         }
@@ -309,23 +323,42 @@ public final class DictationController {
     private func processUtterance(raw: String) {
         let snapshot = coordinator.snapshotAndBeginNext()
         let sessionBefore = ledger.sessionText
+        let generation = ledger.generation
+        let previous = lastIntentTask
+        pendingIntents += 1
         lastIntentTask = Task { [weak self] in
             guard let self else { return }
             let outcome = await self.intentService.process(utteranceRaw: raw, sessionText: sessionBefore)
+            // 串行化「套用」：LLM 呼叫照樣平行，但落地依 utterance 順序——
+            // 否則第 N 句逾時、第 N+1 句先回時，欄位與帳本會左右對調（終審 finding）。
+            _ = await previous?.value
             await MainActor.run {
-                self.dispatch(outcome, snapshot: snapshot)
+                self.dispatch(outcome, snapshot: snapshot, sessionBefore: sessionBefore, generation: generation)
             }
         }
     }
 
-    private func dispatch(_ outcome: IntentOutcome, snapshot: InsertionCoordinator.UtteranceSnapshot) {
-        guard ledger.isActive else { return }   // 延續窗過期已封存：欄位定稿，安靜放下
+    private func dispatch(_ outcome: IntentOutcome,
+                          snapshot: InsertionCoordinator.UtteranceSnapshot,
+                          sessionBefore: String,
+                          generation: Int) {
+        pendingIntents = max(0, pendingIntents - 1)
+        // 世代檢查：archive→begin 之後，舊 session 在途的 outcome 一律丟棄——
+        // 不能用 sessionID（延續窗 resume 也跳號，會誤殺同 session 的合法在途潤飾）。
+        guard ledger.isActive, ledger.generation == generation else { return }
         switch outcome {
         case .newContent(let text):
             applyNewContent(text, snapshot: snapshot)
         case .editedSession(let corrected):
+            // 基準檢查：corrected 以「呼叫當下」的全文為基礎；期間若有新內容落定＝基準過期，
+            // 直接套用會無聲抹掉後來的話（終審 finding）。降級保留指令話語並提示重說。
+            guard sessionBefore == ledger.sessionText else {
+                keepRaw(snapshot, notice: "未修正（內容已變動，請再說一次）")
+                return
+            }
             applyCorrection(corrected, commandSnapshot: snapshot)
         case .undo:
+            // undo 不需要文字基準——回退目標在「套用時」由帳本現值決定，串行化已保證順序
             performUndo(commandSnapshot: snapshot)
         case .degraded:
             if ledger.frozen {

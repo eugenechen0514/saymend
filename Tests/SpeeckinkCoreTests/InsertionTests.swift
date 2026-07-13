@@ -131,8 +131,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     #expect(ax.verifyCalls.count == 1)                      // 先驗證
     #expect(ax.calls.count == 1)                            // 再替換
     #expect(ax.calls[0].location == 42)
-    #expect(ax.calls[0].expected == "舊文")
-    #expect(key.ops == [.insert("指令"), .delete(2)])       // 只退指令，session 由 AX 換
+    #expect(ax.calls[0].expected == "舊文指令")              // session＋指令話語合併為單一範圍
+    #expect(key.ops == [.insert("指令")])                   // 全程零鍵盤事件（跨通道競態消滅）
 }
 
 @Test func replaceSessionAXMismatchAborts() throws {

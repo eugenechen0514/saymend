@@ -501,8 +501,8 @@ import Testing
     await c.lastIntentTask?.value
     #expect(ax.verifyCalls.first?.location == 42)     // session 起點錨位流進 AX 路徑
     #expect(ax.calls.first?.location == 42)
-    #expect(ax.calls.first?.expected == "星期二開會。")
-    #expect(key.ops.last == .delete(6))               // 只退指令話語；session 由 AX 替換
+    #expect(ax.calls.first?.expected == "星期二開會。欸改成星期三")   // session＋指令合併單一範圍
+    #expect(key.ops.last == .insert("欸改成星期三"))   // AX 單次整段替換：零退格（最後的鍵盤事件是指令原文上屏）
     #expect(c.ledger.sessionText == "星期三開會。")
     #expect(hud.states.contains(.notice("已修正")))
 }
@@ -594,4 +594,125 @@ import Testing
     #expect(c.isEngaged)
     c.tick(at: 19.5)                     // 延續窗過期封存
     #expect(!c.isEngaged)
+}
+
+// MARK: - 終審併發家族回歸測試（刻意在 LLM 在途時操作，不先 await）
+
+@MainActor
+@Test func undoRequestedWhileIntentInFlightRefuses() async {
+    let intent = GatedIntentService()
+    let (c, _, asr, key, _, hud) = makeController(polisher: intent)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)                 // 鎖定
+    intent.outcome = .newContent("第一句。")
+    c.handleTranscript(.finalized("第一句"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value              // 先落定一步，讓 canUndo 為真
+    intent.gated = true                        // 下一句 LLM 卡住（在途）
+    intent.outcome = .newContent("第二句。")
+    c.handleTranscript(.finalized("第二句"), at: 13.0)
+    c.hotkeyPressed(at: 14.0)
+    c.hotkeyReleased(at: 14.05)                // 結束 → 排空
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 14.2)                 // flush → 第二句 intent 在途 → lingering
+    #expect(c.isLingering)
+    #expect(c.pendingIntents == 1)
+    let opsBefore = key.ops
+    c.undoRequested()                          // 終審 critical 場景：在途時按復原
+    #expect(hud.states.contains(.notice("說完這句再復原")))
+    #expect(key.ops == opsBefore)              // 分毫未動——不可依過期長度退格
+    intent.release()
+    await c.lastIntentTask?.value
+    #expect(c.ledger.sessionText == "第一句。第二句。")   // 在途句正常落定
+    c.undoRequested()                          // 落定後復原恢復可用
+    #expect(hud.states.contains(.notice("已復原")))
+    #expect(c.ledger.sessionText == "第一句。")
+}
+
+@MainActor
+@Test func staleGenerationOutcomeIsDropped() async {
+    let intent = GatedIntentService()
+    let (c, _, asr, key, _, _) = makeController(polisher: intent)
+    c.hotkeyPressed(at: 10.0)
+    intent.gated = true
+    intent.outcome = .newContent("舊世代。")
+    c.handleTranscript(.finalized("舊句"), at: 10.5)
+    c.hotkeyReleased(at: 11.0)                 // 排空
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.1)                 // 舊句 intent 在途 → lingering
+    c.userActivityDetected(at: 11.5)           // 點擊他處 → 封存
+    #expect(!c.ledger.isActive)
+    c.hotkeyPressed(at: 12.0)                  // 立刻開新 session（begin → 世代 +1）
+    let opsBefore = key.ops
+    intent.release()                            // 舊世代 outcome 這才回來
+    await c.lastIntentTask?.value
+    #expect(key.ops == opsBefore)              // 不得對新 session 的游標位置動手
+    #expect(c.ledger.sessionText == "")        // 新帳本不受舊 outcome 鏡像污染
+}
+
+@MainActor
+@Test func editedSessionWithStaleBasisDegradesToKeepRaw() async {
+    let intent = GatedIntentService()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)                 // 鎖定
+    intent.gateQueue = [true, false]           // 第一句卡住、第二句直通
+    intent.outcomeQueue = [.newContent("第一句。"), .editedSession("被竄改的全文。")]
+    c.handleTranscript(.finalized("第一句"), at: 11.0)
+    c.tick(at: 12.6)                           // 第一句 intent 在途（gated）
+    c.handleTranscript(.finalized("欸改一下"), at: 13.0)
+    c.tick(at: 14.6)                           // 第二句（修正指令）以「不含第一句」的過期基準呼叫 LLM
+    intent.release()                            // 放行第一句；套用串行化：第一句先落地、第二句後落地
+    await c.lastIntentTask?.value
+    // 第一句因尾端已前進而保留原文（M1 設計裁決）、修正因基準過期降級 keepRaw——重點：第一句沒有被抹掉
+    #expect(c.ledger.sessionText == "第一句欸改一下")
+    #expect(!key.ops.contains(.insert("被竄改的全文。")))
+    #expect(hud.states.contains(.notice("未修正（內容已變動，請再說一次）")))
+    #expect(intent.calls.last?.session == "")   // 佐證：第二句呼叫時基準確實是過期的空全文
+}
+
+@MainActor
+@Test func outcomesApplyInUtteranceOrderEvenIfLaterReturnsFirst() async {
+    let intent = GatedIntentService()
+    let (c, _, _, key, _, _) = makeController(polisher: intent)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    intent.gateQueue = [true, false]           // 模擬第 N 句慢、第 N+1 句先返回
+    intent.outcomeQueue = [.newContent("第一句。"), .newContent("第二句。")]
+    c.handleTranscript(.finalized("第一句"), at: 11.0)
+    c.tick(at: 12.6)
+    c.handleTranscript(.finalized("第二句"), at: 13.0)
+    c.tick(at: 14.6)
+    intent.release()
+    await c.lastIntentTask?.value
+    // 串行化保證帳本與欄位順序一致：先一後二，不得左右對調。
+    // 第一句因尾端已前進而保留原文（M1 設計裁決：潤飾僅替換仍在尾端的 utterance）。
+    #expect(c.ledger.sessionText == "第一句第二句。")
+    let inserts = key.ops.compactMap { if case .insert(let s) = $0 { return s } else { return nil } }
+    let i1 = inserts.firstIndex(of: "第一句")
+    let i2 = inserts.firstIndex(of: "第二句。")
+    #expect(i1 != nil && i2 != nil && i1! < i2!)
+}
+
+@MainActor
+@Test func escapeDuringFinishingCancelsAndArchives() {
+    let (c, _, asr, _, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 11.0)                 // finishing（排空窗）
+    #expect(c.isEngaged)
+    c.escapePressed()                          // 排空窗按 Esc：中止排空、提前定稿
+    #expect(asr.cancelCount == 1)
+    #expect(!c.isEngaged)
+    #expect(!c.ledger.isActive)
+    #expect(hud.states.last == .hidden)
+}
+
+@MainActor
+@Test func audioStartFailureLeavesNoOrphanLedger() {
+    let (c, audio, _, _, _, hud) = makeController()
+    audio.failNextStart = true
+    c.hotkeyPressed(at: 10.0)
+    #expect(c.phase == .idle)
+    #expect(!c.ledger.isActive)                // 不留 idle＋isActive 孤兒（活動偵測在 idle 不設防）
+    #expect(hud.states.contains(.notice("無法啟動麥克風")))
 }
