@@ -8,8 +8,34 @@ public enum IntentOutcome: Equatable, Sendable {
     case degraded(reason: String)
 }
 
+/// LLM 呼叫的目標與語境（M3 設計裁決 7）：
+/// targetText＝可被 edit_command 修正的文字（session 全文或使用者選取）；
+/// contextBefore/After＝游標（或選取）前後窗口，只作語境不作目標。
+public struct IntentContext: Equatable, Sendable {
+    public enum Target: Equatable, Sendable { case session, selection }
+    public var targetKind: Target
+    public var targetText: String
+    public var contextBefore: String?
+    public var contextAfter: String?
+
+    public init(targetKind: Target = .session, targetText: String = "",
+                contextBefore: String? = nil, contextAfter: String? = nil) {
+        self.targetKind = targetKind
+        self.targetText = targetText
+        self.contextBefore = contextBefore
+        self.contextAfter = contextAfter
+    }
+
+    public static func session(_ text: String) -> IntentContext {
+        IntentContext(targetKind: .session, targetText: text)
+    }
+    public static func selection(_ text: String, before: String? = nil, after: String? = nil) -> IntentContext {
+        IntentContext(targetKind: .selection, targetText: text, contextBefore: before, contextAfter: after)
+    }
+}
+
 public protocol IntentServing {
-    func process(utteranceRaw: String, sessionText: String) async -> IntentOutcome
+    func process(utteranceRaw: String, context: IntentContext) async -> IntentOutcome
 }
 
 /// 意圖分類＋產文合併呼叫（規格 §3.3／§4.3）。任何失敗都回 degraded——使用者不能白說話。
@@ -30,14 +56,14 @@ public final class IntentService: IntentServing {
         self.traditionalize = traditionalize
     }
 
-    public func process(utteranceRaw: String, sessionText: String) async -> IntentOutcome {
+    public func process(utteranceRaw: String, context: IntentContext) async -> IntentOutcome {
         let lang = language()
         let assembler = PromptAssembler(language: lang)
-        let timeout = sessionText.isEmpty ? Self.polishTimeout : Self.editTimeout
+        let timeout = context.targetText.isEmpty ? Self.polishTimeout : Self.editTimeout
         do {
             let raw = try await provider.complete(
                 system: assembler.systemPrompt(),
-                user: assembler.userPayload(utteranceRaw: utteranceRaw, sessionText: sessionText),
+                user: assembler.userPayload(utteranceRaw: utteranceRaw, context: context),
                 timeout: timeout
             )
             guard let envelope = EnvelopeParser.parse(raw) else {
@@ -48,13 +74,13 @@ public final class IntentService: IntentServing {
             }
             switch envelope.intent {
             case "edit_command":
-                // 防禦：空 session 不可能有修正對象；空全文視同格式不合法
-                guard !sessionText.isEmpty, !envelope.text.isEmpty else {
+                // 防禦：空目標不可能有修正對象；空全文視同格式不合法
+                guard !context.targetText.isEmpty, !envelope.text.isEmpty else {
                     return .degraded(reason: "修正指令不成立")
                 }
                 return .editedSession(guarded(envelope.text))
             case "undo":
-                guard !sessionText.isEmpty else { return .degraded(reason: "無可復原內容") }
+                guard !context.targetText.isEmpty else { return .degraded(reason: "無可復原內容") }
                 return .undo
             default:
                 // new_content 與未知意圖一律走新內容（意圖模糊→new_content，規格 §3.3）

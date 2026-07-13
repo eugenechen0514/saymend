@@ -348,7 +348,7 @@ import Testing
     c.handleTranscript(.finalized("欸改成星期三"), at: 13.0)   // 指令話語（6 字）已上屏
     c.tick(at: 14.6)
     await c.lastIntentTask?.value
-    #expect(intent.calls.last?.session == "星期二開會。")       // 呼叫帶 session 全文
+    #expect(intent.calls.last?.context.targetText == "星期二開會。")       // 呼叫帶 session 全文
     // 退指令 6 字 → 退 session 全文 6 字 → 重打修正後全文
     #expect(Array(key.ops.suffix(3)) == [.delete(6), .delete(6), .insert("星期三開會。")])
     #expect(c.ledger.sessionText == "星期三開會。")
@@ -669,7 +669,7 @@ import Testing
     #expect(c.ledger.sessionText == "第一句欸改一下")
     #expect(!key.ops.contains(.insert("被竄改的全文。")))
     #expect(hud.states.contains(.notice("未修正（內容已變動，請再說一次）")))
-    #expect(intent.calls.last?.session == "")   // 佐證：第二句呼叫時基準確實是過期的空全文
+    #expect(intent.calls.last?.context.targetText == "")   // 佐證：第二句呼叫時基準確實是過期的空全文
 }
 
 @MainActor

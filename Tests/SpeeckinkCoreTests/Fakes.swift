@@ -53,16 +53,16 @@ final class GatedIntentService: IntentServing, @unchecked Sendable {
     var outcomeByRaw: [String: IntentOutcome] = [:]
     /// 以 utteranceRaw 指定該句要卡 gate 等 release()（未列者用 gated）
     var gatedRaws: Set<String> = []
-    private(set) var calls: [(raw: String, session: String)] = []
+    private(set) var calls: [(raw: String, context: IntentContext)] = []
     /// 若設為 false，process 立即回傳；true 時等 release() 才回
     var gated = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var pendingReleases = 0
     // 多個 utterance 的 process() 會在不同 executor 執行緒併發進來（controller 的 LLM 呼叫刻意平行），
     // 共享陣列必須上鎖，否則 continuation 可能遺失造成測試永久卡住。
-    func process(utteranceRaw: String, sessionText: String) async -> IntentOutcome {
+    func process(utteranceRaw: String, context: IntentContext) async -> IntentOutcome {
         let (thisOutcome, thisGated): (IntentOutcome, Bool) = lock.withLock {
-            calls.append((utteranceRaw, sessionText))
+            calls.append((utteranceRaw, context))
             let o = outcomeByRaw[utteranceRaw] ?? outcome
             let g = gatedRaws.contains(utteranceRaw) || gated
             return (o, g)

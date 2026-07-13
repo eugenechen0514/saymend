@@ -46,11 +46,27 @@ public struct PromptAssembler {
         [Self.coreRules, languageRule, Self.styleRules].joined(separator: "\n\n")
     }
 
-    /// user 訊息：session 全文（有才給）＋本段轉錄（規格 §3.3 的單次呼叫輸入）
-    public func userPayload(utteranceRaw: String, sessionText: String) -> String {
-        if sessionText.isEmpty {
-            return "目前沒有可修正的既有內容。\n本段轉錄：\n" + utteranceRaw
+    /// 使用者酬載（規格 §4.4 第 7 層動態上下文的 M3 子集）。
+    /// 前後文只給語境：明示模型「不要輸出它們」，防止上下文滲漏進替換結果。
+    public func userPayload(utteranceRaw: String, context: IntentContext) -> String {
+        var parts: [String] = []
+        switch context.targetKind {
+        case .selection:
+            parts.append("使用者選取了以下文字，本段轉錄若是修改指示（edit_command）就對它執行；若是新內容（new_content）就會取代它：\n" + context.targetText)
+        case .session:
+            if context.targetText.isEmpty {
+                parts.append("目前沒有可修正的既有內容。")
+            } else {
+                parts.append("session 現有全文：\n" + context.targetText)
+            }
         }
-        return "session 現有全文：\n" + sessionText + "\n\n本段轉錄：\n" + utteranceRaw
+        if let before = context.contextBefore, !before.isEmpty {
+            parts.append("游標前文（僅供理解語境，不要輸出它）：\n" + before)
+        }
+        if let after = context.contextAfter, !after.isEmpty {
+            parts.append("游標後文（僅供理解語境，不要輸出它）：\n" + after)
+        }
+        parts.append("本段轉錄：\n" + utteranceRaw)
+        return parts.joined(separator: "\n\n")
     }
 }

@@ -328,7 +328,7 @@ public final class DictationController {
         pendingIntents += 1
         lastIntentTask = Task { [weak self] in
             guard let self else { return }
-            let outcome = await self.intentService.process(utteranceRaw: raw, sessionText: sessionBefore)
+            let outcome = await self.intentService.process(utteranceRaw: raw, context: .session(sessionBefore))
             // 串行化「套用」：LLM 呼叫照樣平行，但落地依 utterance 順序——
             // 否則第 N 句逾時、第 N+1 句先回時，欄位與帳本會左右對調（終審 finding）。
             _ = await previous?.value
