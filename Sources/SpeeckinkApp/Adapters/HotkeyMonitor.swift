@@ -36,6 +36,7 @@ final class HotkeyMonitor {
             | (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.leftMouseDown.rawValue)
             | (1 << CGEventType.rightMouseDown.rawValue)
+            | (1 << CGEventType.otherMouseDown.rawValue)   // 中鍵／側鍵（部分 App 支援中鍵貼上）
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -105,7 +106,7 @@ final class HotkeyMonitor {
                 DispatchQueue.main.async { self.onUserActivity?(now) }
             }
             return Unmanaged.passUnretained(event)
-        case .leftMouseDown, .rightMouseDown:
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             if shouldEmitUserActivityForMouse(at: event.location) {
                 DispatchQueue.main.async { self.onUserActivity?(now) }
             }
