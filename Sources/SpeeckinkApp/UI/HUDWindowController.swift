@@ -18,6 +18,8 @@ final class HUDWindowController: HUDPresenting {
             panel?.orderOut(nil)
         case .listening:
             show()
+        case .lingering:
+            show()
         case .notice:
             show()
             hideTask = Task { @MainActor [weak self] in

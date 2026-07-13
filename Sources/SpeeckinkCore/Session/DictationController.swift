@@ -1,6 +1,6 @@
 import Foundation
 
-/// 聽寫狀態機（規格 §3.1–§3.4 的 M1 範圍）。
+/// 聽寫狀態機（規格 §3.1–§3.4）。
 /// 所有系統能力由 protocol 注入；時間一律由呼叫端傳入（可測試）。
 @MainActor
 public final class DictationController {
@@ -10,24 +10,31 @@ public final class DictationController {
     }
 
     public static let tapThreshold: TimeInterval = 0.3
+    /// session 延續窗（規格 §3.4）：正常結束後 8 秒內再按＝同 session 延續
+    public static let lingerWindow: TimeInterval = 8.0
 
-    /// 內部狀態機：比對外多一個 `.finishing` 排空過渡態。
-    /// endListening 後、asrStreamEnded 收尾前處於 finishing——此時 ASR 排空（drain）
-    /// 產生的尾端 finalized 仍須上屏＋進 segmenter buffer，不能被丟棄（規格「不能白說話」）。
+    /// 內部狀態機：finishing＝排空窗；lingering＝延續窗。兩者對外皆等同 idle。
     private enum InternalPhase {
         case idle
         case listening(ListeningMode)
         case finishing
+        case lingering(until: TimeInterval)
     }
     private var internalPhase: InternalPhase = .idle
 
-    /// 對外仍只有 idle / listening 兩態；內部的排空窗（finishing）對呼叫端等同 idle。
     public var phase: Phase {
         switch internalPhase {
-        case .idle, .finishing: return .idle
+        case .idle, .finishing, .lingering: return .idle
         case .listening(let mode): return .listening(mode)
         }
     }
+
+    /// 是否在 8 秒延續窗內（HUD 與測試用）
+    public var isLingering: Bool {
+        if case .lingering = internalPhase { return true }
+        return false
+    }
+
     /// 最近一次潤飾任務；測試以 await 等待完成
     public private(set) var lastPolishTask: Task<Void, Never>?
 
@@ -38,12 +45,17 @@ public final class DictationController {
     private let hud: any HUDPresenting
     private let settings: AppSettings
     private var segmenter: UtteranceSegmenter
+    /// 鐵律最後手段：原文救不回時交給剪貼簿（app 端接 NSPasteboard）
+    private let clipboardRescue: ((String) -> Void)?
+
+    /// session 帳本（測試經 @testable 檢視）
+    private(set) var ledger = SessionLedger()
 
     private var pressedAt: TimeInterval?
     private var readerTask: Task<Void, Never>?
-    private var endedByEscape = false
-    /// 遞增的 session 序號：readerTask 攜帶啟動當下的序號，事件抵達時比對，
-    /// 舊 session 的殘留事件（快速停→再開的重疊視窗）一律丟棄，避免跨 session 污染。
+    /// 60 秒靜音逾時結束：排空後直接封存，不進延續窗（規格 §3.4 逾時＝凍結觸發器）
+    private var archiveAfterDrain = false
+    /// 遞增 session 序號：readerTask 事件過濾，避免跨 session 污染
     private(set) var sessionID = 0
 
     public init(audio: any AudioCaptureService,
@@ -52,7 +64,8 @@ public final class DictationController {
                 polisher: any PolishServing,
                 hud: any HUDPresenting,
                 settings: AppSettings,
-                segmenter: UtteranceSegmenter = UtteranceSegmenter()) {
+                segmenter: UtteranceSegmenter = UtteranceSegmenter(),
+                clipboardRescue: ((String) -> Void)? = nil) {
         self.audio = audio
         self.asr = asr
         self.coordinator = coordinator
@@ -60,19 +73,20 @@ public final class DictationController {
         self.hud = hud
         self.settings = settings
         self.segmenter = segmenter
+        self.clipboardRescue = clipboardRescue
     }
 
     // MARK: - 熱鍵事件
 
     public func hotkeyPressed(at t: TimeInterval) {
         switch internalPhase {
-        case .idle, .finishing:
-            // finishing（上一 session 尚在排空）期間按下＝立刻開新 session；
-            // startListening 會取消舊 readerTask 並跳號，舊事件因此被過濾。
+        case .idle, .finishing, .lingering:
+            // finishing：上一 session 排空中按下＝立刻開新 session（跳號過濾舊事件）。
+            // lingering：延續窗內按下＝同 session 續聽（帳本延續，規格 §3.4）。
             pressedAt = t
             startListening(mode: .hold, at: t)
         case .listening:
-            pressedAt = t   // 鎖定模式下的潛在「結束 tap」；hold 下的 key repeat 只更新時間
+            pressedAt = t   // 鎖定模式的潛在「結束 tap」；hold 下的 key repeat 只更新時間
         }
     }
 
@@ -89,7 +103,7 @@ public final class DictationController {
             }
         case .listening(.locked):
             if isTap { endListening(at: t) }
-        case .idle, .finishing:
+        case .idle, .finishing, .lingering:
             break
         }
         pressedAt = nil
@@ -97,33 +111,53 @@ public final class DictationController {
 
     public func escapePressed() {
         guard case .listening = internalPhase else { return }
-        endedByEscape = true
         segmenter.hardReset()
         asr.cancel()
         audio.stop()
         try? coordinator.discardCurrentUtterance()
-        internalPhase = .idle
+        ledger.archive()                    // Esc 不進延續窗（設計裁決 3）
+        internalPhase = .idle               // 之後遲到的 stream-end 會被 asrStreamEnded 的相位守衛冪等忽略
         hud.present(.hidden)
     }
 
-    // MARK: - 週期與 ASR 事件（行為在 Task 11 完成）
+    /// 使用者手動活動（打字／滑鼠點擊／切 App；app 端由 HotkeyMonitor 與 NSWorkspace 餵入）。
+    /// 聽寫中＝凍結（文字定稿、不再改寫，錄音照常）；延續窗中＝立即封存（設計裁決 2）。
+    public func userActivityDetected(at t: TimeInterval) {
+        switch internalPhase {
+        case .listening, .finishing:
+            guard ledger.isActive, !ledger.frozen else { return }
+            ledger.freeze()
+            hud.present(.notice("偵測到手動輸入，本段不再修正"))
+        case .lingering:
+            archiveSession()
+        case .idle:
+            break
+        }
+    }
+
+    // MARK: - 週期與 ASR 事件
 
     public func tick(at t: TimeInterval) {
-        guard case .listening = internalPhase else { return }
-        process(actions: segmenter.onTick(at: t))
+        switch internalPhase {
+        case .listening:
+            process(actions: segmenter.onTick(at: t))
+        case .lingering(let until):
+            if t >= until { archiveSession() }
+        case .idle, .finishing:
+            break
+        }
     }
 
     public func handleTranscript(_ event: TranscriptEvent, at t: TimeInterval) {
         switch internalPhase {
-        case .idle:
+        case .idle, .lingering:
             return
         case .listening, .finishing:
-            break   // finishing（排空窗）期間仍須處理 finalized，不能丟
+            break   // finishing（排空窗）的尾端 finalized 仍須處理，不能丟
         }
         segmenter.onTranscript(event, at: t)
         switch event {
         case .volatile(let text):
-            // 只有真正在聽時才更新 HUD 預覽；排空窗 HUD 已隱藏，不回頭顯示 volatile。
             if case .listening(let mode) = internalPhase {
                 hud.present(.listening(mode: mode, volatile: text))
             }
@@ -137,20 +171,30 @@ public final class DictationController {
     }
 
     public func asrStreamEnded(at t: TimeInterval) {
-        defer { internalPhase = .idle }   // 排空完成才轉 idle
-        guard !endedByEscape else { endedByEscape = false; return }
+        // 相位守衛＝冪等：Esc 已直達 idle、或 readerTask 與測試直呼造成的重複 stream-end，
+        // 一律忽略——避免第二次進入把 lingering 重新上膛或重複 flush。
+        switch internalPhase {
+        case .idle, .lingering:
+            return
+        case .listening, .finishing:
+            break
+        }
         process(actions: segmenter.flush())
+        if archiveAfterDrain || ledger.frozen || !ledger.isActive {
+            archiveAfterDrain = false
+            archiveSession()
+        } else {
+            internalPhase = .lingering(until: t + Self.lingerWindow)
+            hud.present(.lingering)
+        }
     }
 
-    /// readerTask 專用入口：只處理當前 session 的 transcript，
-    /// 舊 session 的殘留事件（sid 不符）一律丟棄，避免跨 session 文字注入。
+    /// readerTask 專用入口：sid 不符的殘留事件一律丟棄
     func receiveTranscript(_ event: TranscriptEvent, session sid: Int, at t: TimeInterval) {
         guard sid == sessionID else { return }
         handleTranscript(event, at: t)
     }
 
-    /// readerTask 專用入口：只認當前 session 的串流結束，
-    /// 舊 session 的 stream-end（sid 不符）忽略，避免提早 flush 新 session 的半句。
     func receiveStreamEnd(session sid: Int, at t: TimeInterval) {
         guard sid == sessionID else { return }
         asrStreamEnded(at: t)
@@ -160,10 +204,14 @@ public final class DictationController {
 
     private func startListening(mode: ListeningMode, at t: TimeInterval) {
         do {
-            readerTask?.cancel()   // 取消上一 session 的讀取，避免殘留事件污染新 session
+            readerTask?.cancel()
+            let resuming = isLingering && ledger.isActive   // 延續窗內＝同 session 續聽
             coordinator.reset()
             segmenter.sessionStarted(at: t)
-            endedByEscape = false
+            archiveAfterDrain = false
+            if !resuming {
+                ledger.begin(axAnchor: nil)   // Task 10 接 FieldContextProviding 後帶真 anchor
+            }
             sessionID &+= 1
             let sid = sessionID
             let audioStream = try audio.start()
@@ -187,14 +235,20 @@ public final class DictationController {
     }
 
     private func endListening(at t: TimeInterval) {
-        audio.stop()             // audio 串流 finish → ASR 排空 → drain finalized → asrStreamEnded 收尾
-        internalPhase = .finishing   // 進入排空窗：drain 的尾端 finalized 仍要收，待 asrStreamEnded 才轉 idle
+        audio.stop()                 // audio finish → ASR 排空 → asrStreamEnded 收尾
+        internalPhase = .finishing
         hud.present(.hidden)
     }
 
     private func endSession(at t: TimeInterval) {
-        // 鎖定模式逾時（sessionTimedOut）走這裡
+        archiveAfterDrain = true     // 60 秒靜音逾時走這裡
         endListening(at: t)
+    }
+
+    private func archiveSession() {
+        ledger.archive()
+        internalPhase = .idle
+        hud.present(.hidden)
     }
 
     private func process(actions: [UtteranceSegmenter.Action]) {
@@ -214,16 +268,45 @@ public final class DictationController {
             guard let self else { return }
             let outcome = await self.polisher.polish(utteranceRaw: raw)
             await MainActor.run {
-                switch outcome {
-                case .polished(let text):
-                    let replaced = (try? self.coordinator.replaceTail(snapshot, with: text)) ?? false
-                    if !replaced {
-                        self.hud.present(.notice("未潤飾"))
-                    }
-                case .degraded:
-                    self.hud.present(.notice("未潤飾"))
-                }
+                self.applyPolish(outcome, snapshot: snapshot)
             }
         }
+    }
+
+    private func applyPolish(_ outcome: PolishOutcome, snapshot: InsertionCoordinator.UtteranceSnapshot) {
+        // 延續窗過期／凍結後封存：欄位已定稿（原文留存），安靜放下
+        guard ledger.isActive else { return }
+        if ledger.frozen {
+            hud.present(.notice("未潤飾"))
+            return
+        }
+        switch outcome {
+        case .polished(let text):
+            do {
+                if try coordinator.replaceTail(snapshot, with: text) {
+                    ledger.commit(ledger.sessionText + text)
+                } else {
+                    keepRaw(snapshot, notice: "未潤飾")
+                }
+            } catch InserterError.replaceFailedRestored {
+                keepRaw(snapshot, notice: "未潤飾")
+            } catch InserterError.lostText(let original) {
+                clipboardRescue?(original)
+                hud.present(.notice("插入失敗，原文已複製到剪貼簿"))
+            } catch {
+                // 其他插入錯誤：欄位狀態不明，帳本以原文鏡像（最佳努力）
+                keepRaw(snapshot, notice: "未潤飾")
+            }
+        case .degraded:
+            keepRaw(snapshot, notice: "未潤飾")
+        }
+    }
+
+    /// 原文照留：帳本入帳（欄位鏡像）＋提示
+    private func keepRaw(_ snapshot: InsertionCoordinator.UtteranceSnapshot, notice: String) {
+        if !snapshot.text.isEmpty {
+            ledger.commit(ledger.sessionText + snapshot.text)
+        }
+        hud.present(.notice(notice))
     }
 }

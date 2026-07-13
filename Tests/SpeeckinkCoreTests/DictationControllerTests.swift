@@ -205,3 +205,116 @@ import Testing
     c.asrStreamEnded(at: 10.6)
     #expect(polisher.calls.isEmpty)               // Esc 後不得潤飾
 }
+
+// MARK: - session 生命週期 v2（lingering／凍結／帳本）
+
+@MainActor
+@Test func normalEndEntersLingeringThenArchivesAt8s() {
+    let (c, _, asr, _, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 11.0)            // 長按結束 → finishing
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.2)
+    #expect(c.phase == .idle)             // 對外形狀不變
+    #expect(c.isLingering)
+    #expect(hud.states.contains(.lingering))
+    c.tick(at: 19.1)                      // 11.2 + 8 = 19.2 未到
+    #expect(c.isLingering)
+    c.tick(at: 19.3)
+    #expect(!c.isLingering)
+    #expect(hud.states.last == .hidden)
+}
+
+@MainActor
+@Test func pressDuringLingerResumesSameSessionLedger() async {
+    let polisher = GatedPolisher()
+    polisher.outcome = .polished("你好。")
+    let (c, _, asr, _, _, _) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("呃你好"), at: 10.5)
+    c.hotkeyReleased(at: 11.0)
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.2)            // flush → 潤飾
+    await c.lastPolishTask?.value
+    #expect(c.ledger.sessionText == "你好。")
+    #expect(c.isLingering)
+    c.hotkeyPressed(at: 12.0)             // 延續窗內再按 → 同 session（規格 §3.4）
+    #expect(c.phase == .listening(.hold))
+    #expect(c.ledger.sessionText == "你好。")
+    #expect(c.ledger.isActive)
+}
+
+@MainActor
+@Test func escapeArchivesImmediatelyNoLinger() {
+    let (c, _, _, _, _, _) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("丟"), at: 10.5)
+    c.escapePressed()
+    #expect(!c.isLingering)
+    #expect(!c.ledger.isActive)
+}
+
+@MainActor
+@Test func lockedTimeoutArchivesAfterDrain() {
+    let (c, audio, asr, _, _, _) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)            // 鎖定
+    c.tick(at: 75.0)                      // 60 秒靜音逾時 → 排空
+    #expect(audio.stopCount == 1)
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 75.2)
+    #expect(!c.isLingering)               // 逾時＝凍結觸發器，不進延續窗
+    #expect(!c.ledger.isActive)
+}
+
+@MainActor
+@Test func userActivityWhileListeningFreezesAndBlocksReplace() async {
+    let polisher = GatedPolisher()
+    polisher.outcome = .polished("你好。")
+    let (c, _, asr, key, _, hud) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("呃你好"), at: 10.5)
+    c.userActivityDetected(at: 10.8)      // 使用者手動打字（設計裁決 2）
+    #expect(c.ledger.frozen)
+    #expect(hud.states.contains(.notice("偵測到手動輸入，本段不再修正")))
+    c.hotkeyReleased(at: 11.5)
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.6)
+    await c.lastPolishTask?.value
+    #expect(!key.ops.contains(.delete(3)))   // 凍結後不得改寫欄位
+    #expect(!c.isLingering)                  // 凍結 session 不進延續窗
+    #expect(!c.ledger.isActive)
+}
+
+@MainActor
+@Test func userActivityDuringLingerArchives() {
+    let (c, _, asr, _, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 11.0)
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.2)
+    #expect(c.isLingering)
+    c.userActivityDetected(at: 12.0)
+    #expect(!c.isLingering)
+    #expect(!c.ledger.isActive)
+    #expect(hud.states.last == .hidden)
+}
+
+@MainActor
+@Test func commitsAccumulateInLedger() async {
+    let polisher = GatedPolisher()
+    let (c, _, _, _, _, _) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)             // 鎖定
+    polisher.outcome = .polished("第一句。")
+    c.handleTranscript(.finalized("呃第一句"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastPolishTask?.value
+    #expect(c.ledger.sessionText == "第一句。")
+    polisher.outcome = .degraded(reason: "x")
+    c.handleTranscript(.finalized("第二句原文"), at: 13.0)
+    c.tick(at: 14.6)
+    await c.lastPolishTask?.value
+    #expect(c.ledger.sessionText == "第一句。第二句原文")   // degraded 以原文入帳（欄位鏡像）
+    #expect(c.ledger.canUndo)
+}

@@ -29,6 +29,12 @@ struct HUDView: View {
                         .truncationMode(.head)
                         .frame(maxWidth: 360, alignment: .leading)
                 }
+            case .lingering:
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundStyle(.secondary)
+                Text("可修正（8 秒）")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             case .notice(let message):
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)

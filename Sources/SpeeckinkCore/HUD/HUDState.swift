@@ -3,10 +3,12 @@ public enum ListeningMode: Equatable, Sendable {
     case locked
 }
 
-/// HUD 顯示狀態（規格 §3.1／§3.5 的 M1 子集）
+/// HUD 顯示狀態（規格 §3.1／§3.3／§3.4 的 M2 子集）
 public enum HUDState: Equatable, Sendable {
     case hidden
     case listening(mode: ListeningMode, volatile: String)
+    /// 8 秒延續窗：可口頭修正／復原（規格 §3.4）
+    case lingering
     case notice(String)
 }
 
