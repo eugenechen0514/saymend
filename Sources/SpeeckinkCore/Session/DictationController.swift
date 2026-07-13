@@ -406,6 +406,35 @@ public final class DictationController {
             dispatchSelection(outcome, range: range, original: original, commandRaw: snapshot.text)
             return
         }
+        // 緩衝句的落地（M3）：這句話在 selectionPending 期間被緩衝（從未上屏），
+        // 輪到它時首句已把目標轉回 .tail。既有 tail 機械（replaceTail／keepRaw）都假設
+        // 「utterance 原文在螢幕上」，對緩衝句會退格或記帳到不存在的字——一律改走直接落地：
+        // newContent＝鍵入接在 span 尾端（游標已釘定）；editedSession 基準必然過期（首句剛改過全文）
+        // ＝提示重說；undo 用零長度指令快照（螢幕上沒有指令話語可退）。
+        if wasBuffered {
+            switch outcome {
+            case .newContent(let text):
+                do {
+                    try coordinator.insertDetached(text)
+                    ledger.commit(ledger.sessionText + text)
+                } catch {
+                    clipboardRescue?(text)
+                    hud.present(.notice("插入失敗，內容已入剪貼簿"))
+                }
+            case .editedSession:
+                hud.present(.notice("未修正（內容已變動，請再說一次）"))
+            case .undo:
+                // 零長度、「現時」counter 的指令快照：緩衝句的原快照 counter 是首句替換前取的，
+                // 首句的 replaceSelection 已推進 insertCounter，用舊 counter 必吃 tailAdvanced 而
+                // 永遠復原失敗。currentTailSnapshot() 零副作用（不動可能正在累積的下一句緩衝），
+                // text 為空——螢幕上也確實沒有指令話語可退。
+                performUndo(commandSnapshot: coordinator.currentTailSnapshot())
+            case .degraded(let reason):
+                clipboardRescue?(snapshot.text)
+                hud.present(.notice("未處理（\(reason)），轉錄已入剪貼簿"))
+            }
+            return
+        }
         switch outcome {
         case .newContent(let text):
             applyNewContent(text, snapshot: snapshot)

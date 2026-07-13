@@ -875,3 +875,118 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(audio.startCount == 0)                  // 不錄音（M2 既有行為，選取不得繞過）
     #expect(!c.ledger.isActive)
 }
+
+// MARK: - 選取 session 進階：在途後續句、凍結競態、延續窗（Task 6）
+
+@MainActor
+@Test func bufferedSecondUtteranceAppendsAfterSelectionReplaced() async {
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["改正式一點"]
+    intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
+                           "然後補一句": .newContent("補充內容。")]
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 4)
+    let (c, _, _, key, _, _) = makeController(polisher: intent, rangeReplacer: ax, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)                                // 首句在途（gated）
+    c.handleTranscript(.finalized("然後補一句"), at: 13.0)
+    c.tick(at: 14.6)                                // 第二句也被緩衝（key.ops 仍空）
+    #expect(key.ops.isEmpty)
+    intent.release()                                // 放行首句；串行化：首句先落地
+    await c.lastIntentTask?.value
+    #expect(ax.calls.first?.new == "正式版")         // 首句：AX 替換選取
+    // makeController 的 pasteThreshold 預設 100：5 字必走 keystroke（此斷言依賴該預設；
+    // paste/keystroke 門檻切換行為本身由 InsertionTests 的 fallback 測試涵蓋）
+    #expect(key.ops == [.insert("補充內容。")])      // 第二句：緩衝落地＝直接鍵入接在 span 尾端
+    #expect(c.ledger.sessionText == "正式版補充內容。")
+}
+
+@MainActor
+@Test func bufferedUndoAfterSelectionReplaceRevertsToOriginal() async {
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["改正式一點"]
+    intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
+                           "復原上一步": .undo]
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 4)
+    let (c, _, _, key, _, _) = makeController(polisher: intent, rangeReplacer: ax, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)                                // 首句在途（gated）
+    c.handleTranscript(.finalized("復原上一步"), at: 13.0)
+    c.tick(at: 14.6)                                // undo 句也被緩衝（首句尚未落地）
+    intent.release()
+    await c.lastIntentTask?.value
+    // 串行化：首句先替換選取（counter 前進），緩衝 undo 句再以「現時」counter 快照執行——
+    // 若誤用該句的舊快照，counter 過期會被 tailAdvanced 擋下、復原永遠失敗（互審 finding）
+    #expect(ax.calls.first?.new == "正式版")
+    #expect(ax.calls.last?.new == "原文字")
+    #expect(c.ledger.sessionText == "原文字")
+    #expect(key.ops.isEmpty)                        // 全程零鍵盤事件
+}
+
+@MainActor
+@Test func bufferedUtteranceAfterAbandonIsDropped() async {
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["改正式一點"]
+    intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
+                           "第二句": .newContent("第二句。")]
+    let ax = FakeRangeReplacer()
+    ax.verifyResult = .mismatch                     // 首句落地時發現選取已變 → 放棄＋封存
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 0)
+    let spy = ClipboardSpy()
+    let (c, _, _, key, _, _) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)
+    c.handleTranscript(.finalized("第二句"), at: 13.0)
+    c.tick(at: 14.6)
+    intent.release()
+    await c.lastIntentTask?.value
+    #expect(key.ops.isEmpty)                        // 封存後第二句被 isActive 守衛丟棄，欄位分毫未動
+    #expect(spy.texts == ["正式版"])
+}
+
+@MainActor
+@Test func freezeDuringSelectionPendingAbandonsToClipboard() async {
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["改正式一點"]
+    intent.outcomeByRaw = ["改正式一點": .editedSession("正式版")]
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 0)
+    let spy = ClipboardSpy()
+    let (c, _, _, key, _, _) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)                                // 在途
+    c.userActivityDetected(at: 13.0)                // 使用者動了鍵盤／滑鼠：聽寫中＝凍結
+    intent.release()
+    await c.lastIntentTask?.value
+    #expect(ax.calls.isEmpty && key.ops.isEmpty)    // 凍結後不得替換（選取完整性不明）
+    #expect(spy.texts == ["正式版"])
+}
+
+@MainActor
+@Test func lingerResumeKeepsSelectionPendingTarget() async {
+    let intent = GatedIntentService()
+    intent.outcome = .editedSession("正式版")
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 4)
+    let (c, _, asr, key, _, _) = makeController(polisher: intent, rangeReplacer: ax, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.5)   // 按住模式，沒說話就放開
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 10.6)                      // 進延續窗（ledger 帶著選取種子活著）
+    #expect(c.isLingering)
+    c.hotkeyPressed(at: 12.0); c.hotkeyReleased(at: 12.1)   // 延續窗內再按＝resume
+    c.handleTranscript(.finalized("改正式一點"), at: 13.0)
+    c.tick(at: 14.6)
+    await c.lastIntentTask?.value
+    #expect(ax.calls.last?.new == "正式版")          // resume 後選取目標仍有效
+    #expect(key.ops.isEmpty)
+}
