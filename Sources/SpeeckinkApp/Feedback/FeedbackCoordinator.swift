@@ -15,6 +15,10 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
     private var pollTimer: Timer?
     private var axObserver: AXObserver?
     private var observedElement: AXUIElement?
+    /// 本 session 的目標欄位元素：首次繪製時釘定。App 內 Tab 換欄位不觸發活動偵測，
+    /// session 不會封存，但焦點已不在原欄位——此時必須隱藏而非照 stale anchor 亂畫
+    /// （鐵律：寧可不顯示，不可畫錯位置，規格 §3.5；終審 finding）。
+    private var sessionElement: AXUIElement?
     /// 進行中的異動高亮（相對 lastUpdate.text 的 UTF-16 範圍）與其淡出起算牆鐘時間。
     /// 高亮是「最近一次異動」的短暫強調（規格 §3.5），須跨 10Hz 輪詢存活至淡出結束——
     /// 不能像早期版本那樣在 refresh() 裡把它丟掉（否則第一個 poll tick 就消失）。
@@ -52,6 +56,10 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
             diffFallback(update)                       // 無 AX 錨位：overlay 註定不可用
             return
         }
+        guard adoptOrVerifySessionElement() else {
+            overlay.hide()                             // 焦點不在 session 欄位：不畫，也不判定能力
+            return
+        }
         let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
         if capability[bundle] == false {
             diffFallback(update)
@@ -72,6 +80,7 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         stopFollowing()
         overlay.fadeOutAndHide()                       // 凍結：底線淡出（規格 §3.5）
         lastUpdate = nil
+        sessionElement = nil
         clearHighlight()
     }
 
@@ -79,7 +88,17 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         stopFollowing()
         overlay.hide()
         lastUpdate = nil
+        sessionElement = nil
         clearHighlight()
+    }
+
+    /// 首次呼叫＝把目前聚焦元素釘為 session 目標；之後＝驗證焦點仍在同一元素。
+    /// CFEqual 比較 AXUIElement 的底層 token（同一元素的兩個 wrapper 相等）。
+    private func adoptOrVerifySessionElement() -> Bool {
+        guard let focused = AXFieldAccess.focusedElement() else { return false }
+        if let pinned = sessionElement { return CFEqual(focused, pinned) }
+        sessionElement = focused
+        return true
     }
 
     private func clearHighlight() {
@@ -90,8 +109,9 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
     // MARK: - 繪製
 
     /// 回傳是否成功畫出。查詢失敗一律 false（呼叫端決定隱藏／降級）。
+    /// 一律畫在釘定的 session 元素上（呼叫端已用 adoptOrVerifySessionElement 驗過焦點）。
     private func render(_ update: FeedbackUpdate, anchor: Int) -> Bool {
-        guard let element = AXFieldAccess.focusedElement() else { return false }
+        guard let element = sessionElement else { return false }
         let length = update.text.utf16.count
         guard length > 0,
               let cgRects = AXFieldAccess.lineRects(element: element, location: anchor, utf16Length: length) else {
@@ -153,6 +173,11 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
     /// 失敗立刻隱藏並停止跟隨。
     private func refresh() {
         guard let update = lastUpdate, let anchor = update.anchor else { return }
+        guard adoptOrVerifySessionElement() else {
+            overlay.hide()                             // 焦點移走（如 App 內 Tab）：立即隱藏
+            stopFollowing()
+            return
+        }
         if !render(update, anchor: anchor) {
             overlay.hide()
             stopFollowing()
@@ -162,7 +187,7 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
     private func installAXObserverIfNeeded() {
         guard axObserver == nil,
               let app = NSWorkspace.shared.frontmostApplication,
-              let element = AXFieldAccess.focusedElement() else { return }
+              let element = sessionElement else { return }
         var observer: AXObserver?
         guard AXObserverCreate(app.processIdentifier, { _, _, _, refcon in
             guard let refcon else { return }
