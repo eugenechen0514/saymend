@@ -135,6 +135,26 @@ public final class DictationController {
         }
     }
 
+    /// HUD 復原按鈕入口（規格 §3.3：HUD 常駐「復原」；與口頭 undo 共用 performUndo）。
+    public func undoRequested() {
+        switch internalPhase {
+        case .idle:
+            return                              // 沒有 session：按鈕不該出現，防禦性忽略
+        case .listening, .finishing, .lingering:
+            break
+        }
+        guard ledger.isActive, !ledger.frozen else { return }
+        guard coordinator.currentUtteranceLength == 0 else {
+            hud.present(.notice("說完這句再復原"))   // 半句進行中，尾端不是可回退狀態
+            return
+        }
+        guard ledger.canUndo else {
+            hud.present(.notice("沒有可復原的步驟"))
+            return
+        }
+        performUndo(commandSnapshot: coordinator.snapshotAndBeginNext())   // 空快照：無指令話語可退
+    }
+
     // MARK: - 週期與 ASR 事件
 
     public func tick(at t: TimeInterval) {

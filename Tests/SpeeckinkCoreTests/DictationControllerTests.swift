@@ -402,3 +402,56 @@ import Testing
     #expect(clipboard.texts == ["呃你好"])            // 鐵律最後手段：原文進剪貼簿
     #expect(hud.states.contains(.notice("插入失敗，原文已複製到剪貼簿")))
 }
+
+@MainActor
+@Test func undoRequestedDuringLingerRevertsAndKeepsLinger() async {
+    let intent = GatedIntentService()
+    let (c, _, asr, key, _, hud) = makeController(polisher: intent)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    intent.outcome = .newContent("星期二開會。")
+    c.handleTranscript(.finalized("星期二開會"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    intent.outcome = .editedSession("星期三開會。")
+    c.handleTranscript(.finalized("改成星期三"), at: 13.0)
+    c.tick(at: 14.6)
+    await c.lastIntentTask?.value
+    c.hotkeyPressed(at: 15.0)
+    c.hotkeyReleased(at: 15.05)               // 鎖定中短按 → 結束
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 15.2)
+    #expect(c.isLingering)
+    c.undoRequested()                          // HUD 按鈕（無指令話語）
+    #expect(Array(key.ops.suffix(2)) == [.delete(6), .insert("星期二開會。")])
+    #expect(c.ledger.sessionText == "星期二開會。")
+    #expect(hud.states.contains(.notice("已復原")))
+    #expect(c.isLingering)                     // 延續窗不因復原而中斷
+}
+
+@MainActor
+@Test func undoRequestedWithNothingToUndoNotices() {
+    let (c, _, _, key, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)                  // session 開了但沒有任何 commit
+    c.undoRequested()
+    #expect(hud.states.contains(.notice("沒有可復原的步驟")))
+    #expect(key.ops.isEmpty)
+}
+
+@MainActor
+@Test func undoRequestedMidUtteranceRefuses() {
+    let (c, _, _, key, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("半句"), at: 10.5)   // 目前 utterance 尚未收尾
+    c.undoRequested()
+    #expect(hud.states.contains(.notice("說完這句再復原")))
+    #expect(!key.ops.contains(.delete(2)))
+}
+
+@MainActor
+@Test func undoRequestedWhenIdleIsNoop() {
+    let (c, _, _, _, _, hud) = makeController()
+    let statesBefore = hud.states.count
+    c.undoRequested()
+    #expect(hud.states.count == statesBefore)
+}
