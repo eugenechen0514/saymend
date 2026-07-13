@@ -6,6 +6,9 @@ final class HUDModel: ObservableObject {
     @Published var state: HUDState = .hidden
     @Published var level: Float = 0
     var onUndoTap: (() -> Void)?
+    /// 內容實際渲染尺寸回報：視窗尺寸由 controller 手動貼齊，不得走 autolayout
+    /// （macOS 26 的 NSHostingView 視窗尺寸約束會在 layout pass 內重入 update-constraints 而被 AppKit 摔例外）
+    var onContentSizeChange: ((CGSize) -> Void)?
 }
 
 /// 螢幕下緣浮條（規格 §3.1）：模式、音量、volatile 預覽、通知
@@ -47,6 +50,14 @@ struct HUDView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())
+        // fixedSize：量測永遠取理想尺寸，不受視窗當下大小壓縮——否則「先縮小再變大」的內容
+        // 會被舊視窗尺寸截斷、回報值卡死在壓縮後的大小，視窗永遠長不回來
+        .fixedSize()
+        .onGeometryChange(for: CGSize.self) { proxy in
+            proxy.size
+        } action: { size in
+            model.onContentSizeChange?(size)
+        }
     }
 }
 

@@ -11,6 +11,19 @@ final class HUDWindowController: HUDPresenting {
     /// notice 自動隱藏後要回復的持久狀態：延續窗（lingering）期間的 notice（已修正／已復原…）
     /// 不能把「可修正＋復原鈕」整個藏掉——listening 靠 volatile 事件自然回復，lingering 得手動回復。
     private var persistentState: HUDState = .hidden
+    /// SwiftUI 內容最近一次回報的實際尺寸；套用一律取最新值，過期回報自然收斂
+    private var pendingContentSize: CGSize?
+
+    init() {
+        // 視窗尺寸手動貼齊內容（onGeometryChange 回報）。回報發生在 SwiftUI layout 期間，
+        // 當下動視窗 frame 會重入 AppKit 的 update-constraints pass——macOS 26 對此直接丟
+        // NSGenericException（保險絲：pass 次數超過視窗內 view 數）。故一律 async 跳出後再套用。
+        model.onContentSizeChange = { [weak self] size in
+            guard let self else { return }
+            self.pendingContentSize = size
+            DispatchQueue.main.async { self.applyContentSize() }
+        }
+    }
 
     /// HUD 復原按鈕回呼（app 組裝時指到 controller.undoRequested）
     var onUndoTap: (() -> Void)? {
@@ -62,10 +75,24 @@ final class HUDWindowController: HUDPresenting {
         if panel == nil { panel = makePanel() }
         positionAtBottomCenter()
         panel?.orderFrontRegardless()   // 不 activate、不搶焦點
+        // 狀態切換後內容尺寸可能已變；就算 onGeometryChange 因尺寸相同不再回報，也要補一次貼齊
+        DispatchQueue.main.async { [weak self] in self?.applyContentSize() }
+    }
+
+    /// 把視窗貼齊內容膠囊的實際尺寸並重新置中。視窗緊貼內容是 containsScreenPoint 的
+    /// 語意基礎（判「點在 HUD 上」不能把透明邊當自家），不能改成固定大視窗置中內容。
+    private func applyContentSize() {
+        guard let panel, panel.isVisible, let size = pendingContentSize else { return }
+        guard panel.frame.size != size else { return }
+        panel.setContentSize(size)
+        positionAtBottomCenter()
     }
 
     private func makePanel() -> NSPanel {
         let hosting = NSHostingView(rootView: HUDView(model: model))
+        // 鐵律：不讓 NSHostingView 以 autolayout 約束驅動視窗尺寸（macOS 26 會在 layout pass
+        // 內重入 update-constraints 觸發 NSGenericException 崩潰）。尺寸走 applyContentSize。
+        hosting.sizingOptions = []
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 44),
             styleMask: [.borderless, .nonactivatingPanel],
