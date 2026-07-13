@@ -51,7 +51,8 @@ public final class DictationController {
     private let coordinator: InsertionCoordinator
     private let intentService: any IntentServing
     private let hud: any HUDPresenting
-    private let settings: AppSettings
+    /// @testable 可見：session 語系覆蓋等 M4 設定的斷言需直接讀取（規格 §4.5）
+    let settings: AppSettings
     private var segmenter: UtteranceSegmenter
     /// 鐵律最後手段：原文救不回時交給剪貼簿（app 端接 NSPasteboard）
     private let clipboardRescue: ((String) -> Void)?
@@ -367,6 +368,7 @@ public final class DictationController {
         internalPhase = .idle
         hud.present(.hidden)
         sessionTarget = .tail               // 封存即重置目標模式
+        settings.sessionLanguageOverride = nil   // per-session 臨時覆蓋隨封存失效（規格 §4.5）
     }
 
     /// 密碼欄位中途切入：立即停止錄音與辨識、封存 session、不上屏任何後續文字（規格 §5.3）。

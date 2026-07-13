@@ -42,6 +42,10 @@ public final class AppSettings {
         static let llmBaseURL = "llmBaseURL"
         static let llmModel = "llmModel"
         static let asrLocale = "asrLocaleIdentifier"
+        static let customSystemPrompt = "customSystemPrompt"
+        static let styleRulesOverride = "styleRulesOverride"
+        static let historyEnabled = "historyEnabled"
+        static let historyRetentionDays = "historyRetentionDays"
     }
 
     private let defaults: UserDefaults
@@ -76,6 +80,40 @@ public final class AppSettings {
         get { defaults.string(forKey: K.asrLocale) ?? "zh-TW" }
         set { defaults.set(newValue, forKey: K.asrLocale) }
     }
+
+    /// prompt 第 4 層：使用者全域自訂 system prompt（規格 §4.4；空字串＝未設定）
+    public var customSystemPrompt: String {
+        get { defaults.string(forKey: K.customSystemPrompt) ?? "" }
+        set { defaults.set(newValue, forKey: K.customSystemPrompt) }
+    }
+
+    /// prompt 第 3 層覆寫：nil＝用內建預設（規格 §4.11「做成可編輯的輸出風格設定」）
+    public var styleRulesOverride: String? {
+        get {
+            let v = defaults.string(forKey: K.styleRulesOverride)
+            return (v?.isEmpty ?? true) ? nil : v
+        }
+        set { defaults.set(newValue ?? "", forKey: K.styleRulesOverride) }
+    }
+
+    /// 聽寫歷史開關（規格 §4.9；預設開，供回查除錯）
+    public var historyEnabled: Bool {
+        get { defaults.object(forKey: K.historyEnabled) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: K.historyEnabled) }
+    }
+
+    /// 歷史保留天數（規格 §4.9「可設保留天數」；啟動時清除過期）
+    public var historyRetentionDays: Int {
+        get {
+            let v = defaults.integer(forKey: K.historyRetentionDays)
+            return v > 0 ? v : 30
+        }
+        set { defaults.set(newValue, forKey: K.historyRetentionDays) }
+    }
+
+    /// per-session 臨時語系覆蓋（規格 §4.5 快速切換）。純記憶體：不持久化，
+    /// session 封存時由 DictationController 清除。解析序：本值 > profile 固定語系 > outputLanguage。
+    public var sessionLanguageOverride: OutputLanguage?
 
     public var llmAPIKey: String? {
         get { try? secrets.get(forKey: Self.apiKeyKey) }

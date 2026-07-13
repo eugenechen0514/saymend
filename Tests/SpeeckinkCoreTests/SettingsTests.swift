@@ -70,3 +70,29 @@ func keychainStoreRoundTrip() throws {
     try store.delete(forKey: "t")
     #expect(try store.get(forKey: "t") == nil)
 }
+
+@Test func m4SettingsRoundTripWithDefaults() {
+    let suite = "test-\(UUID().uuidString)"
+    let s = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+    #expect(s.customSystemPrompt == "")
+    #expect(s.styleRulesOverride == nil)
+    #expect(s.historyEnabled)
+    #expect(s.historyRetentionDays == 30)
+    s.customSystemPrompt = "簽名 --E"
+    s.styleRulesOverride = "半形標點"
+    s.historyEnabled = false
+    s.historyRetentionDays = 7
+    let reloaded = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+    #expect(reloaded.customSystemPrompt == "簽名 --E")
+    #expect(reloaded.styleRulesOverride == "半形標點")
+    #expect(!reloaded.historyEnabled)
+    #expect(reloaded.historyRetentionDays == 7)
+}
+
+@Test func sessionLanguageOverrideIsTransient() {
+    let suite = "test-\(UUID().uuidString)"
+    let s = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+    s.sessionLanguageOverride = .english
+    let reloaded = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+    #expect(reloaded.sessionLanguageOverride == nil)   // 不持久化
+}

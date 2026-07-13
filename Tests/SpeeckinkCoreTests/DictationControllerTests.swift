@@ -1087,3 +1087,17 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     #expect(spy.texts == ["第一句"])                             // 鐵律最後手段：原文進剪貼簿
 }
+
+/// 規格 §4.5「per-session 臨時覆蓋」：session 結束（封存）即失效
+@MainActor
+@Test func sessionLanguageOverrideClearsOnArchive() {
+    let (c, _, asr, _, _, _) = makeController()
+    c.settings.sessionLanguageOverride = .english
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 11.0)                      // 長按結束 → 排空
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.1)                      // 延續窗（session 未結束，覆蓋仍在）
+    #expect(c.settings.sessionLanguageOverride == .english)
+    c.escapePressed()                               // 延續窗 Esc ＝ 封存
+    #expect(c.settings.sessionLanguageOverride == nil)
+}
