@@ -14,6 +14,14 @@ public final class InsertionCoordinator {
         case fieldMismatch     // AX 校驗不符（外力改動欄位）：放棄且呼叫端應凍結
     }
 
+    /// 選取替換結果（規格 §3.6）。與 SessionReplaceOutcome 分開：語意不同（selectionChanged
+    /// ＝放棄且結果進 HUD 供複製；fieldMismatch＝凍結）。
+    public enum SelectionReplaceOutcome: Equatable {
+        case replaced
+        case selectionChanged   // AX 校驗不符或兩步間變動：選取已不是快照當下的樣子，放棄
+        case unsupported        // 無 AX 範圍能力：呼叫端改走「打字蓋選取」＋立即凍結
+    }
+
     private let keystroke: any TextInserter
     private let paste: any TextInserter
     private let rangeReplacer: (any SessionRangeReplacing)?
@@ -45,6 +53,50 @@ public final class InsertionCoordinator {
         insertCounter += 1
     }
 
+    /// 緩衝模式（選取即目標，M3 設計裁決 1）：finalized 只記帳不上屏。
+    /// 不動 insertCounter——螢幕上什麼都沒發生。
+    public func accumulateFinalized(_ text: String) {
+        currentUtteranceText += text
+    }
+
+    /// 緩衝模式的 Esc：清掉帳本。螢幕上本來就沒有字，發任何鍵盤事件都是錯的。
+    public func clearCurrentUtterance() {
+        currentUtteranceText = ""
+    }
+
+    /// 不掛 utterance 帳本的直接插入：「打字蓋選取」降級與緩衝後續句落地用。
+    /// 走 insertWithFallback（長度門檻選 paste／keystroke），成功即 counter 前進。
+    public func insertDetached(_ text: String) throws {
+        guard !text.isEmpty else { return }
+        try insertWithFallback(text)
+        insertCounter += 1
+    }
+
+    /// 零長度、現時 counter 的指令快照（零副作用，不動 currentUtteranceText）。
+    /// 緩衝 undo 專用：緩衝句從未上屏、無指令話語可退，但 counter 必須是「現在」的值——
+    /// 用該句在首句替換前取的舊快照，replaceSession 會誤判 tailAdvanced。
+    public func currentTailSnapshot() -> UtteranceSnapshot {
+        UtteranceSnapshot(text: "", counter: insertCounter)
+    }
+
+    /// 選取範圍替換（規格 §3.6）：AX 專屬——選取在欄位中段，keystroke 退格重打不適用。
+    /// 校驗不符或兩步間變動一律放棄（selectionChanged）：AX 失敗可能留下活選取，
+    /// 任何 keystroke 收尾都會把選取吃掉（同 M2 終審「兩通道不混用」finding）。
+    public func replaceSelection(location: Int, expected: String, with newText: String) -> SelectionReplaceOutcome {
+        guard let ax = rangeReplacer else { return .unsupported }
+        switch ax.verifyRange(location: location, expected: expected) {
+        case .unsupported: return .unsupported
+        case .mismatch: return .selectionChanged
+        case .replaced:
+            if ax.replaceVerifiedRange(location: location, expected: expected, with: newText) == .replaced {
+                insertCounter += 1
+                currentUtteranceText = ""
+                return .replaced
+            }
+            return .selectionChanged
+        }
+    }
+
     /// 關閉目前 utterance 帳本並開新的；回傳舊帳本快照供潤飾／修正使用。
     public func snapshotAndBeginNext() -> UtteranceSnapshot {
         let snap = UtteranceSnapshot(text: currentUtteranceText, counter: insertCounter)
@@ -70,7 +122,8 @@ public final class InsertionCoordinator {
         // AX 優先：把「session 全文＋緊隨其後的指令話語」視為單一範圍，一次驗證、一次替換成 newText，
         // 全程不發任何鍵盤事件——CGEvent（事件佇列）與 AX（mach port）是兩條通道，目標 App 忙碌時
         // 服務順序無保證：若混用，遲到的退格可能改吃剛替換完的新文字（終審 finding）。
-        // mismatch 或兩步間變動時欄位皆分毫未動，直接中止或退 keystroke 全套。
+        // mismatch 或兩步間變動一律中止（AX 動過欄位後不得再落 keystroke）；
+        // 只有 unsupported（AX 從未動過欄位）才走 keystroke 全套。
         if let ax = rangeReplacer, let anchor = axAnchor {
             let combined = expectedSessionText + commandSnapshot.text
             switch ax.verifyRange(location: anchor, expected: combined) {
@@ -83,7 +136,9 @@ public final class InsertionCoordinator {
                     insertCounter += 1
                     return .replaced
                 }
-                // 極罕見：兩步之間狀況變了；此時什麼都沒動，退 keystroke 全套
+                // 兩步間變動：AXInserter 失敗回滾只保證「嘗試」收攏游標，可能留下活選取；
+                // 落 keystroke 會把活選取整段吃掉（M2 遺留債）。判 fieldMismatch，呼叫端凍結。
+                return .fieldMismatch
             }
         }
         // keystroke 尾端路徑：退指令話語＋刪 session 全文＋重打
