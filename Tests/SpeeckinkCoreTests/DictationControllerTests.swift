@@ -656,8 +656,9 @@ import Testing
     let (c, _, _, key, _, hud) = makeController(polisher: intent)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)                 // 鎖定
-    intent.gateQueue = [true, false]           // 第一句卡住、第二句直通
-    intent.outcomeQueue = [.newContent("第一句。"), .editedSession("被竄改的全文。")]
+    intent.gatedRaws = ["第一句"]              // 第一句卡住、第二句直通
+    intent.outcomeByRaw = ["第一句": .newContent("第一句。"),
+                           "欸改一下": .editedSession("被竄改的全文。")]
     c.handleTranscript(.finalized("第一句"), at: 11.0)
     c.tick(at: 12.6)                           // 第一句 intent 在途（gated）
     c.handleTranscript(.finalized("欸改一下"), at: 13.0)
@@ -677,8 +678,9 @@ import Testing
     let (c, _, _, key, _, _) = makeController(polisher: intent)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
-    intent.gateQueue = [true, false]           // 模擬第 N 句慢、第 N+1 句先返回
-    intent.outcomeQueue = [.newContent("第一句。"), .newContent("第二句。")]
+    intent.gatedRaws = ["第一句"]              // 模擬第 N 句慢、第 N+1 句先返回
+    intent.outcomeByRaw = ["第一句": .newContent("第一句。"),
+                           "第二句": .newContent("第二句。")]
     c.handleTranscript(.finalized("第一句"), at: 11.0)
     c.tick(at: 12.6)
     c.handleTranscript(.finalized("第二句"), at: 13.0)

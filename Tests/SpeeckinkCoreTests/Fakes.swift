@@ -47,10 +47,12 @@ final class FakeASR: ASREngine {
 final class GatedIntentService: IntentServing, @unchecked Sendable {
     private let lock = NSLock()
     var outcome: IntentOutcome = .newContent("（潤飾）")
-    /// 佇列化 outcome：非空時每次 process 依序取出（模擬逐句不同結果）；空則用 outcome
-    var outcomeQueue: [IntentOutcome] = []
-    /// 佇列化 gate：非空時每次 process 依序取出決定該句是否等 release()；空則用 gated
-    var gateQueue: [Bool] = []
+    /// 以 utteranceRaw 指定該句的 outcome（未列者用 outcome）。
+    /// 不可用「呼叫順序」佇列：controller 刻意讓多句 LLM 呼叫平行，兩個 process() 搶鎖的
+    /// 順序與句序無關，佇列會在負載下把 outcome/gate 配錯句（實測 flaky）。
+    var outcomeByRaw: [String: IntentOutcome] = [:]
+    /// 以 utteranceRaw 指定該句要卡 gate 等 release()（未列者用 gated）
+    var gatedRaws: Set<String> = []
     private(set) var calls: [(raw: String, session: String)] = []
     /// 若設為 false，process 立即回傳；true 時等 release() 才回
     var gated = false
@@ -61,8 +63,8 @@ final class GatedIntentService: IntentServing, @unchecked Sendable {
     func process(utteranceRaw: String, sessionText: String) async -> IntentOutcome {
         let (thisOutcome, thisGated): (IntentOutcome, Bool) = lock.withLock {
             calls.append((utteranceRaw, sessionText))
-            let o = outcomeQueue.isEmpty ? outcome : outcomeQueue.removeFirst()
-            let g = gateQueue.isEmpty ? gated : gateQueue.removeFirst()
+            let o = outcomeByRaw[utteranceRaw] ?? outcome
+            let g = gatedRaws.contains(utteranceRaw) || gated
             return (o, g)
         }
         if thisGated {
