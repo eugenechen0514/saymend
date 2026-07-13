@@ -39,7 +39,7 @@ final class HUDWindowController: HUDPresenting {
         case .hidden:
             persistentState = .hidden
             panel?.orderOut(nil)
-        case .listening, .lingering:
+        case .listening, .lingering, .selectionListening:
             persistentState = state
             show()
         case .notice:

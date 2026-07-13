@@ -718,3 +718,160 @@ import Testing
     #expect(!c.ledger.isActive)                // 不留 idle＋isActive 孤兒（活動偵測在 idle 不設防）
     #expect(hud.states.contains(.notice("無法啟動麥克風")))
 }
+
+// MARK: - 選取即目標（規格 §3.6，M3 設計裁決 1–4）
+
+/// 便利：帶選取的欄位快照
+private func selectionField(_ text: String, location: Int) -> FieldContext {
+    FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: location,
+                 selectedRange: .init(location: location, length: text.utf16.count),
+                 selectedText: text)
+}
+
+@MainActor
+@Test func selectionEditCommandReplacesSelectionWithoutTyping() async {
+    let intent = GatedIntentService()
+    intent.outcome = .editedSession("正式問候語")
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("嗨大家好喔", location: 3)
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)                     // 鎖定
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    #expect(key.ops.isEmpty)                       // 緩衝模式：全程零鍵盤事件
+    #expect(ax.calls.count == 1)
+    #expect(ax.calls[0].location == 3 && ax.calls[0].expected == "嗨大家好喔" && ax.calls[0].new == "正式問候語")
+    #expect(c.ledger.sessionText == "正式問候語")
+    #expect(c.ledger.canUndo)                      // 復原可回到原選取文字
+    #expect(hud.states.contains(.notice("已替換選取")))
+}
+
+@MainActor
+@Test func selectionNewContentAlsoReplacesSelection() async {
+    let intent = GatedIntentService()
+    intent.outcome = .newContent("大家好。")
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("嗨嗨", location: 0)
+    let (c, _, _, key, _, _) = makeController(polisher: intent, rangeReplacer: ax, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("大家好"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    #expect(ax.calls.last?.new == "大家好。")       // 取代選取（與選字後打字同語意）
+    #expect(key.ops.isEmpty)
+}
+
+@MainActor
+@Test func selectionIntentCarriesSelectionContext() async {
+    let intent = GatedIntentService()
+    let reader = FakeFieldReader()
+    var field = selectionField("目標文字", location: 5)
+    field.contextBefore = "前文"
+    field.contextAfter = "後文"
+    reader.context = field
+    let (c, _, _, _, _, _) = makeController(polisher: intent, rangeReplacer: FakeRangeReplacer(), fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改一下"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    let ctx = intent.calls.last?.context
+    #expect(ctx?.targetKind == .selection)
+    #expect(ctx?.targetText == "目標文字")
+    #expect(ctx?.contextBefore == "前文" && ctx?.contextAfter == "後文")
+}
+
+@MainActor
+@Test func selectionChangedAbandonsToClipboardAndArchives() async {
+    let intent = GatedIntentService()
+    intent.outcome = .editedSession("結果文字")
+    let ax = FakeRangeReplacer()
+    ax.verifyResult = .mismatch                    // 使用者點了別處，選取已變
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原選取", location: 2)
+    let spy = ClipboardSpy()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改一下"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    #expect(spy.texts == ["結果文字"])              // 結果進剪貼簿供貼上（規格 §3.6）
+    #expect(key.ops.isEmpty)                       // 欄位分毫未動
+    #expect(!c.ledger.isActive)                    // session 結束
+    #expect(hud.states.contains(.notice("選取已變動，結果已入剪貼簿")))
+}
+
+@MainActor
+@Test func selectionWithoutAXTypesOverAndFreezes() async {
+    let intent = GatedIntentService()
+    intent.outcome = .newContent("替換文。")
+    let reader = FakeFieldReader()
+    reader.context = selectionField("舊字", location: 0)
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: nil, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("替換文"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    #expect(key.ops == [.insert("替換文。")])       // 打字蓋選取（系統原生行為）
+    #expect(c.ledger.frozen)                       // 立即凍結：無 AX 不可續改（M3 設計裁決 3）
+    #expect(c.ledger.sessionText == "替換文。")
+    #expect(hud.states.contains(.notice("已取代選取（此 App 不支援後續語音修正）")))
+}
+
+@MainActor
+@Test func selectionEscDiscardsBufferWithoutBackspace() {
+    let intent = GatedIntentService()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("選取", location: 0)
+    let (c, _, _, key, _, _) = makeController(polisher: intent, rangeReplacer: FakeRangeReplacer(), fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("講到一半"), at: 11.0)
+    c.escapePressed()
+    #expect(key.ops.isEmpty)                       // 螢幕上本來就沒字，不得退格
+}
+
+@MainActor
+@Test func selectionVolatileShowsSelectionListeningHUD() {
+    let intent = GatedIntentService()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("選取", location: 0)
+    let (c, _, _, _, _, hud) = makeController(polisher: intent, rangeReplacer: FakeRangeReplacer(), fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.volatile("欸"), at: 11.0)
+    #expect(hud.states.contains(.selectionListening(mode: .locked, volatile: "欸")))
+}
+
+@MainActor
+@Test func selectionUndoAfterReplaceRestoresOriginalText() async {
+    let intent = GatedIntentService()
+    intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"), "復原上一步": .undo]
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 4)
+    let (c, _, _, _, _, _) = makeController(polisher: intent, rangeReplacer: ax, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value                   // 首句落地，session 轉常規
+    c.handleTranscript(.finalized("復原上一步"), at: 14.0)
+    c.tick(at: 15.6)
+    await c.lastIntentTask?.value
+    #expect(ax.calls.last?.new == "原文字")          // 復原＝物理換回原選取文字
+    #expect(c.ledger.sessionText == "原文字")
+}
+
+@MainActor
+@Test func secureFieldWinsOverSelection() {
+    let intent = GatedIntentService()
+    let reader = FakeFieldReader()
+    var field = selectionField("password123", location: 0)
+    field.isSecure = true
+    reader.context = field
+    let (c, audio, _, _, _, _) = makeController(polisher: intent, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    #expect(audio.startCount == 0)                  // 不錄音（M2 既有行為，選取不得繞過）
+    #expect(!c.ledger.isActive)
+}

@@ -34,6 +34,19 @@ struct HUDView: View {
                         .frame(maxWidth: 360, alignment: .leading)
                 }
                 UndoPill(action: model.onUndoTap)
+            case .selectionListening(_, let volatile):
+                Image(systemName: "character.cursor.ibeam")
+                    .foregroundStyle(.orange)
+                LevelBar(level: model.level)
+                Text("改寫選取中")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !volatile.isEmpty {
+                    Text(volatile)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                        .frame(maxWidth: 360, alignment: .leading)
+                }
             case .lingering:
                 Image(systemName: "clock.arrow.circlepath")
                     .foregroundStyle(.secondary)

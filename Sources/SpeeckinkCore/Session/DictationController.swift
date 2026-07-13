@@ -70,6 +70,19 @@ public final class DictationController {
     /// 在途（已派發、尚未 dispatch 完成）的意圖任務數：undo 按鈕的在途防護（測試經 @testable 檢視）
     private(set) var pendingIntents = 0
 
+    /// 選取即目標（規格 §3.6，M3 設計裁決 1–3）。
+    /// selectionPending＝已鎖定選取為替換目標、尚未落地：finalized 全部緩衝不上屏
+    /// （打字會蓋掉選取），意圖解析完成才一次替換。首次替換成功即轉回 .tail——
+    /// AXInserter 已把游標釘在新 span 尾端，「session 即尾端」恢復成立，後續修正走 M2 機械。
+    private enum SessionTarget: Equatable {
+        case tail
+        case selectionPending(range: FieldContext.SelectedRange, original: String)
+    }
+    private var sessionTarget: SessionTarget = .tail
+    /// 熱鍵按下當下的前後文窗口（LLM 語境；tail 與 selection 模式皆用）
+    private var capturedContextBefore: String?
+    private var capturedContextAfter: String?
+
     public init(audio: any AudioCaptureService,
                 asr: any ASREngine,
                 coordinator: InsertionCoordinator,
@@ -111,7 +124,7 @@ public final class DictationController {
         case .listening(.hold):
             if isTap {
                 internalPhase = .listening(.locked)
-                hud.present(.listening(mode: .locked, volatile: ""))
+                presentListening(mode: .locked, volatile: "")
             } else {
                 endListening(at: t)
             }
@@ -138,7 +151,11 @@ public final class DictationController {
         segmenter.hardReset()
         asr.cancel()
         audio.stop()
-        try? coordinator.discardCurrentUtterance()
+        if case .selectionPending = sessionTarget {
+            coordinator.clearCurrentUtterance()        // 緩衝：螢幕沒字，不得退格
+        } else {
+            try? coordinator.discardCurrentUtterance()
+        }
         ledger.archive()                    // Esc 不進延續窗（設計裁決 3）
         internalPhase = .idle               // 之後遲到的 stream-end 會被 asrStreamEnded 的相位守衛冪等忽略
         hud.present(.hidden)
@@ -208,14 +225,28 @@ public final class DictationController {
         switch event {
         case .volatile(let text):
             if case .listening(let mode) = internalPhase {
-                hud.present(.listening(mode: mode, volatile: text))
+                presentListening(mode: mode, volatile: text)
             }
         case .finalized(let text):
-            do {
-                try coordinator.insertFinalized(text)
-            } catch {
-                hud.present(.notice("插入失敗"))
+            if case .selectionPending = sessionTarget {
+                coordinator.accumulateFinalized(text)      // 緩衝：不上屏（M3 設計裁決 1）
+            } else {
+                do {
+                    try coordinator.insertFinalized(text)
+                } catch {
+                    hud.present(.notice("插入失敗"))
+                }
             }
+        }
+    }
+
+    /// 聽寫中的 HUD 狀態依 sessionTarget 分流：選取目標模式顯示 selectionListening
+    /// （緩衝不上屏，volatile 是使用者唯一的「聽到了」回饋），一般模式維持 listening。
+    private func presentListening(mode: ListeningMode, volatile: String) {
+        if case .selectionPending = sessionTarget {
+            hud.present(.selectionListening(mode: mode, volatile: volatile))
+        } else {
+            hud.present(.listening(mode: mode, volatile: volatile))
         }
     }
 
@@ -266,15 +297,24 @@ public final class DictationController {
             coordinator.reset()
             segmenter.sessionStarted(at: t)
             archiveAfterDrain = false
+            capturedContextBefore = field.contextBefore
+            capturedContextAfter = field.contextAfter
             if !resuming {
-                ledger.begin(axAnchor: field.caretLocation)   // UTF-16 單位，僅 AX 路徑使用
+                if field.hasSelection, let range = field.selectedRange, let original = field.selectedText {
+                    // 選取即目標：anchor＝選取起點，帳本以原選取文字為種子（undo 可回到它）
+                    sessionTarget = .selectionPending(range: range, original: original)
+                    ledger.begin(axAnchor: range.location, initialText: original)
+                } else {
+                    sessionTarget = .tail
+                    ledger.begin(axAnchor: field.caretLocation)   // UTF-16 單位，僅 AX 路徑使用
+                }
             }
             sessionID &+= 1
             let sid = sessionID
             let audioStream = try audio.start()
             let events = asr.start(audio: audioStream, localeIdentifier: settings.asrLocaleIdentifier)
             internalPhase = .listening(mode)
-            hud.present(.listening(mode: mode, volatile: ""))
+            presentListening(mode: mode, volatile: "")
             readerTask = Task { [weak self] in
                 for await event in events {
                     await MainActor.run {
@@ -307,6 +347,7 @@ public final class DictationController {
         ledger.archive()
         internalPhase = .idle
         hud.present(.hidden)
+        sessionTarget = .tail               // 封存即重置目標模式
     }
 
     private func process(actions: [UtteranceSegmenter.Action]) {
@@ -324,16 +365,29 @@ public final class DictationController {
         let snapshot = coordinator.snapshotAndBeginNext()
         let sessionBefore = ledger.sessionText
         let generation = ledger.generation
+        // LLM 目標依 sessionTarget 分流（M3 設計裁決 7）：選取目標模式的 targetText＝原選取文字
+        let context: IntentContext
+        switch sessionTarget {
+        case .tail:
+            context = IntentContext(targetKind: .session, targetText: sessionBefore,
+                                    contextBefore: capturedContextBefore, contextAfter: capturedContextAfter)
+        case .selectionPending(_, let original):
+            context = IntentContext(targetKind: .selection, targetText: original,
+                                    contextBefore: capturedContextBefore, contextAfter: capturedContextAfter)
+        }
+        // 這句話是否在 selectionPending 期間被緩衝（從未上屏）——dispatch 時據此走緩衝落地路徑
+        let wasBuffered = { if case .selectionPending = sessionTarget { return true }; return false }()
         let previous = lastIntentTask
         pendingIntents += 1
         lastIntentTask = Task { [weak self] in
             guard let self else { return }
-            let outcome = await self.intentService.process(utteranceRaw: raw, context: .session(sessionBefore))
+            let outcome = await self.intentService.process(utteranceRaw: raw, context: context)
             // 串行化「套用」：LLM 呼叫照樣平行，但落地依 utterance 順序——
             // 否則第 N 句逾時、第 N+1 句先回時，欄位與帳本會左右對調（終審 finding）。
             _ = await previous?.value
             await MainActor.run {
-                self.dispatch(outcome, snapshot: snapshot, sessionBefore: sessionBefore, generation: generation)
+                self.dispatch(outcome, snapshot: snapshot, sessionBefore: sessionBefore,
+                              generation: generation, wasBuffered: wasBuffered)
             }
         }
     }
@@ -341,11 +395,17 @@ public final class DictationController {
     private func dispatch(_ outcome: IntentOutcome,
                           snapshot: InsertionCoordinator.UtteranceSnapshot,
                           sessionBefore: String,
-                          generation: Int) {
+                          generation: Int,
+                          wasBuffered: Bool) {
         pendingIntents = max(0, pendingIntents - 1)
         // 世代檢查：archive→begin 之後，舊 session 在途的 outcome 一律丟棄——
         // 不能用 sessionID（延續窗 resume 也跳號，會誤殺同 session 的合法在途潤飾）。
         guard ledger.isActive, ledger.generation == generation else { return }
+        // 選取目標尚未落地：pending 期間的所有 outcome 一律走選取分派（首次替換的三種結局）
+        if case .selectionPending(let range, let original) = sessionTarget {
+            dispatchSelection(outcome, range: range, original: original, commandRaw: snapshot.text)
+            return
+        }
         switch outcome {
         case .newContent(let text):
             applyNewContent(text, snapshot: snapshot)
@@ -412,6 +472,56 @@ public final class DictationController {
         } catch {
             ledger.freeze()   // 欄位狀態不明：凍結保平安
             hud.present(.notice("修正失敗"))
+        }
+    }
+
+    /// 選取 session 的意圖分派（規格 §3.6）。undo 在首句前沒有意義；degraded 時
+    /// 不動選取（M3 設計裁決 4：寧可不動不可亂改）——緩衝模式沒有「原文照留」可言，raw 從未上屏。
+    private func dispatchSelection(_ outcome: IntentOutcome, range: FieldContext.SelectedRange,
+                                   original: String, commandRaw: String) {
+        switch outcome {
+        case .newContent(let text), .editedSession(let text):
+            applySelectionReplacement(text, range: range, original: original)
+        case .undo:
+            hud.present(.notice("沒有可復原的內容"))
+        case .degraded(let reason):
+            // M3 設計裁決 4：LLM 失敗不動選取（寧可不動不可亂改），轉錄入剪貼簿
+            clipboardRescue?(commandRaw)
+            hud.present(.notice("未替換（\(reason)），轉錄已入剪貼簿"))
+        }
+    }
+
+    /// 一次性替換選取範圍。三種結局（M3 設計裁決 3）：
+    /// replaced＝轉常規 session；selectionChanged＝放棄、結果入剪貼簿、封存；
+    /// unsupported＝打字蓋選取＋立即凍結（無 AX 不可續改）。
+    private func applySelectionReplacement(_ text: String, range: FieldContext.SelectedRange, original: String) {
+        guard !ledger.frozen else {                 // 聽寫中手動活動已凍結：選取完整性不明，放棄
+            clipboardRescue?(text)
+            archiveSession()
+            hud.present(.notice("選取已變動，結果已入剪貼簿"))
+            return
+        }
+        switch coordinator.replaceSelection(location: range.location, expected: original, with: text) {
+        case .replaced:
+            ledger.commit(text)
+            sessionTarget = .tail
+            hud.present(.notice("已替換選取"))
+        case .selectionChanged:
+            clipboardRescue?(text)
+            archiveSession()
+            hud.present(.notice("選取已變動，結果已入剪貼簿"))
+        case .unsupported:
+            do {
+                try coordinator.insertDetached(text)
+                ledger.commit(text)
+                ledger.freeze()
+                sessionTarget = .tail
+                hud.present(.notice("已取代選取（此 App 不支援後續語音修正）"))
+            } catch {
+                clipboardRescue?(text)
+                archiveSession()
+                hud.present(.notice("無法替換，結果已入剪貼簿"))
+            }
         }
     }
 
