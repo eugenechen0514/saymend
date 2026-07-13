@@ -41,6 +41,79 @@ enum AXFieldAccess {
         guard lower < upper else { return "" }
         return String(decoding: units[lower..<upper], as: UTF16.self)
     }
+
+    /// 單一範圍的螢幕外接矩形（kAXBoundsForRangeParameterizedAttribute，CG 座標原點左上）。
+    static func boundsForRange(element: AXUIElement, location: Int, length: Int) -> CGRect? {
+        var range = CFRange(location: location, length: length)
+        guard let rangeValue = AXValueCreate(.cfRange, &range) else { return nil }
+        var rectRef: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+                  element, kAXBoundsForRangeParameterizedAttribute as CFString,
+                  rangeValue, &rectRef) == .success,
+              let rectValue = rectRef, CFGetTypeID(rectValue) == AXValueGetTypeID() else { return nil }
+        var rect = CGRect.zero
+        guard AXValueGetValue(rectValue as! AXValue, .cgRect, &rect),
+              rect.width.isFinite, rect.height.isFinite, !rect.isNull,
+              rect.height > 0 else { return nil }        // 零高＝App 回了假值，寧可不畫
+        return rect
+    }
+
+    /// index 所在行號（kAXLineForIndexParameterizedAttribute）
+    private static func lineForIndex(element: AXUIElement, index: Int) -> Int? {
+        var idx = index
+        guard let param = CFNumberCreate(kCFAllocatorDefault, .intType, &idx) else { return nil }
+        var lineRef: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+                  element, kAXLineForIndexParameterizedAttribute as CFString,
+                  param, &lineRef) == .success,
+              let number = lineRef as? Int else { return nil }
+        return number
+    }
+
+    /// 行號的 UTF-16 範圍（kAXRangeForLineParameterizedAttribute）
+    private static func rangeForLine(element: AXUIElement, line: Int) -> CFRange? {
+        var l = line
+        guard let param = CFNumberCreate(kCFAllocatorDefault, .intType, &l) else { return nil }
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+                  element, kAXRangeForLineParameterizedAttribute as CFString,
+                  param, &rangeRef) == .success,
+              let rangeValue = rangeRef, CFGetTypeID(rangeValue) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) else { return nil }
+        return range
+    }
+
+    /// 範圍的逐行矩形（規格 §3.5：多行 span 逐行查詢逐行畫）。
+    /// 鐵律：任何一步失敗、迴圈不前進、超過 maxLines 沒畫完 → 回 nil，呼叫端立刻隱藏／降級。
+    /// 單行欄位（不支援行查詢）退化為整段一顆矩形。
+    static func lineRects(element: AXUIElement, location: Int, utf16Length: Int,
+                          maxLines: Int = 40) -> [CGRect]? {
+        guard utf16Length > 0 else { return [] }
+        let end = location + utf16Length
+        // 行查詢不可用（如 NSTextField 單行欄位）：整段一顆
+        guard lineForIndex(element: element, index: location) != nil else {
+            return boundsForRange(element: element, location: location, length: utf16Length).map { [$0] }
+        }
+        var rects: [CGRect] = []
+        var cursor = location
+        var lines = 0
+        while cursor < end {
+            guard lines < maxLines,
+                  let line = lineForIndex(element: element, index: cursor),
+                  let lineRange = rangeForLine(element: element, line: line) else { return nil }
+            let lineEnd = lineRange.location + lineRange.length
+            let subEnd = min(end, lineEnd)
+            guard subEnd > cursor else { return nil }    // 不前進＝App 回了矛盾值，放棄
+            guard let rect = boundsForRange(element: element, location: cursor, length: subEnd - cursor) else {
+                return nil
+            }
+            rects.append(rect)
+            cursor = subEnd
+            lines += 1
+        }
+        return rects
+    }
 }
 
 /// 聚焦欄位快照：secure 偵測＋游標錨位（UTF-16）
