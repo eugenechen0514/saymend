@@ -58,6 +58,22 @@ struct HUDView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
                 Text(message).font(.caption)
+            case .diff(let windows):
+                Image(systemName: "text.magnifyingglass")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(windows.prefix(3).enumerated()), id: \.offset) { _, window in
+                        Text(Self.attributed(window))
+                            .font(.caption)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    if windows.count > 3 {
+                        Text("…共 \(windows.count) 處異動")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         }
         .padding(.horizontal, 14)
@@ -71,6 +87,29 @@ struct HUDView: View {
         } action: { size in
             model.onContentSizeChange?(size)
         }
+    }
+
+    /// diff 窗口 → 富文字：刪除＝刪除線＋紅、 新增＝底線（規格 §3.5）
+    static func attributed(_ window: DiffWindow) -> AttributedString {
+        var out = AttributedString()
+        for op in window.ops {
+            switch op {
+            case .kept(let t):
+                var seg = AttributedString(t)
+                seg.foregroundColor = .secondary
+                out += seg
+            case .deleted(let t):
+                var seg = AttributedString(t)
+                seg.strikethroughStyle = .single
+                seg.foregroundColor = .red
+                out += seg
+            case .added(let t):
+                var seg = AttributedString(t)
+                seg.underlineStyle = .single
+                out += seg
+            }
+        }
+        return out
     }
 }
 

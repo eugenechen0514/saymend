@@ -42,10 +42,12 @@ final class HUDWindowController: HUDPresenting {
         case .listening, .lingering, .selectionListening:
             persistentState = state
             show()
-        case .notice:
+        case .notice, .diff:
             show()
+            let duration: Duration = { if case .diff = state { return .milliseconds(4000) }
+                                       return .milliseconds(2500) }()
             hideTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(2500))
+                try? await Task.sleep(for: duration)
                 guard !Task.isCancelled, let self else { return }
                 if case .lingering = self.persistentState {
                     self.model.state = .lingering   // 延續窗還有效：把「可修正／復原」顯示回來

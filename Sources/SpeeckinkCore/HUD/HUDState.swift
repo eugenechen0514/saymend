@@ -12,6 +12,8 @@ public enum HUDState: Equatable, Sendable {
     /// 8 秒延續窗：可口頭修正／復原（規格 §3.4）
     case lingering
     case notice(String)
+    /// 最近異動的 inline diff（規格 §3.5 降級）：overlay 不可用時在 HUD 呈現
+    case diff([DiffWindow])
 }
 
 public protocol HUDPresenting: AnyObject {
