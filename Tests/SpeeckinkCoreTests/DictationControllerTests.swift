@@ -990,3 +990,38 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(ax.calls.last?.new == "正式版")          // resume 後選取目標仍有效
     #expect(key.ops.isEmpty)
 }
+
+// MARK: - M2 債清償：密碼欄位聽寫中切入、lostText 剪貼簿急救
+
+@MainActor
+@Test func secureFieldMidSessionStopsInsertionAndSession() {
+    let intent = GatedIntentService()
+    let reader = FakeFieldReader()
+    let (c, audio, asr, key, _, hud) = makeController(polisher: intent, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)      // 鎖定
+    c.handleTranscript(.finalized("正常內容"), at: 11.0)
+    #expect(key.ops == [.insert("正常內容")])
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: true)   // 焦點移進密碼欄
+    c.handleTranscript(.finalized("這段不可上屏"), at: 12.0)
+    #expect(key.ops == [.insert("正常內容")])                   // 一個字都不准再進欄位
+    #expect(!c.ledger.isActive)                                 // session 硬停
+    #expect(audio.stopCount == 1)                               // 不再錄音（規格 §5.3）
+    #expect(asr.cancelCount == 1)
+    #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
+}
+
+@MainActor
+@Test func lostTextFallsBackToClipboardRescue() async {
+    let intent = GatedIntentService()
+    intent.outcome = .newContent("第一句。")
+    let paste = RecordingInserter()
+    let spy = ClipboardSpy()
+    let (c, _, _, key, _, _) = makeController(polisher: intent, pasteInserter: paste, clipboard: spy)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("第一句"), at: 11.0)          // 原文上屏成功
+    key.failInsertsRemaining = 2                                // 之後的插入全失敗：
+    paste.failInsertsRemaining = 2                              // 新文（主/副）＋原文回復（主/副）
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    #expect(spy.texts == ["第一句"])                             // 鐵律最後手段：原文進剪貼簿
+}

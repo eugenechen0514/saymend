@@ -234,6 +234,12 @@ public final class DictationController {
                 presentListening(mode: mode, volatile: text)
             }
         case .finalized(let text):
+            // M2 遺留債：聽寫中焦點切進密碼欄位（Tab、程式切換焦點——滑鼠/鍵盤活動已由凍結涵蓋，
+            // 但焦點可以不經這兩者移動）。規格 §5.3：密碼欄位一個字都不能進。硬停整個 session。
+            if let field = fieldReader?.snapshot(), field.isSecure {
+                abortForSecureField()
+                return
+            }
             if case .selectionPending = sessionTarget {
                 coordinator.accumulateFinalized(text)      // 緩衝：不上屏（M3 設計裁決 1）
             } else {
@@ -358,6 +364,17 @@ public final class DictationController {
         internalPhase = .idle
         hud.present(.hidden)
         sessionTarget = .tail               // 封存即重置目標模式
+    }
+
+    /// 密碼欄位中途切入：立即停止錄音與辨識、封存 session、不上屏任何後續文字（規格 §5.3）。
+    /// 停止順序比照 escapePressed 的「聽寫中」路徑（segmenter.hardReset／asr.cancel／audio.stop），
+    /// 僅通知文字不同。hud.present 須在 archiveSession（會發 .hidden）之後，否則 notice 被蓋掉。
+    private func abortForSecureField() {
+        segmenter.hardReset()
+        asr.cancel()
+        audio.stop()
+        archiveSession()
+        hud.present(.notice("密碼欄位不聽寫"))
     }
 
     private func process(actions: [UtteranceSegmenter.Action]) {
