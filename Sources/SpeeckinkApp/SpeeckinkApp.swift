@@ -38,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private(set) var controller: DictationController!
     private let hud = HUDWindowController()
+    private let overlay = OverlayWindowController()
+    private var feedbackCoordinator: FeedbackCoordinator!
     private var hotkeyMonitor: HotkeyMonitor!
     private var tickTask: Task<Void, Never>?
     private let audio = AudioCapture()
@@ -67,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             language: { [settings] in settings.outputLanguage },
             traditionalize: traditionalize
         )
+        feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: hud)
         controller = DictationController(
             audio: audio,
             asr: SpeechAnalyzerEngine(),
@@ -79,7 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
             },
-            fieldReader: axReader
+            fieldReader: axReader,
+            feedback: feedbackCoordinator
         )
         audio.levelHandler = { [weak self] level in self?.hud.updateLevel(level) }
 
