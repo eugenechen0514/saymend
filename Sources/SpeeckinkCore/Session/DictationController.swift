@@ -35,6 +35,14 @@ public final class DictationController {
         return false
     }
 
+    /// 是否有進行中的 session 工作（listening／排空窗 finishing／延續窗 lingering）。
+    /// app 層以此 gate「吞 Esc」與「使用者活動偵測」——若只看 phase，排空窗會被誤判 idle，
+    /// 排空期間的手動打字就餵不進 userActivityDetected，在途的潤飾回來會退格吃掉使用者的字。
+    public var isEngaged: Bool {
+        if case .idle = internalPhase { return false }
+        return true
+    }
+
     /// 最近一次意圖處理任務；測試以 await 等待完成
     public private(set) var lastIntentTask: Task<Void, Never>?
 

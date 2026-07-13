@@ -91,7 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             hotkey: { [settings] in settings.hotkey },
             isCapturing: { [weak self] in
                 guard let self else { return false }
-                return self.controller.phase != .idle || self.controller.isLingering
+                // isEngaged 涵蓋排空窗（finishing）：該窗內的手動打字也必須觸發凍結
+                return self.controller.isEngaged
             }
         )
         // 落在自家 HUD 上的滑鼠點擊交給 HUD 復原按鈕，不算使用者活動（規格 §3.3 HUD 常駐復原）

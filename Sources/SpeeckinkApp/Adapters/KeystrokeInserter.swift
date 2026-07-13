@@ -21,6 +21,10 @@ final class KeystrokeInserter: TextInserter {
             }
             down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
             up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+            // 清空修飾旗標：熱鍵是「按住右 Cmd」，combinedSessionState 會把實際按住的修飾鍵
+            // 疊到合成事件上（鍵入變 Cmd+A 全選、退格變 Cmd+Delete 刪到行首），必須顯式歸零。
+            down.flags = []
+            up.flags = []
             down.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
             up.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
             down.post(tap: .cghidEventTap)
@@ -36,6 +40,9 @@ final class KeystrokeInserter: TextInserter {
                   let up = CGEvent(keyboardEventSource: source, virtualKey: Self.deleteKeyCode, keyDown: false) else {
                 throw InserterError.postFailed
             }
+            // 同上：避免實際按住的右 Cmd 讓退格變成 Cmd+Delete
+            down.flags = []
+            up.flags = []
             down.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
             up.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
             down.post(tap: .cghidEventTap)

@@ -579,3 +579,19 @@ import Testing
         #expect(c.isLingering)                     // 復原不中斷延續窗
     }
 }
+
+@MainActor
+@Test func isEngagedCoversFinishingAndLingeringWindows() {
+    let (c, _, asr, _, _, _) = makeController()
+    #expect(!c.isEngaged)
+    c.hotkeyPressed(at: 10.0)
+    #expect(c.isEngaged)                 // listening
+    c.hotkeyReleased(at: 11.0)           // 長按結束 → finishing（排空窗）
+    #expect(c.phase == .idle)            // 對外 phase 看不出 finishing——
+    #expect(c.isEngaged)                 // ——但 app 層必須繼續吞 Esc、偵測使用者活動
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.2)           // → lingering
+    #expect(c.isEngaged)
+    c.tick(at: 19.5)                     // 延續窗過期封存
+    #expect(!c.isEngaged)
+}
