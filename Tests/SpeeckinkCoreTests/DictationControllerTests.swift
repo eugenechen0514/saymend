@@ -455,3 +455,64 @@ import Testing
     c.undoRequested()
     #expect(hud.states.count == statesBefore)
 }
+
+@MainActor
+@Test func secureFieldRefusesListening() {
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: true, caretLocation: nil)
+    let (c, audio, _, _, _, hud) = makeController(fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    #expect(c.phase == .idle)
+    #expect(audio.startCount == 0)                    // 不錄音（規格 §5.3）
+    #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
+    #expect(!c.ledger.isActive)
+}
+
+@MainActor
+@Test func axAnchorFlowsIntoCorrection() async {
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 42)
+    let ax = FakeRangeReplacer()                      // verify／replace 預設 .replaced
+    let intent = GatedIntentService()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    intent.outcome = .newContent("星期二開會。")
+    c.handleTranscript(.finalized("星期二開會"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    intent.outcome = .editedSession("星期三開會。")
+    c.handleTranscript(.finalized("欸改成星期三"), at: 13.0)
+    c.tick(at: 14.6)
+    await c.lastIntentTask?.value
+    #expect(ax.verifyCalls.first?.location == 42)     // session 起點錨位流進 AX 路徑
+    #expect(ax.calls.first?.location == 42)
+    #expect(ax.calls.first?.expected == "星期二開會。")
+    #expect(key.ops.last == .delete(6))               // 只退指令話語；session 由 AX 替換
+    #expect(c.ledger.sessionText == "星期三開會。")
+    #expect(hud.states.contains(.notice("已修正")))
+}
+
+@MainActor
+@Test func axMismatchFreezesSession() async {
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 0)
+    let ax = FakeRangeReplacer(); ax.verifyResult = .mismatch
+    let intent = GatedIntentService()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    intent.outcome = .newContent("內容。")
+    c.handleTranscript(.finalized("內容"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    intent.outcome = .editedSession("改。")
+    c.handleTranscript(.finalized("改一下"), at: 13.0)
+    let opsBefore = key.ops.count
+    c.tick(at: 14.6)
+    await c.lastIntentTask?.value
+    #expect(hud.states.contains(.notice("欄位已被外部改動，本段停止修正")))
+    #expect(c.ledger.frozen)
+    #expect(key.ops.count == opsBefore)               // 指令話語留在欄位、分毫未動
+    #expect(c.ledger.sessionText == "內容。")
+}

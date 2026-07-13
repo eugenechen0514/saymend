@@ -47,6 +47,8 @@ public final class DictationController {
     private var segmenter: UtteranceSegmenter
     /// 鐵律最後手段：原文救不回時交給剪貼簿（app 端接 NSPasteboard）
     private let clipboardRescue: ((String) -> Void)?
+    /// 聚焦欄位快照：密碼欄位拒絕聽寫、session 起點取 AX 錨位（規格 §4.6／§5.3）
+    private let fieldReader: (any FieldContextProviding)?
 
     /// session 帳本（測試經 @testable 檢視）
     private(set) var ledger = SessionLedger()
@@ -65,7 +67,8 @@ public final class DictationController {
                 hud: any HUDPresenting,
                 settings: AppSettings,
                 segmenter: UtteranceSegmenter = UtteranceSegmenter(),
-                clipboardRescue: ((String) -> Void)? = nil) {
+                clipboardRescue: ((String) -> Void)? = nil,
+                fieldReader: (any FieldContextProviding)? = nil) {
         self.audio = audio
         self.asr = asr
         self.coordinator = coordinator
@@ -74,6 +77,7 @@ public final class DictationController {
         self.settings = settings
         self.segmenter = segmenter
         self.clipboardRescue = clipboardRescue
+        self.fieldReader = fieldReader
     }
 
     // MARK: - 熱鍵事件
@@ -223,6 +227,14 @@ public final class DictationController {
     // MARK: - 內部
 
     private func startListening(mode: ListeningMode, at t: TimeInterval) {
+        // 密碼欄位拒絕（規格 §5.3）：不錄音、不送 LLM、不開 session
+        let field = fieldReader?.snapshot() ?? FieldContext()
+        if field.isSecure {
+            ledger.archive()
+            internalPhase = .idle
+            hud.present(.notice("密碼欄位不聽寫"))
+            return
+        }
         do {
             readerTask?.cancel()
             let resuming = isLingering && ledger.isActive   // 延續窗內＝同 session 續聽
@@ -230,7 +242,7 @@ public final class DictationController {
             segmenter.sessionStarted(at: t)
             archiveAfterDrain = false
             if !resuming {
-                ledger.begin(axAnchor: nil)   // Task 10 接 FieldContextProviding 後帶真 anchor
+                ledger.begin(axAnchor: field.caretLocation)   // UTF-16 單位，僅 AX 路徑使用
             }
             sessionID &+= 1
             let sid = sessionID

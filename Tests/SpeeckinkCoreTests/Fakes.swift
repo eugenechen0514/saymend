@@ -78,13 +78,19 @@ final class FakeHUD: HUDPresenting {
     func present(_ state: HUDState) { states.append(state) }
 }
 
+final class FakeFieldReader: FieldContextProviding {
+    var context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: nil)
+    func snapshot() -> FieldContext { context }
+}
+
 @MainActor
 func makeController(
     polisher: GatedIntentService = GatedIntentService(),
     pasteThreshold: Int = 100,
     pasteInserter: RecordingInserter = RecordingInserter(),
     rangeReplacer: FakeRangeReplacer? = nil,
-    clipboard: ClipboardSpy? = nil
+    clipboard: ClipboardSpy? = nil,
+    fieldReader: FakeFieldReader? = nil
 ) -> (DictationController, FakeAudio, FakeASR, RecordingInserter, GatedIntentService, FakeHUD) {
     let audio = FakeAudio()
     let asr = FakeASR()
@@ -97,7 +103,8 @@ func makeController(
     let controller = DictationController(
         audio: audio, asr: asr, coordinator: coordinator,
         intent: polisher, hud: hud, settings: settings,
-        clipboardRescue: clipboard.map { spy in { spy.rescue($0) } }
+        clipboardRescue: clipboard.map { spy in { spy.rescue($0) } },
+        fieldReader: fieldReader
     )
     return (controller, audio, asr, key, polisher, hud)
 }
