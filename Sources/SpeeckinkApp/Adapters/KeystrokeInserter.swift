@@ -8,6 +8,10 @@ final class KeystrokeInserter: TextInserter {
     private let source = CGEventSource(stateID: .combinedSessionState)
     private static let deleteKeyCode: CGKeyCode = 51
 
+    /// 本 App 合成事件的識別標記（Global Constraints）："SPEK"。
+    /// HotkeyMonitor 據此把自家鍵入排除在「使用者活動」之外，避免自我凍結。
+    static let syntheticMarker: Int64 = 0x5350454B
+
     func insert(_ text: String) throws {
         for chunk in TypingChunker.chunks(of: text, maxUTF16: 20) {
             var units = Array(chunk.utf16)
@@ -17,6 +21,8 @@ final class KeystrokeInserter: TextInserter {
             }
             down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
             up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+            down.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
+            up.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
             usleep(3000)   // 3ms 間隔，避免部分 App 丟事件
@@ -30,6 +36,8 @@ final class KeystrokeInserter: TextInserter {
                   let up = CGEvent(keyboardEventSource: source, virtualKey: Self.deleteKeyCode, keyDown: false) else {
                 throw InserterError.postFailed
             }
+            down.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
+            up.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
             usleep(3000)

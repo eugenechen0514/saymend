@@ -114,6 +114,10 @@ public final class DictationController {
     }
 
     public func escapePressed() {
+        if isLingering {
+            archiveSession()                // 延續窗中按 Esc＝提前定稿（吞掉 Esc 由熱鍵層處理）
+            return
+        }
         guard case .listening = internalPhase else { return }
         segmenter.hardReset()
         asr.cancel()

@@ -27,6 +27,8 @@ final class PasteInserter: TextInserter {
         }
         down.flags = .maskCommand
         up.flags = .maskCommand
+        down.setIntegerValueField(.eventSourceUserData, value: KeystrokeInserter.syntheticMarker)
+        up.setIntegerValueField(.eventSourceUserData, value: KeystrokeInserter.syntheticMarker)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
 

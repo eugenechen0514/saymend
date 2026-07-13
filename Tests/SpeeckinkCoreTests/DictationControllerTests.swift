@@ -255,6 +255,20 @@ import Testing
 }
 
 @MainActor
+@Test func escapeDuringLingerArchives() {
+    let (c, _, asr, _, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 11.0)
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.2)
+    #expect(c.isLingering)
+    c.escapePressed()                       // 延續窗中按 Esc＝提前定稿
+    #expect(!c.isLingering)
+    #expect(!c.ledger.isActive)
+    #expect(hud.states.last == .hidden)
+}
+
+@MainActor
 @Test func lockedTimeoutArchivesAfterDrain() {
     let (c, audio, asr, _, _, _) = makeController()
     c.hotkeyPressed(at: 10.0)

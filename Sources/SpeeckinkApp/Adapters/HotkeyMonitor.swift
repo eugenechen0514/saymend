@@ -8,6 +8,8 @@ final class HotkeyMonitor {
     var onPress: ((TimeInterval) -> Void)?
     var onRelease: ((TimeInterval) -> Void)?
     var onEscape: (() -> Void)?
+    /// 使用者手動活動（非自家合成的 keyDown、滑鼠按下）；只在 isCapturing() 時發出
+    var onUserActivity: ((TimeInterval) -> Void)?
 
     private let hotkey: () -> HotkeyChoice
     private let isCapturing: () -> Bool
@@ -25,7 +27,10 @@ final class HotkeyMonitor {
     enum HotkeyError: Error { case tapCreationFailed }
 
     func start() throws {
-        let mask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
+        let mask = (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.leftMouseDown.rawValue)
+            | (1 << CGEventType.rightMouseDown.rawValue)
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -74,10 +79,22 @@ final class HotkeyMonitor {
             }
             return Unmanaged.passUnretained(event)
         case .keyDown:
+            // 自家合成事件不算使用者活動（Global Constraints：避免自我凍結）
+            if event.getIntegerValueField(.eventSourceUserData) == KeystrokeInserter.syntheticMarker {
+                return Unmanaged.passUnretained(event)
+            }
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
             if keyCode == Self.escapeKeyCode, isCapturing() {
                 DispatchQueue.main.async { self.onEscape?() }
                 return nil   // 吞掉 Esc，不讓目標 App 收到
+            }
+            if isCapturing() {
+                DispatchQueue.main.async { self.onUserActivity?(now) }
+            }
+            return Unmanaged.passUnretained(event)
+        case .leftMouseDown, .rightMouseDown:
+            if isCapturing() {
+                DispatchQueue.main.async { self.onUserActivity?(now) }
             }
             return Unmanaged.passUnretained(event)
         default:
