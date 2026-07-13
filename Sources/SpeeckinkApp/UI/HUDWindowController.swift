@@ -9,6 +9,12 @@ final class HUDWindowController: HUDPresenting {
     private var panel: NSPanel?
     private var hideTask: Task<Void, Never>?
 
+    /// HUD 復原按鈕回呼（app 組裝時指到 controller.undoRequested）
+    var onUndoTap: (() -> Void)? {
+        get { model.onUndoTap }
+        set { model.onUndoTap = newValue }
+    }
+
     func present(_ state: HUDState) {
         assert(Thread.isMainThread)
         model.state = state

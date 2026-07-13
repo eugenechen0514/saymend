@@ -5,6 +5,7 @@ import SpeeckinkCore
 final class HUDModel: ObservableObject {
     @Published var state: HUDState = .hidden
     @Published var level: Float = 0
+    var onUndoTap: (() -> Void)?
 }
 
 /// 螢幕下緣浮條（規格 §3.1）：模式、音量、volatile 預覽、通知
@@ -29,12 +30,14 @@ struct HUDView: View {
                         .truncationMode(.head)
                         .frame(maxWidth: 360, alignment: .leading)
                 }
+                UndoPill(action: model.onUndoTap)
             case .lingering:
                 Image(systemName: "clock.arrow.circlepath")
                     .foregroundStyle(.secondary)
-                Text("可修正（8 秒）")
+                Text("可修正（8 秒內可續說／復原）")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                UndoPill(action: model.onUndoTap)
             case .notice(let message):
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
@@ -44,6 +47,19 @@ struct HUDView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())
+    }
+}
+
+/// 復原鈕：規格 §3.3「HUD 常駐復原」。onTapGesture 在 nonactivating panel 上可點且不搶焦點。
+struct UndoPill: View {
+    var action: (() -> Void)?
+    var body: some View {
+        Text("復原")
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(.quaternary, in: Capsule())
+            .onTapGesture { action?() }
     }
 }
 

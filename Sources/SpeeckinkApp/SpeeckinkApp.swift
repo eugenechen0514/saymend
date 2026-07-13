@@ -48,7 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
 
-        let coordinator = InsertionCoordinator(keystroke: keystroke, paste: PasteInserter())
+        let axInserter = AXInserter()
+        let axReader = AXFieldReader()
+        let coordinator = InsertionCoordinator(keystroke: keystroke, paste: PasteInserter(),
+                                               rangeReplacer: axInserter)
         let provider = OpenAICompatProvider(configProvider: { [settings] in settings.openAIConfig() })
         // 簡繁保險絲初始化失敗不得無聲吞掉（規格 §5.1）：一次性 HUD 通知後以無保險絲模式續行。
         // apply() 本身不會 throw，init 是唯一失敗點。
@@ -70,15 +73,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             coordinator: coordinator,
             intent: intentService,
             hud: hud,
-            settings: settings
+            settings: settings,
+            clipboardRescue: { text in
+                // 鐵律最後手段：原文進剪貼簿
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            },
+            fieldReader: axReader
         )
         audio.levelHandler = { [weak self] level in self?.hud.updateLevel(level) }
+
+        hud.onUndoTap = { [weak self] in
+            Task { @MainActor in self?.controller.undoRequested() }
+        }
 
         hotkeyMonitor = HotkeyMonitor(
             hotkey: { [settings] in settings.hotkey },
             isCapturing: { [weak self] in
                 guard let self else { return false }
-                return self.controller.phase != .idle
+                return self.controller.phase != .idle || self.controller.isLingering
             }
         )
         hotkeyMonitor.onPress = { [weak self] t in
@@ -97,6 +110,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             Task { @MainActor in
                 self?.controller.escapePressed()
                 self?.refreshStatus()
+            }
+        }
+        hotkeyMonitor.onUserActivity = { [weak self] t in
+            Task { @MainActor in
+                self?.controller.userActivityDetected(at: t)
+                self?.refreshStatus()
+            }
+        }
+        // 切換前景 App＝使用者活動（規格 §3.4 凍結觸發器）
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+            Task { @MainActor in
+                self?.controller.userActivityDetected(at: Date().timeIntervalSinceReferenceDate)
             }
         }
         do {
@@ -119,7 +149,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func refreshStatus() {
         switch controller.phase {
-        case .idle: statusLine = "待機"
+        case .idle:
+            statusLine = controller.isLingering ? "可修正（延續窗）" : "待機"
         case .listening(.hold): statusLine = "聽寫中（按住）"
         case .listening(.locked): statusLine = "聽寫中（鎖定）"
         }
