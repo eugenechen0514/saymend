@@ -1101,3 +1101,40 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     c.escapePressed()                               // 延續窗 Esc ＝ 封存
     #expect(c.settings.sessionLanguageOverride == nil)
 }
+
+/// 設計裁決 4「archive 時自動清除」：聽寫中 Esc 中止也是封存路徑，須清除 session 級語系覆蓋
+@MainActor
+@Test func sessionLanguageOverrideClearsOnEscapeAbortDuringListening() {
+    let (c, _, _, _, _, _) = makeController()
+    c.settings.sessionLanguageOverride = .english
+    c.hotkeyPressed(at: 10.0)                        // 聽寫中（hold）
+    c.handleTranscript(.finalized("測試"), at: 10.5)
+    c.escapePressed()                               // 聽寫中 Esc ＝ 中止並封存
+    #expect(c.settings.sessionLanguageOverride == nil)
+}
+
+/// 設計裁決 4：延續窗中改在密碼欄按下＝封存前一 session，session 級語系覆蓋須一併清除
+@MainActor
+@Test func sessionLanguageOverrideClearsWhenSecureFieldAbortsPendingSession() {
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 0)
+    let (c, _, asr, _, _, _) = makeController(fieldReader: reader)
+    c.settings.sessionLanguageOverride = .english
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 11.0)
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.2)                      // 延續窗（覆蓋仍在）
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: true)
+    c.hotkeyPressed(at: 12.0)                       // 密碼欄按下＝封存前一 session
+    #expect(c.settings.sessionLanguageOverride == nil)
+}
+
+/// 設計裁決 4：麥克風啟動失敗＝session 夭折封存，session 級語系覆蓋須清除
+@MainActor
+@Test func sessionLanguageOverrideClearsOnMicFailure() {
+    let (c, audio, _, _, _, _) = makeController()
+    c.settings.sessionLanguageOverride = .english
+    audio.failNextStart = true
+    c.hotkeyPressed(at: 10.0)                        // 麥克風啟動失敗
+    #expect(c.settings.sessionLanguageOverride == nil)
+}

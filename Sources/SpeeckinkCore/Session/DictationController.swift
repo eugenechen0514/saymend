@@ -160,14 +160,14 @@ public final class DictationController {
         asr.cancel()
         audio.stop()
         if case .selectionPending = sessionTarget {
-            coordinator.clearCurrentUtterance()        // 緩衝：螢幕沒字，不得退格
+            coordinator.clearCurrentUtterance()        // 緩衝：螢幕沒字，不得退格（須在 archiveSession 重置 sessionTarget 前判斷）
         } else {
             try? coordinator.discardCurrentUtterance()
         }
-        ledger.archive()                    // Esc 不進延續窗（設計裁決 3）
-        feedback?.sessionEnded()            // 封存：overlay 立即隱藏（此路徑直呼 archive，不經 archiveSession）
-        internalPhase = .idle               // 之後遲到的 stream-end 會被 asrStreamEnded 的相位守衛冪等忽略
-        hud.present(.hidden)
+        // Esc 不進延續窗（設計裁決 3）＝提前封存。統一走 archiveSession 清乾淨 session 級狀態
+        // （sessionTarget／sessionLanguageOverride，設計裁決 4「archive 時自動清除」）——
+        // internalPhase 已設 idle，之後遲到的 stream-end 會被 asrStreamEnded 的相位守衛冪等忽略。
+        archiveSession()
     }
 
     /// 使用者手動活動（打字／滑鼠點擊／切 App；app 端由 HotkeyMonitor 與 NSWorkspace 餵入）。
@@ -303,9 +303,9 @@ public final class DictationController {
         // 密碼欄位拒絕（規格 §5.3）：不錄音、不送 LLM、不開 session
         let field = fieldReader?.snapshot() ?? FieldContext()
         if field.isSecure {
-            ledger.archive()
-            feedback?.sessionEnded()   // 延續窗中改在密碼欄按下：封存前一 session，overlay 隱藏
-            internalPhase = .idle
+            // 延續窗中改在密碼欄按下：封存前一 session（含清除 session 級語系覆蓋，設計裁決 4）。
+            // hud.present 須在 archiveSession（會發 .hidden）之後，否則 notice 被蓋掉。
+            archiveSession()
             hud.present(.notice("密碼欄位不聽寫"))
             return
         }
@@ -344,9 +344,9 @@ public final class DictationController {
                 }
             }
         } catch {
-            ledger.archive()   // 不留 idle＋isActive 的孤兒帳本（活動偵測在 idle 下不設防）
-            feedback?.sessionEnded()   // 麥克風啟動失敗＝session 夭折，overlay 隱藏
-            internalPhase = .idle
+            // 麥克風啟動失敗＝session 夭折：封存不留 idle＋isActive 的孤兒帳本（活動偵測在 idle 下不設防），
+            // 並清除 session 級語系覆蓋（設計裁決 4）。notice 須在 archiveSession 發 .hidden 之後。
+            archiveSession()
             hud.present(.notice("無法啟動麥克風"))
         }
     }
