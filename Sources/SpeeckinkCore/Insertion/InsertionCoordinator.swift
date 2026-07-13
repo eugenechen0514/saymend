@@ -27,7 +27,7 @@ public final class InsertionCoordinator {
     private let rangeReplacer: (any SessionRangeReplacing)?
     private let pasteThreshold: Int
 
-    private var currentUtteranceText = ""
+    public private(set) var currentUtteranceText = ""
     public var currentUtteranceLength: Int { currentUtteranceText.count }
     private var insertCounter = 0
 

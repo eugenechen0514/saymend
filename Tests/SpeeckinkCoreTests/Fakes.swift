@@ -110,6 +110,19 @@ final class FakeFieldReader: FieldContextProviding {
     func snapshot() -> FieldContext { context }
 }
 
+/// 回饋層 spy（M3 overlay／diff 的 Core 側接點）
+final class FakeFeedback: SessionFeedbackPresenting {
+    enum Event: Equatable {
+        case updated(FeedbackUpdate)
+        case frozen
+        case ended
+    }
+    private(set) var events: [Event] = []
+    func sessionUpdated(_ update: FeedbackUpdate) { events.append(.updated(update)) }
+    func sessionFrozen() { events.append(.frozen) }
+    func sessionEnded() { events.append(.ended) }
+}
+
 @MainActor
 func makeController(
     polisher: GatedIntentService = GatedIntentService(),
@@ -117,7 +130,8 @@ func makeController(
     pasteInserter: RecordingInserter = RecordingInserter(),
     rangeReplacer: FakeRangeReplacer? = nil,
     clipboard: ClipboardSpy? = nil,
-    fieldReader: FakeFieldReader? = nil
+    fieldReader: FakeFieldReader? = nil,
+    feedback: FakeFeedback? = nil
 ) -> (DictationController, FakeAudio, FakeASR, RecordingInserter, GatedIntentService, FakeHUD) {
     let audio = FakeAudio()
     let asr = FakeASR()
@@ -131,7 +145,8 @@ func makeController(
         audio: audio, asr: asr, coordinator: coordinator,
         intent: polisher, hud: hud, settings: settings,
         clipboardRescue: clipboard.map { spy in { spy.rescue($0) } },
-        fieldReader: fieldReader
+        fieldReader: fieldReader,
+        feedback: feedback
     )
     return (controller, audio, asr, key, polisher, hud)
 }
