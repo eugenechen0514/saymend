@@ -75,23 +75,23 @@ import Testing
 
 @MainActor
 @Test func quietGapPolishesAndReplacesTail() async {
-    let polisher = GatedPolisher()
-    polisher.outcome = .polished("你好。")
+    let polisher = GatedIntentService()
+    polisher.outcome = .newContent("你好。")
     let (c, _, _, key, _, _) = makeController(polisher: polisher)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)                    // 鎖定
     c.handleTranscript(.finalized("呃你好"), at: 11.0)
     c.tick(at: 12.6)                              // 1.6s quiet → 潤飾
-    await c.lastPolishTask?.value
-    #expect(polisher.calls == ["呃你好"])
+    await c.lastIntentTask?.value
+    #expect(polisher.calls.map(\.raw) == ["呃你好"])
     #expect(key.ops == [.insert("呃你好"), .delete(3), .insert("你好。")])
 }
 
 @MainActor
 @Test func replaceAbortsWhenNextUtteranceStarted() async {
-    let polisher = GatedPolisher()
+    let polisher = GatedIntentService()
     polisher.gated = true
-    polisher.outcome = .polished("第一段。")
+    polisher.outcome = .newContent("第一段。")
     let (c, _, _, key, _, hud) = makeController(polisher: polisher)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
@@ -99,37 +99,37 @@ import Testing
     c.tick(at: 12.6)                              // 潤飾發出（被 gate 卡住）
     c.handleTranscript(.finalized("第二段"), at: 13.0)  // 尾端前進
     polisher.release()
-    await c.lastPolishTask?.value
+    await c.lastIntentTask?.value
     #expect(!key.ops.contains(.delete(3)))        // 不得替換
     #expect(hud.states.contains(.notice("未潤飾")))
 }
 
 @MainActor
 @Test func degradedKeepsRawAndNotifies() async {
-    let polisher = GatedPolisher()
+    let polisher = GatedIntentService()
     polisher.outcome = .degraded(reason: "測試")
     let (c, _, _, key, _, hud) = makeController(polisher: polisher)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("原文"), at: 11.0)
     c.tick(at: 12.6)
-    await c.lastPolishTask?.value
+    await c.lastIntentTask?.value
     #expect(key.ops == [.insert("原文")])          // 原文保留，無退格
     #expect(hud.states.contains(.notice("未潤飾")))
 }
 
 @MainActor
 @Test func streamEndFlushesRemainderThroughPolish() async {
-    let polisher = GatedPolisher()
-    polisher.outcome = .polished("尾巴。")
+    let polisher = GatedIntentService()
+    polisher.outcome = .newContent("尾巴。")
     let (c, _, asr, key, _, _) = makeController(polisher: polisher)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("尾巴"), at: 11.0)
     c.hotkeyReleased(at: 12.0)                    // 長按結束 → audio.stop
     asr.continuation?.finish()                     // 模擬 ASR 排空後結束
     c.asrStreamEnded(at: 12.1)
-    await c.lastPolishTask?.value
-    #expect(polisher.calls == ["尾巴"])
+    await c.lastIntentTask?.value
+    #expect(polisher.calls.map(\.raw) == ["尾巴"])
     #expect(key.ops == [.insert("尾巴"), .delete(2), .insert("尾巴。")])
 }
 
@@ -148,16 +148,16 @@ import Testing
 /// Finding #1：結束聽寫後，ASR 排空階段的尾端 finalized 仍須上屏＋進 flush 緩衝，不能白說話。
 @MainActor
 @Test func drainFinalizedAfterEndIsInsertedAndFlushed() async {
-    let polisher = GatedPolisher()
-    polisher.outcome = .polished("你好世界。")
+    let polisher = GatedIntentService()
+    polisher.outcome = .newContent("你好世界。")
     let (c, _, _, key, _, _) = makeController(polisher: polisher)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("你好"), at: 10.5)
     c.hotkeyReleased(at: 11.0)                         // 長按放開 → endListening → 進排空窗
     c.handleTranscript(.finalized("世界"), at: 11.1)    // drain 尾端 finalized：仍須上屏＋入 buffer
     c.asrStreamEnded(at: 11.2)                         // 排空結束 → flush → 潤飾整句
-    await c.lastPolishTask?.value
-    #expect(polisher.calls == ["你好世界"])              // 尾巴「世界」沒被丟
+    await c.lastIntentTask?.value
+    #expect(polisher.calls.map(\.raw) == ["你好世界"])              // 尾巴「世界」沒被丟
     #expect(key.ops == [.insert("你好"), .insert("世界"), .delete(4), .insert("你好世界。")])
 }
 
@@ -182,7 +182,7 @@ import Testing
 /// Finding #2：舊 session 的 stream-end 不得提早 flush／潤飾新 session 的半句。
 @MainActor
 @Test func staleStreamEndDoesNotFlushNewSession() async {
-    let polisher = GatedPolisher()
+    let polisher = GatedIntentService()
     let (c, _, _, _, _, _) = makeController(polisher: polisher)
     c.hotkeyPressed(at: 10.0)                                        // session A
     let a = c.sessionID
@@ -190,13 +190,13 @@ import Testing
     c.hotkeyPressed(at: 12.0)                                        // 開 session B
     c.receiveTranscript(.finalized("半句"), session: c.sessionID, at: 12.5)  // B 的半句進 buffer
     c.receiveStreamEnd(session: a, at: 12.6)                         // A 的 stale stream-end → 忽略
-    await c.lastPolishTask?.value
+    await c.lastIntentTask?.value
     #expect(polisher.calls.isEmpty)                                  // 未被提早切斷潤飾
 }
 
 @MainActor
 @Test func escapeSkipsPendingFlush() async {
-    let polisher = GatedPolisher()
+    let polisher = GatedIntentService()
     let (c, _, asr, _, _, _) = makeController(polisher: polisher)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("別潤飾我"), at: 10.5)
@@ -227,15 +227,15 @@ import Testing
 
 @MainActor
 @Test func pressDuringLingerResumesSameSessionLedger() async {
-    let polisher = GatedPolisher()
-    polisher.outcome = .polished("你好。")
+    let polisher = GatedIntentService()
+    polisher.outcome = .newContent("你好。")
     let (c, _, asr, _, _, _) = makeController(polisher: polisher)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("呃你好"), at: 10.5)
     c.hotkeyReleased(at: 11.0)
     asr.continuation?.finish()
     c.asrStreamEnded(at: 11.2)            // flush → 潤飾
-    await c.lastPolishTask?.value
+    await c.lastIntentTask?.value
     #expect(c.ledger.sessionText == "你好。")
     #expect(c.isLingering)
     c.hotkeyPressed(at: 12.0)             // 延續窗內再按 → 同 session（規格 §3.4）
@@ -269,8 +269,8 @@ import Testing
 
 @MainActor
 @Test func userActivityWhileListeningFreezesAndBlocksReplace() async {
-    let polisher = GatedPolisher()
-    polisher.outcome = .polished("你好。")
+    let polisher = GatedIntentService()
+    polisher.outcome = .newContent("你好。")
     let (c, _, asr, key, _, hud) = makeController(polisher: polisher)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("呃你好"), at: 10.5)
@@ -280,7 +280,7 @@ import Testing
     c.hotkeyReleased(at: 11.5)
     asr.continuation?.finish()
     c.asrStreamEnded(at: 11.6)
-    await c.lastPolishTask?.value
+    await c.lastIntentTask?.value
     #expect(!key.ops.contains(.delete(3)))   // 凍結後不得改寫欄位
     #expect(!c.isLingering)                  // 凍結 session 不進延續窗
     #expect(!c.ledger.isActive)
@@ -302,19 +302,103 @@ import Testing
 
 @MainActor
 @Test func commitsAccumulateInLedger() async {
-    let polisher = GatedPolisher()
+    let polisher = GatedIntentService()
     let (c, _, _, _, _, _) = makeController(polisher: polisher)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)             // 鎖定
-    polisher.outcome = .polished("第一句。")
+    polisher.outcome = .newContent("第一句。")
     c.handleTranscript(.finalized("呃第一句"), at: 11.0)
     c.tick(at: 12.6)
-    await c.lastPolishTask?.value
+    await c.lastIntentTask?.value
     #expect(c.ledger.sessionText == "第一句。")
     polisher.outcome = .degraded(reason: "x")
     c.handleTranscript(.finalized("第二句原文"), at: 13.0)
     c.tick(at: 14.6)
-    await c.lastPolishTask?.value
+    await c.lastIntentTask?.value
     #expect(c.ledger.sessionText == "第一句。第二句原文")   // degraded 以原文入帳（欄位鏡像）
     #expect(c.ledger.canUndo)
+}
+
+@MainActor
+@Test func editCommandReplacesSessionAndRemovesCommandUtterance() async {
+    let intent = GatedIntentService()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)                      // 鎖定
+    intent.outcome = .newContent("星期二開會。")
+    c.handleTranscript(.finalized("星期二開會"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    #expect(c.ledger.sessionText == "星期二開會。")
+    intent.outcome = .editedSession("星期三開會。")
+    c.handleTranscript(.finalized("欸改成星期三"), at: 13.0)   // 指令話語（6 字）已上屏
+    c.tick(at: 14.6)
+    await c.lastIntentTask?.value
+    #expect(intent.calls.last?.session == "星期二開會。")       // 呼叫帶 session 全文
+    // 退指令 6 字 → 退 session 全文 6 字 → 重打修正後全文
+    #expect(Array(key.ops.suffix(3)) == [.delete(6), .delete(6), .insert("星期三開會。")])
+    #expect(c.ledger.sessionText == "星期三開會。")
+    #expect(hud.states.contains(.notice("已修正")))
+}
+
+@MainActor
+@Test func undoIntentRevertsLastCommit() async {
+    let intent = GatedIntentService()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    intent.outcome = .newContent("星期二開會。")
+    c.handleTranscript(.finalized("星期二開會"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    intent.outcome = .editedSession("星期三開會。")
+    c.handleTranscript(.finalized("改成星期三"), at: 13.0)      // 5 字
+    c.tick(at: 14.6)
+    await c.lastIntentTask?.value
+    intent.outcome = .undo
+    c.handleTranscript(.finalized("復原上一步"), at: 15.0)      // 5 字
+    c.tick(at: 16.6)
+    await c.lastIntentTask?.value
+    #expect(c.ledger.sessionText == "星期二開會。")
+    #expect(Array(key.ops.suffix(3)) == [.delete(5), .delete(6), .insert("星期二開會。")])
+    #expect(hud.states.contains(.notice("已復原")))
+    #expect(c.ledger.canUndo)                        // 還能再復原回空
+}
+
+@MainActor
+@Test func frozenSessionRefusesCorrection() async {
+    let intent = GatedIntentService()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    intent.outcome = .newContent("內容。")
+    c.handleTranscript(.finalized("內容"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    c.userActivityDetected(at: 13.0)                 // 凍結
+    intent.outcome = .editedSession("改壞。")
+    c.handleTranscript(.finalized("改一下"), at: 13.5)
+    c.tick(at: 15.1)
+    await c.lastIntentTask?.value
+    #expect(hud.states.contains(.notice("已凍結，未修正")))
+    #expect(!key.ops.contains(.insert("改壞。")))
+    #expect(c.ledger.sessionText == "內容。")         // 帳本未動
+}
+
+@MainActor
+@Test func lostTextDuringNewContentRescuesToClipboard() async {
+    let intent = GatedIntentService()
+    let clipboard = ClipboardSpy()
+    let pasteFake = RecordingInserter()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, pasteInserter: pasteFake, clipboard: clipboard)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    intent.outcome = .newContent("你好。")
+    c.handleTranscript(.finalized("呃你好"), at: 11.0)
+    key.failInsertsRemaining = 2                     // 新文字與原文回復（keystroke 側）都失敗
+    pasteFake.failInsertsRemaining = 2               // paste 備援也失敗
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    #expect(clipboard.texts == ["呃你好"])            // 鐵律最後手段：原文進剪貼簿
+    #expect(hud.states.contains(.notice("插入失敗，原文已複製到剪貼簿")))
 }

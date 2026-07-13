@@ -59,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             traditionalize = nil
             hud.present(.notice("簡繁保險絲初始化失敗，zh-TW 輸出可能殘留簡體"))
         }
-        let polisher = PolishService(
+        let intentService = IntentService(
             provider: provider,
             language: { [settings] in settings.outputLanguage },
             traditionalize: traditionalize
@@ -68,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             audio: audio,
             asr: SpeechAnalyzerEngine(),
             coordinator: coordinator,
-            polisher: polisher,
+            intent: intentService,
             hud: hud,
             settings: settings
         )

@@ -34,24 +34,24 @@ final class FakeASR: ASREngine {
     }
 }
 
-/// 可手動放行的假潤飾服務
+/// 可手動放行的假意圖服務
 ///
-/// release() 與 polish() 的登記順序無關（order-independent latch）：因 polish 以
+/// release() 與 process() 的登記順序無關（order-independent latch）：因 process 以
 /// fire-and-forget Task 派發，其任務體要等主 actor 讓出才起跑，呼叫端（測試）可能在
-/// 任務登記 gate *之前* 就呼叫 release()。此時把 release 記入 pendingReleases，待 polish
+/// 任務登記 gate *之前* 就呼叫 release()。此時把 release 記入 pendingReleases，待 process
 /// 起跑看到額度即直接放行，避免因純值 continuation 尚未登記而永久卡死。
-final class GatedPolisher: PolishServing, @unchecked Sendable {
-    var outcome: PolishOutcome = .polished("（潤飾）")
-    private(set) var calls: [String] = []
-    /// 若設為 false，polish 立即回傳；true 時等 release() 才回
+final class GatedIntentService: IntentServing, @unchecked Sendable {
+    var outcome: IntentOutcome = .newContent("（潤飾）")
+    private(set) var calls: [(raw: String, session: String)] = []
+    /// 若設為 false，process 立即回傳；true 時等 release() 才回
     var gated = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var pendingReleases = 0
-    func polish(utteranceRaw: String) async -> PolishOutcome {
-        calls.append(utteranceRaw)
+    func process(utteranceRaw: String, sessionText: String) async -> IntentOutcome {
+        calls.append((utteranceRaw, sessionText))
         if gated {
             if pendingReleases > 0 {
-                pendingReleases -= 1          // 先前已放行，直接通過
+                pendingReleases -= 1
             } else {
                 await withCheckedContinuation { waiters.append($0) }
             }
@@ -60,11 +60,17 @@ final class GatedPolisher: PolishServing, @unchecked Sendable {
     }
     func release() {
         if waiters.isEmpty {
-            pendingReleases += 1              // 尚無等待者：記帳，供之後的 polish 使用
+            pendingReleases += 1
         } else {
-            waiters.removeFirst().resume()    // 逐一放行，維持一次 release 對應一次 polish
+            waiters.removeFirst().resume()
         }
     }
+}
+
+/// 剪貼簿急救 spy（InserterError.lostText 的最後手段）
+final class ClipboardSpy {
+    private(set) var texts: [String] = []
+    func rescue(_ text: String) { texts.append(text) }
 }
 
 final class FakeHUD: HUDPresenting {
@@ -74,20 +80,24 @@ final class FakeHUD: HUDPresenting {
 
 @MainActor
 func makeController(
-    polisher: GatedPolisher = GatedPolisher(),
-    pasteThreshold: Int = 100
-) -> (DictationController, FakeAudio, FakeASR, RecordingInserter, GatedPolisher, FakeHUD) {
+    polisher: GatedIntentService = GatedIntentService(),
+    pasteThreshold: Int = 100,
+    pasteInserter: RecordingInserter = RecordingInserter(),
+    rangeReplacer: FakeRangeReplacer? = nil,
+    clipboard: ClipboardSpy? = nil
+) -> (DictationController, FakeAudio, FakeASR, RecordingInserter, GatedIntentService, FakeHUD) {
     let audio = FakeAudio()
     let asr = FakeASR()
     let key = RecordingInserter()
-    let paste = RecordingInserter()
-    let coordinator = InsertionCoordinator(keystroke: key, paste: paste, pasteThreshold: pasteThreshold)
+    let coordinator = InsertionCoordinator(keystroke: key, paste: pasteInserter,
+                                           rangeReplacer: rangeReplacer, pasteThreshold: pasteThreshold)
     let hud = FakeHUD()
     let suite = "test-\(UUID().uuidString)"
     let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
     let controller = DictationController(
         audio: audio, asr: asr, coordinator: coordinator,
-        polisher: polisher, hud: hud, settings: settings
+        intent: polisher, hud: hud, settings: settings,
+        clipboardRescue: clipboard.map { spy in { spy.rescue($0) } }
     )
     return (controller, audio, asr, key, polisher, hud)
 }

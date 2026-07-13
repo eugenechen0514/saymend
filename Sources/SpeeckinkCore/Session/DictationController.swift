@@ -35,13 +35,13 @@ public final class DictationController {
         return false
     }
 
-    /// 最近一次潤飾任務；測試以 await 等待完成
-    public private(set) var lastPolishTask: Task<Void, Never>?
+    /// 最近一次意圖處理任務；測試以 await 等待完成
+    public private(set) var lastIntentTask: Task<Void, Never>?
 
     private let audio: any AudioCaptureService
     private let asr: any ASREngine
     private let coordinator: InsertionCoordinator
-    private let polisher: any PolishServing
+    private let intentService: any IntentServing
     private let hud: any HUDPresenting
     private let settings: AppSettings
     private var segmenter: UtteranceSegmenter
@@ -61,7 +61,7 @@ public final class DictationController {
     public init(audio: any AudioCaptureService,
                 asr: any ASREngine,
                 coordinator: InsertionCoordinator,
-                polisher: any PolishServing,
+                intent: any IntentServing,
                 hud: any HUDPresenting,
                 settings: AppSettings,
                 segmenter: UtteranceSegmenter = UtteranceSegmenter(),
@@ -69,7 +69,7 @@ public final class DictationController {
         self.audio = audio
         self.asr = asr
         self.coordinator = coordinator
-        self.polisher = polisher
+        self.intentService = intent
         self.hud = hud
         self.settings = settings
         self.segmenter = segmenter
@@ -255,50 +255,124 @@ public final class DictationController {
         for action in actions {
             switch action {
             case .utteranceEnded(let raw):
-                polishAndReplace(raw: raw)
+                processUtterance(raw: raw)
             case .sessionTimedOut:
                 endSession(at: Date().timeIntervalSinceReferenceDate)
             }
         }
     }
 
-    private func polishAndReplace(raw: String) {
+    private func processUtterance(raw: String) {
         let snapshot = coordinator.snapshotAndBeginNext()
-        lastPolishTask = Task { [weak self] in
+        let sessionBefore = ledger.sessionText
+        lastIntentTask = Task { [weak self] in
             guard let self else { return }
-            let outcome = await self.polisher.polish(utteranceRaw: raw)
+            let outcome = await self.intentService.process(utteranceRaw: raw, sessionText: sessionBefore)
             await MainActor.run {
-                self.applyPolish(outcome, snapshot: snapshot)
+                self.dispatch(outcome, snapshot: snapshot)
             }
         }
     }
 
-    private func applyPolish(_ outcome: PolishOutcome, snapshot: InsertionCoordinator.UtteranceSnapshot) {
-        // 延續窗過期／凍結後封存：欄位已定稿（原文留存），安靜放下
-        guard ledger.isActive else { return }
-        if ledger.frozen {
-            hud.present(.notice("未潤飾"))
-            return
-        }
+    private func dispatch(_ outcome: IntentOutcome, snapshot: InsertionCoordinator.UtteranceSnapshot) {
+        guard ledger.isActive else { return }   // 延續窗過期已封存：欄位定稿，安靜放下
         switch outcome {
-        case .polished(let text):
-            do {
-                if try coordinator.replaceTail(snapshot, with: text) {
-                    ledger.commit(ledger.sessionText + text)
-                } else {
-                    keepRaw(snapshot, notice: "未潤飾")
-                }
-            } catch InserterError.replaceFailedRestored {
-                keepRaw(snapshot, notice: "未潤飾")
-            } catch InserterError.lostText(let original) {
-                clipboardRescue?(original)
-                hud.present(.notice("插入失敗，原文已複製到剪貼簿"))
-            } catch {
-                // 其他插入錯誤：欄位狀態不明，帳本以原文鏡像（最佳努力）
+        case .newContent(let text):
+            applyNewContent(text, snapshot: snapshot)
+        case .editedSession(let corrected):
+            applyCorrection(corrected, commandSnapshot: snapshot)
+        case .undo:
+            performUndo(commandSnapshot: snapshot)
+        case .degraded:
+            if ledger.frozen {
+                hud.present(.notice("未潤飾"))
+            } else {
                 keepRaw(snapshot, notice: "未潤飾")
             }
-        case .degraded:
+        }
+    }
+
+    private func applyNewContent(_ text: String, snapshot: InsertionCoordinator.UtteranceSnapshot) {
+        guard !ledger.frozen else { hud.present(.notice("未潤飾")); return }
+        do {
+            if try coordinator.replaceTail(snapshot, with: text) {
+                ledger.commit(ledger.sessionText + text)
+            } else {
+                keepRaw(snapshot, notice: "未潤飾")
+            }
+        } catch InserterError.replaceFailedRestored {
             keepRaw(snapshot, notice: "未潤飾")
+        } catch InserterError.lostText(let original) {
+            clipboardRescue?(original)
+            hud.present(.notice("插入失敗，原文已複製到剪貼簿"))
+        } catch {
+            keepRaw(snapshot, notice: "未潤飾")
+        }
+    }
+
+    private func applyCorrection(_ corrected: String, commandSnapshot: InsertionCoordinator.UtteranceSnapshot) {
+        guard !ledger.frozen else { hud.present(.notice("已凍結，未修正")); return }
+        do {
+            switch try coordinator.replaceSession(commandSnapshot: commandSnapshot,
+                                                  expectedSessionText: ledger.sessionText,
+                                                  with: corrected,
+                                                  axAnchor: ledger.axAnchor) {
+            case .replaced:
+                ledger.commit(corrected)
+                hud.present(.notice("已修正"))
+            case .tailAdvanced:
+                keepRaw(commandSnapshot, notice: "未修正（新內容已接續）")   // 指令話語留在欄位，視為內容鏡像
+            case .fieldMismatch:
+                ledger.freeze()
+                hud.present(.notice("欄位已被外部改動，本段停止修正"))
+            }
+        } catch InserterError.replaceFailedRestored {
+            hud.present(.notice("修正失敗，原文已回復"))
+        } catch InserterError.lostText(let original) {
+            clipboardRescue?(original)
+            ledger.freeze()
+            hud.present(.notice("修正失敗，原文已複製到剪貼簿"))
+        } catch {
+            ledger.freeze()   // 欄位狀態不明：凍結保平安
+            hud.present(.notice("修正失敗"))
+        }
+    }
+
+    /// 復原上一步（口頭 undo 與 Task 9 的 HUD 按鈕共用）。
+    private func performUndo(commandSnapshot: InsertionCoordinator.UtteranceSnapshot) {
+        guard !ledger.frozen else { hud.present(.notice("已凍結，無法復原")); return }
+        guard let step = ledger.undo() else {
+            // 沒步驟可回：把指令話語從欄位退掉（它不是內容）
+            _ = try? coordinator.replaceTail(commandSnapshot, with: "")
+            hud.present(.notice("沒有可復原的步驟"))
+            return
+        }
+        do {
+            switch try coordinator.replaceSession(commandSnapshot: commandSnapshot,
+                                                  expectedSessionText: step.from,
+                                                  with: step.to,
+                                                  axAnchor: ledger.axAnchor) {
+            case .replaced:
+                hud.present(.notice("已復原"))
+            case .tailAdvanced:
+                ledger.commit(step.from)      // 帳本回滾成欄位實況
+                keepRaw(commandSnapshot, notice: "未復原（新內容已接續）")
+            case .fieldMismatch:
+                ledger.commit(step.from)
+                ledger.freeze()
+                hud.present(.notice("欄位已被外部改動，本段停止修正"))
+            }
+        } catch InserterError.replaceFailedRestored {
+            ledger.commit(step.from)
+            hud.present(.notice("復原失敗，原文已回復"))
+        } catch InserterError.lostText(let original) {
+            clipboardRescue?(original)
+            ledger.freeze()
+            hud.present(.notice("復原失敗，原文已複製到剪貼簿"))
+        } catch {
+            ledger.commit(step.from)
+            ledger.freeze()
+            hud.present(.notice("復原失敗"))
         }
     }
 
