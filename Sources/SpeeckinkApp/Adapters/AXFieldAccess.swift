@@ -19,6 +19,28 @@ enum AXFieldAccess {
         guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success else { return nil }
         return valueRef as? String
     }
+
+    /// 游標／選取前後的窗口文字（UTF-16 計數，規格 §3.6「無選取時游標前後窗口」與 §4.7 AXReader）。
+    /// 邊界落在 surrogate pair 中間時向內讓開，絕不產生半個字。純函式，供單元測試。
+    static func contextWindows(value: String, selectionLocation: Int, selectionLength: Int,
+                               window: Int) -> (before: String, after: String) {
+        let units = Array(value.utf16)
+        let loc = min(max(0, selectionLocation), units.count)
+        let end = min(max(loc, selectionLocation + max(0, selectionLength)), units.count)
+        let before = utf16Slice(units, max(0, loc - window)..<loc)
+        let after = utf16Slice(units, end..<min(units.count, end + window))
+        return (before, after)
+    }
+
+    /// UTF-16 區段轉字串；起訖若切在 surrogate pair 中間就向內收（trail 開頭前移、lead 結尾回退）。
+    private static func utf16Slice(_ units: [UInt16], _ range: Range<Int>) -> String {
+        var lower = range.lowerBound
+        var upper = range.upperBound
+        if lower < units.count, UTF16.isTrailSurrogate(units[lower]) { lower += 1 }
+        if upper > lower, upper - 1 < units.count, UTF16.isLeadSurrogate(units[upper - 1]) { upper -= 1 }
+        guard lower < upper else { return "" }
+        return String(decoding: units[lower..<upper], as: UTF16.self)
+    }
 }
 
 /// 聚焦欄位快照：secure 偵測＋游標錨位（UTF-16）
@@ -38,6 +60,24 @@ final class AXFieldReader: FieldContextProviding {
             var range = CFRange()
             if AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) {
                 context.caretLocation = range.location
+                if range.length > 0 {
+                    context.selectedRange = .init(location: range.location, length: range.length)
+                    var selRef: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selRef) == .success,
+                       let sel = selRef as? String, !sel.isEmpty {
+                        context.selectedText = sel
+                    }
+                    // 讀到 range 卻讀不到文字＝hasSelection 為 false，自然退回一般聽寫（Task 1 裁決）
+                }
+                // 前後文窗口（LLM 語境用；讀不到全文就不給，寧缺勿錯）
+                if let value = AXFieldAccess.stringValue(of: element) {
+                    let w = AXFieldAccess.contextWindows(value: value,
+                                                         selectionLocation: range.location,
+                                                         selectionLength: range.length,
+                                                         window: 240)
+                    context.contextBefore = w.before.isEmpty ? nil : w.before
+                    context.contextAfter = w.after.isEmpty ? nil : w.after
+                }
             }
         }
         return context
@@ -74,6 +114,13 @@ final class AXInserter: SessionRangeReplacing {
                 _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, caretValue)
             }
             return .unsupported
+        }
+        // 游標釘定（M3 設計裁決 2）：部分 App 替換後把整段新文字留成選取狀態，
+        // 後續串流鍵入會把剛替換的字吃掉；顯式 collapse 到新文字尾端，
+        // 讓「session 即尾端（游標相對）」恢復成立，M2 修正機械得以重用。失敗不影響替換結果。
+        var caret = CFRange(location: location + newText.utf16.count, length: 0)
+        if let caretValue = AXValueCreate(.cfRange, &caret) {
+            _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, caretValue)
         }
         return .replaced
     }
