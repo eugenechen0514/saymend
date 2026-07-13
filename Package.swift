@@ -6,11 +6,15 @@ let package = Package(
     platforms: [.macOS("26.0")],
     dependencies: [
         .package(url: "https://github.com/ddddxxx/SwiftyOpenCC", from: "2.0.0-beta"),
+        .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
     ],
     targets: [
         .target(
             name: "SpeeckinkCore",
-            dependencies: [.product(name: "OpenCC", package: "SwiftyOpenCC")],
+            dependencies: [
+                .product(name: "OpenCC", package: "SwiftyOpenCC"),
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
