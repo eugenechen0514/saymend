@@ -18,8 +18,12 @@ final class OverlayWindowController {
                       width: rect.width, height: rect.height)
     }
 
-    /// 依 Cocoa 螢幕座標畫底線（每行一條，貼行底）與高亮（短暫，2.5 秒淡出）。
-    func show(underline: [CGRect], highlight: [CGRect]) {
+    /// 依 Cocoa 螢幕座標畫底線（每行一條，貼行底）與異動高亮。
+    /// 高亮的淡出（規格 §3.5「2–3 秒淡出」）由 FeedbackCoordinator 依牆鐘時間逐 frame 驅動——
+    /// 每個 10Hz poll 傳入遞減的 highlightOpacity，overlay 只是把它畫成靜態透明度。
+    /// 早期版本在此掛 CABasicAnimation 淡出，但 show() 每 frame 全量重建 layer tree（見下），
+    /// 動畫還沒開始就連 layer 一起被丟棄，高亮只活一個 poll 週期（~0.1 秒），遠低於規格。
+    func show(underline: [CGRect], highlight: [CGRect], highlightOpacity: Double) {
         assert(Thread.isMainThread)
         guard !underline.isEmpty else { hide(); return }
 
@@ -53,15 +57,9 @@ final class OverlayWindowController {
             glow.frame = local.insetBy(dx: -1, dy: -1)
             glow.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.25).cgColor
             glow.cornerRadius = 3
+            // 淡出：coordinator 依牆鐘算好的透明度（新 layer 初值不觸發 CA 隱式動畫）
+            glow.opacity = Float(min(1, max(0, highlightOpacity)))
             root.addSublayer(glow)
-            let fade = CABasicAnimation(keyPath: "opacity")
-            fade.fromValue = 1.0
-            fade.toValue = 0.0
-            fade.beginTime = CACurrentMediaTime() + 1.0   // 亮 1 秒再花 1.5 秒淡出＝規格 2–3 秒
-            fade.duration = 1.5
-            fade.fillMode = .forwards
-            fade.isRemovedOnCompletion = false
-            glow.add(fade, forKey: "fadeOut")
         }
         host.layer = root
         host.wantsLayer = true

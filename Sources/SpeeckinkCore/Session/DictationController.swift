@@ -441,6 +441,15 @@ public final class DictationController {
         if wasBuffered {
             switch outcome {
             case .newContent(let text):
+                // Freeze 契約（規格 §3.4「文字定稿、不再改寫」）：首句替換選取後轉 .tail、帳本仍活著，
+                // 此時使用者手動活動會凍結——但緩衝的第二句其 LLM 仍在途。凍結後游標可能已被使用者移走，
+                // 若照樣 insertDetached 會把合成鍵入打在使用者現在的游標處（write-after-hands-off）。
+                // 比照所有落地路徑（applyNewContent／applyCorrection 等）的 frozen 守衛，改走剪貼簿急救。
+                guard !ledger.frozen else {
+                    clipboardRescue?(text)
+                    hud.present(.notice("已凍結，內容已入剪貼簿"))
+                    return
+                }
                 do {
                     try coordinator.insertDetached(text)
                     ledger.commit(ledger.sessionText + text)

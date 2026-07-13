@@ -972,6 +972,39 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 }
 
 @MainActor
+@Test func frozenAfterSelectionReplacedRescuesBufferedNewContentToClipboard() async {
+    // Freeze-race（終審 finding）：首句替換選取成功後轉 .tail、帳本仍活著（未凍結）；
+    // 第二句在首句 LLM 在途時就被緩衝（wasBuffered=true）。首句落地後、第二句 LLM 尚未回來時
+    // 使用者手動活動觸發凍結——第二句的緩衝 .newContent 落地必須守 frozen（規格 §3.4「文字定稿、不再改寫」），
+    // 不得再 insertDetached 合成鍵入（游標可能已被使用者移走），改走剪貼簿急救。
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["第二句"]                    // 只卡第二句：首句立即回、可在凍結前落地
+    intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
+                           "第二句": .newContent("補充內容。")]
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 4)
+    let spy = ClipboardSpy()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)                                // 首句：緩衝＋建 task（body 尚未跑）
+    let first = c.lastIntentTask
+    c.handleTranscript(.finalized("第二句"), at: 13.0)
+    c.tick(at: 14.6)                                // 第二句：仍 .selectionPending → 緩衝（wasBuffered=true）
+    await first?.value                              // 放行首句：AX 替換選取→ .tail、commit「正式版」、未凍結；第二句卡在 LLM gate
+    #expect(c.ledger.sessionText == "正式版")
+    c.userActivityDetected(at: 15.0)               // 首句落地後、第二句在途時：使用者動手＝凍結
+    #expect(c.ledger.frozen)
+    intent.release()                                // 放行第二句 LLM → dispatch 走緩衝 .newContent 路徑（此時已凍結）
+    await c.lastIntentTask?.value
+    #expect(key.ops.isEmpty)                        // 凍結後緩衝句不得合成鍵入到欄位（write-after-hands-off）
+    #expect(spy.texts == ["補充內容。"])            // 改走剪貼簿急救
+    #expect(c.ledger.sessionText == "正式版")       // dispatch 未改動已定稿文字
+    #expect(hud.states.contains(.notice("已凍結，內容已入剪貼簿")))
+}
+
+@MainActor
 @Test func lingerResumeKeepsSelectionPendingTarget() async {
     let intent = GatedIntentService()
     intent.outcome = .editedSession("正式版")
