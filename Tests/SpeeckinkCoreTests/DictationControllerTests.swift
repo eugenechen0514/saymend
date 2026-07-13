@@ -530,3 +530,52 @@ import Testing
     #expect(key.ops.count == opsBefore)               // 指令話語留在欄位、分毫未動
     #expect(c.ledger.sessionText == "內容。")
 }
+
+/// 迴歸：延續窗內點 HUD「復原」的接線危險——若滑鼠 leftMouseDown 被當成使用者活動先送進
+/// userActivityDetected，會在 undo 之前 archiveSession（internalPhase→.idle、ledger 封存、HUD 隱藏），
+/// 使隨後 FIFO 排隊的 undoRequested 命中 .idle → return（no-op）。
+/// 此測試釘住 controller 端的危險順序；App 端由 HotkeyMonitor.shouldEmitUserActivityForMouse
+/// 對落在自家 HUD 的點擊回傳 false 來阻斷（見 SpeeckinkAppTests）。
+@MainActor
+@Test func lingerHUDClickSequence_userActivityBeforeUndoWouldBreakUndo() async {
+    // 危險順序：使用者活動（未過濾的 HUD mouseDown）先到 → 封存 → undo 變 no-op
+    do {
+        let intent = GatedIntentService()
+        let (c, _, asr, key, _, _) = makeController(polisher: intent)
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        intent.outcome = .newContent("星期二開會。")
+        c.handleTranscript(.finalized("星期二開會"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        intent.outcome = .editedSession("星期三開會。")
+        c.handleTranscript(.finalized("改成星期三"), at: 13.0)
+        c.tick(at: 14.6); await c.lastIntentTask?.value
+        c.hotkeyPressed(at: 15.0); c.hotkeyReleased(at: 15.05)
+        asr.continuation?.finish(); c.asrStreamEnded(at: 15.2)
+        #expect(c.isLingering)
+        let opsBefore = key.ops.count
+        c.userActivityDetected(at: 15.3)           // 未過濾的 mouseDown → 立即封存
+        #expect(!c.isLingering)                    // session 已封存
+        c.undoRequested()                          // mouseUp 才觸發，命中 .idle → no-op
+        #expect(key.ops.count == opsBefore)        // 什麼都沒退，復原失效（危險已成立）
+    }
+    // 正確接線：HUD 點擊被 HotkeyMonitor 過濾（不送 userActivity），只送 undoRequested → 復原成立
+    do {
+        let intent = GatedIntentService()
+        let (c, _, asr, key, _, hud) = makeController(polisher: intent)
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        intent.outcome = .newContent("星期二開會。")
+        c.handleTranscript(.finalized("星期二開會"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        intent.outcome = .editedSession("星期三開會。")
+        c.handleTranscript(.finalized("改成星期三"), at: 13.0)
+        c.tick(at: 14.6); await c.lastIntentTask?.value
+        c.hotkeyPressed(at: 15.0); c.hotkeyReleased(at: 15.05)
+        asr.continuation?.finish(); c.asrStreamEnded(at: 15.2)
+        #expect(c.isLingering)
+        c.undoRequested()                          // 過濾後只剩這一路
+        #expect(Array(key.ops.suffix(2)) == [.delete(6), .insert("星期二開會。")])
+        #expect(c.ledger.sessionText == "星期二開會。")
+        #expect(hud.states.contains(.notice("已復原")))
+        #expect(c.isLingering)                     // 復原不中斷延續窗
+    }
+}

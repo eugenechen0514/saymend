@@ -10,6 +10,11 @@ final class HotkeyMonitor {
     var onEscape: (() -> Void)?
     /// 使用者手動活動（非自家合成的 keyDown、滑鼠按下）；只在 isCapturing() 時發出
     var onUserActivity: ((TimeInterval) -> Void)?
+    /// 判斷滑鼠事件位置（CG 全域座標，原點左上、Y 向下）是否落在自家 HUD 面板上。
+    /// 落在自家 HUD 上的點擊要交給 HUD 的復原按鈕處理，不能當成使用者活動而把 session 封存
+    /// （否則延續窗／鎖定聽寫下點「復原」會先觸發 archiveSession，隨後的 undoRequested 變 no-op，
+    /// 直接違反規格 §3.3 HUD 常駐復原）。
+    var isEventOnOwnHUD: ((CGPoint) -> Bool)?
 
     private let hotkey: () -> HotkeyChoice
     private let isCapturing: () -> Bool
@@ -59,6 +64,14 @@ final class HotkeyMonitor {
         runLoopSource = nil
     }
 
+    /// 滑鼠按下是否算「使用者手動活動」：需在擷取中（聽寫或延續窗），且不是落在自家 HUD 上的點擊。
+    /// 抽成獨立方法以利單元測試涵蓋「點自家 HUD 復原鈕不得觸發封存」這條接線。
+    func shouldEmitUserActivityForMouse(at location: CGPoint) -> Bool {
+        guard isCapturing() else { return false }
+        if isEventOnOwnHUD?(location) == true { return false }
+        return true
+    }
+
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let now = Date().timeIntervalSinceReferenceDate
         switch type {
@@ -93,7 +106,7 @@ final class HotkeyMonitor {
             }
             return Unmanaged.passUnretained(event)
         case .leftMouseDown, .rightMouseDown:
-            if isCapturing() {
+            if shouldEmitUserActivityForMouse(at: event.location) {
                 DispatchQueue.main.async { self.onUserActivity?(now) }
             }
             return Unmanaged.passUnretained(event)

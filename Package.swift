@@ -23,5 +23,10 @@ let package = Package(
             dependencies: ["SpeeckinkCore"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .testTarget(
+            name: "SpeeckinkAppTests",
+            dependencies: ["SpeeckinkApp"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )

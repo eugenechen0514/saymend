@@ -94,6 +94,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 return self.controller.phase != .idle || self.controller.isLingering
             }
         )
+        // 落在自家 HUD 上的滑鼠點擊交給 HUD 復原按鈕，不算使用者活動（規格 §3.3 HUD 常駐復原）
+        hotkeyMonitor.isEventOnOwnHUD = { [weak self] point in
+            self?.hud.containsScreenPoint(point) ?? false
+        }
         hotkeyMonitor.onPress = { [weak self] t in
             Task { @MainActor in
                 self?.controller.hotkeyPressed(at: t)

@@ -41,6 +41,15 @@ final class HUDWindowController: HUDPresenting {
         model.level = level
     }
 
+    /// 判斷 CG 全域座標點（原點左上、Y 向下，來自 CGEvent.location）是否落在可見的 HUD 面板上。
+    /// CG 全域座標與 Cocoa 全域座標共用主螢幕原點，僅 Y 軸翻轉：cocoaY = 主螢幕高度 − cgY。
+    func containsScreenPoint(_ cgPoint: CGPoint) -> Bool {
+        guard let panel, panel.isVisible else { return false }
+        guard let primaryHeight = NSScreen.screens.first?.frame.height else { return false }
+        let cocoaPoint = NSPoint(x: cgPoint.x, y: primaryHeight - cgPoint.y)
+        return panel.frame.contains(cocoaPoint)
+    }
+
     private func show() {
         if panel == nil { panel = makePanel() }
         positionAtBottomCenter()
