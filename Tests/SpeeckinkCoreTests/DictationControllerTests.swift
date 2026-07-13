@@ -1024,6 +1024,35 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(key.ops.isEmpty)
 }
 
+/// 實機驗收缺口（M3 驗收項 4）：說完指令→放開→進延續窗→點別處（延續窗活動＝立即封存）
+/// →LLM 此刻才回來。封存後的緩衝 outcome 不得無聲蒸發——原文從未上屏，丟棄＝使用者白說話。
+@MainActor
+@Test func selectionOutcomeAfterLingerArchiveRescuesToClipboard() async {
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["改正式一點"]
+    intent.outcomeByRaw = ["改正式一點": .editedSession("正式版")]
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 4)
+    let spy = ClipboardSpy()
+    let (c, _, asr, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax,
+                                                  clipboard: spy, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("改正式一點"), at: 10.5)
+    c.hotkeyReleased(at: 11.0)                      // 長按放開 → 排空
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.1)                      // 排空結束 → 延續窗（LLM 在途）
+    #expect(c.isLingering)
+    c.userActivityDetected(at: 11.5)                // 延續窗點別處 ＝ 立即封存
+    #expect(!c.ledger.isActive)
+    intent.release()                                // LLM 結果此刻才回來
+    await c.lastIntentTask?.value
+    #expect(spy.texts == ["正式版"])                 // 結果救進剪貼簿（規格 §3.6）
+    #expect(key.ops.isEmpty)                        // 欄位分毫未動
+    #expect(hud.states.contains(.notice("選取已變動，結果已入剪貼簿")))
+    #expect(ax.calls.isEmpty)                       // 封存後不得再碰選取
+}
+
 // MARK: - M2 債清償：密碼欄位聽寫中切入、lostText 剪貼簿急救
 
 @MainActor

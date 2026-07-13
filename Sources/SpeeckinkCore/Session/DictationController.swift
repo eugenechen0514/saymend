@@ -81,6 +81,9 @@ public final class DictationController {
         case selectionPending(range: FieldContext.SelectedRange, original: String)
     }
     private var sessionTarget: SessionTarget = .tail
+    /// 每個 generation 只救援一次剪貼簿：放棄路徑先救「替換結果」（最有價值），
+    /// 之後同 generation 的緩衝句 outcome 不得覆蓋它（剪貼簿只有一格）。
+    private var lastRescueGeneration: Int?
     /// 熱鍵按下當下的前後文窗口（LLM 語境；tail 與 selection 模式皆用）
     private var capturedContextBefore: String?
     private var capturedContextAfter: String?
@@ -427,7 +430,22 @@ public final class DictationController {
         pendingIntents = max(0, pendingIntents - 1)
         // 世代檢查：archive→begin 之後，舊 session 在途的 outcome 一律丟棄——
         // 不能用 sessionID（延續窗 resume 也跳號，會誤殺同 session 的合法在途潤飾）。
-        guard ledger.isActive, ledger.generation == generation else { return }
+        // 但緩衝句（選取模式）的 outcome 不能無聲蒸發：它的原文從未上屏，丟棄＝使用者白說話。
+        // 典型時序：說完指令→放開→進延續窗→點別處（延續窗活動＝立即封存）→LLM 此刻才回來。
+        // 規格 §3.6「放棄替換，結果進 HUD 供複製」：救進剪貼簿＋提示（實機回報的驗收缺口）。
+        guard ledger.isActive, ledger.generation == generation else {
+            if wasBuffered, lastRescueGeneration != generation {
+                switch outcome {
+                case .newContent(let text), .editedSession(let text):
+                    lastRescueGeneration = generation
+                    clipboardRescue?(text)
+                    hud.present(.notice("選取已變動，結果已入剪貼簿"))
+                case .undo, .degraded:
+                    break                              // 無內容可救，安靜丟棄即可
+                }
+            }
+            return
+        }
         // 選取目標尚未落地：pending 期間的所有 outcome 一律走選取分派（首次替換的三種結局）
         if case .selectionPending(let range, let original) = sessionTarget {
             dispatchSelection(outcome, range: range, original: original, commandRaw: snapshot.text)
@@ -569,6 +587,7 @@ public final class DictationController {
     /// unsupported＝打字蓋選取＋立即凍結（無 AX 不可續改）。
     private func applySelectionReplacement(_ text: String, range: FieldContext.SelectedRange, original: String) {
         guard !ledger.frozen else {                 // 聽寫中手動活動已凍結：選取完整性不明，放棄
+            lastRescueGeneration = ledger.generation
             clipboardRescue?(text)
             archiveSession()
             hud.present(.notice("選取已變動，結果已入剪貼簿"))
@@ -581,6 +600,7 @@ public final class DictationController {
             hud.present(.notice("已替換選取"))
             emitFeedback(oldText: original)           // 選取替換全 span 高亮
         case .selectionChanged:
+            lastRescueGeneration = ledger.generation
             clipboardRescue?(text)
             archiveSession()
             hud.present(.notice("選取已變動，結果已入剪貼簿"))
@@ -594,6 +614,7 @@ public final class DictationController {
                 sessionTarget = .tail
                 hud.present(.notice("已取代選取（此 App 不支援後續語音修正）"))
             } catch {
+                lastRescueGeneration = ledger.generation
                 clipboardRescue?(text)
                 archiveSession()
                 hud.present(.notice("無法替換，結果已入剪貼簿"))
