@@ -15,13 +15,15 @@ public struct SessionLedger {
     public var canUndo: Bool { !versions.isEmpty }
 
     /// 開新 session。呼叫端在聽寫啟動時提供 AX 起點錨位（讀不到給 nil）。
-    public mutating func begin(axAnchor: Int?) {
-        sessionText = ""
+    /// initialText＝選取即目標模式的種子（規格 §3.6）：sessionText 起始即為
+    /// 使用者選取的原文，首次 commit 後 undo 便回到它；一般聽寫維持空字串。
+    public mutating func begin(axAnchor: Int?, initialText: String = "") {
+        sessionText = initialText
         versions = []
         frozen = false
         isActive = true
-        generation &+= 1
         self.axAnchor = axAnchor
+        generation &+= 1
     }
 
     /// 新內容落定與修正落定共用：把舊全文推入版本堆疊、換上新全文。

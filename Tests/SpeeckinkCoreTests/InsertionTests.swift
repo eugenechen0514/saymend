@@ -202,3 +202,10 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
         _ = try c.replaceTail(snap, with: "你好。")
     }
 }
+
+@Test func fieldContextHasSelectionRequiresNonEmptyRangeAndText() {
+    #expect(!FieldContext().hasSelection)
+    #expect(!FieldContext(selectedRange: .init(location: 3, length: 0), selectedText: "").hasSelection)
+    #expect(!FieldContext(selectedRange: .init(location: 3, length: 2), selectedText: nil).hasSelection)
+    #expect(FieldContext(selectedRange: .init(location: 3, length: 2), selectedText: "嗨嗨").hasSelection)
+}

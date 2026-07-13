@@ -1,14 +1,47 @@
-/// 聚焦欄位快照與 AX 範圍替換的抽象（規格 §4.6／§5.3）。
+/// 聚焦欄位快照（熱鍵按下瞬間取得，規格 §3.6）。
+/// selectedRange／caretLocation 一律 UTF-16 單位（AX 慣例）；contextBefore/After 是游標（或選取）
+/// 前後的窗口文字，僅作 LLM 語境，不參與任何範圍計算。
 /// Core 只定義介面與值型別；真 AX 實作在 app target 的 AXFieldAccess.swift。
 public struct FieldContext: Equatable, Sendable {
+    public struct SelectedRange: Equatable, Sendable {
+        public var location: Int   // UTF-16
+        public var length: Int     // UTF-16
+        public init(location: Int, length: Int) {
+            self.location = location
+            self.length = length
+        }
+    }
+
     public var hasFocusedElement: Bool
     public var isSecure: Bool
     public var caretLocation: Int?
+    public var selectedRange: SelectedRange?
+    public var selectedText: String?
+    public var contextBefore: String?
+    public var contextAfter: String?
 
-    public init(hasFocusedElement: Bool = false, isSecure: Bool = false, caretLocation: Int? = nil) {
+    public init(hasFocusedElement: Bool = false,
+                isSecure: Bool = false,
+                caretLocation: Int? = nil,
+                selectedRange: SelectedRange? = nil,
+                selectedText: String? = nil,
+                contextBefore: String? = nil,
+                contextAfter: String? = nil) {
         self.hasFocusedElement = hasFocusedElement
         self.isSecure = isSecure
         self.caretLocation = caretLocation
+        self.selectedRange = selectedRange
+        self.selectedText = selectedText
+        self.contextBefore = contextBefore
+        self.contextAfter = contextAfter
+    }
+
+    /// 選取即目標的門檻：range 有長度且真的讀到了文字。
+    /// 只有 range 沒有文字＝AX 讀值失敗，寧可當無選取（走一般聽寫），不可對讀不到的目標動手。
+    public var hasSelection: Bool {
+        guard let r = selectedRange, r.length > 0,
+              let t = selectedText, !t.isEmpty else { return false }
+        return true
     }
 }
 

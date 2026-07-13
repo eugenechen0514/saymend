@@ -73,3 +73,21 @@ import Testing
     #expect(!l.canUndo)
     #expect(l.axAnchor == nil)
 }
+
+@Test func beginWithInitialTextSeedsUndoBase() {
+    var ledger = SessionLedger()
+    ledger.begin(axAnchor: 10, initialText: "原選取文字")
+    #expect(ledger.sessionText == "原選取文字")
+    #expect(!ledger.canUndo)                       // 種子不是一版，還沒有可復原的動作
+    ledger.commit("改寫後")
+    #expect(ledger.canUndo)
+    let step = ledger.undo()
+    #expect(step?.from == "改寫後")
+    #expect(step?.to == "原選取文字")               // 復原＝回到使用者原本選取的文字
+}
+
+@Test func beginDefaultsToEmptyInitialText() {
+    var ledger = SessionLedger()
+    ledger.begin(axAnchor: nil)
+    #expect(ledger.sessionText == "")
+}
