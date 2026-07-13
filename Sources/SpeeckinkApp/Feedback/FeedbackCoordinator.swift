@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import SpeeckinkCore
+import os.log
 
 /// 視覺回饋協調器（規格 §3.5）：Core 發語意事件，這裡決定「畫 overlay 還是降級 HUD diff」。
 /// 鐵律：寧可不顯示，不可畫錯位置——任何 AX 查詢失敗、跟不上，立刻隱藏。
@@ -19,6 +20,14 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
     /// session 不會封存，但焦點已不在原欄位——此時必須隱藏而非照 stale anchor 亂畫
     /// （鐵律：寧可不顯示，不可畫錯位置，規格 §3.5；終審 finding）。
     private var sessionElement: AXUIElement?
+    /// 連續繪製失敗計數與本 session 放棄旗標。
+    /// 鍵入走 CGEvent 事件佇列，sessionUpdated 當下文字常尚未落地——首繪失敗是**時序常態**，
+    /// 不是能力問題（能力用參數化屬性清單探測）。失敗→隱藏＋靠 10Hz 輪詢重試；
+    /// 連續失敗 10 次（約 1 秒）仍畫不出來才對本 session 放棄、降級 HUD diff。
+    private var consecutiveRenderFailures = 0
+    private var overlayGaveUp = false
+    private static let giveUpThreshold = 10
+    private static let logger = Logger(subsystem: "io.speeckink.app", category: "feedback")
     /// 進行中的異動高亮（相對 lastUpdate.text 的 UTF-16 範圍）與其淡出起算牆鐘時間。
     /// 高亮是「最近一次異動」的短暫強調（規格 §3.5），須跨 10Hz 輪詢存活至淡出結束——
     /// 不能像早期版本那樣在 refresh() 裡把它丟掉（否則第一個 poll tick 就消失）。
@@ -56,23 +65,31 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
             diffFallback(update)                       // 無 AX 錨位：overlay 註定不可用
             return
         }
+        if overlayGaveUp {                             // 本 session 已放棄 overlay：維持 diff 降級
+            diffFallback(update)
+            return
+        }
         guard adoptOrVerifySessionElement() else {
             overlay.hide()                             // 焦點不在 session 欄位：不畫，也不判定能力
             return
         }
+        // 能力＝該元素是否宣告 BoundsForRange 參數化屬性（一次探測入快取）。
+        // 不可用「首繪成敗」判能力：鍵入是非同步落地，首繪查座標常跑在文字之前（時序，非能力）。
         let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
-        if capability[bundle] == false {
+        if capability[bundle] == nil, let element = sessionElement {
+            capability[bundle] = Self.supportsBoundsForRange(element)
+            Self.logger.debug("能力探測 \(bundle, privacy: .public)：BoundsForRange=\(self.capability[bundle] ?? false)")
+        }
+        guard capability[bundle] == true else {
             diffFallback(update)
             return
         }
+        startFollowing()                               // 輪詢即重試引擎：文字落地後自動補畫
         if render(update, anchor: anchor) {
-            capability[bundle] = true
-            startFollowing()
+            consecutiveRenderFailures = 0
         } else {
-            capability[bundle] = false                 // 首繪失敗＝該 App 不支援（記入能力快取）
-            overlay.hide()
-            stopFollowing()
-            diffFallback(update)
+            overlay.hide()                             // 鐵律：跟不上先隱藏，讓 poll 補
+            noteRenderFailure()
         }
     }
 
@@ -82,6 +99,7 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         lastUpdate = nil
         sessionElement = nil
         clearHighlight()
+        resetRenderHealth()
     }
 
     func sessionEnded() {
@@ -90,6 +108,32 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         lastUpdate = nil
         sessionElement = nil
         clearHighlight()
+        resetRenderHealth()
+    }
+
+    private func resetRenderHealth() {
+        consecutiveRenderFailures = 0
+        overlayGaveUp = false
+    }
+
+    /// 連續失敗約 1 秒仍畫不出＝該欄位雖宣告能力但回不了可用座標：本 session 放棄 overlay、
+    /// 降級 HUD diff（不寫能力快取——下個 session 重新來過）。
+    private func noteRenderFailure() {
+        consecutiveRenderFailures += 1
+        guard consecutiveRenderFailures >= Self.giveUpThreshold, !overlayGaveUp else { return }
+        overlayGaveUp = true
+        overlay.hide()
+        stopFollowing()
+        Self.logger.debug("overlay 連續 \(Self.giveUpThreshold) 次繪製失敗，本 session 降級 HUD diff")
+        if let update = lastUpdate { diffFallback(update) }
+    }
+
+    /// 元素是否宣告 kAXBoundsForRangeParameterizedAttribute（能力探測）
+    private static func supportsBoundsForRange(_ element: AXUIElement) -> Bool {
+        var namesRef: CFArray?
+        guard AXUIElementCopyParameterizedAttributeNames(element, &namesRef) == .success,
+              let names = namesRef as? [String] else { return false }
+        return names.contains(kAXBoundsForRangeParameterizedAttribute as String)
     }
 
     /// 首次呼叫＝把目前聚焦元素釘為 session 目標；之後＝驗證焦點仍在同一元素。
@@ -178,9 +222,11 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
             stopFollowing()
             return
         }
-        if !render(update, anchor: anchor) {
-            overlay.hide()
-            stopFollowing()
+        if render(update, anchor: anchor) {
+            consecutiveRenderFailures = 0
+        } else {
+            overlay.hide()                             // 暫時跟不上：隱藏但續 poll，落地即補畫
+            noteRenderFailure()
         }
     }
 
