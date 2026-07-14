@@ -114,6 +114,23 @@ enum AXFieldAccess {
         }
         return rects
     }
+
+    /// 聚焦元素的螢幕外接框（CG 座標原點左上）。AX 讀不到 value 的元素（canvas/Electron）
+    /// 常仍可讀 position/size——OCR 備援（規格 §4.7）靠這個框決定截圖區域。
+    static func elementFrame(_ element: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let pv = posRef, CFGetTypeID(pv) == AXValueGetTypeID(),
+              let sv = sizeRef, CFGetTypeID(sv) == AXValueGetTypeID() else { return nil }
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(pv as! AXValue, .cgPoint, &point),
+              AXValueGetValue(sv as! AXValue, .cgSize, &size),
+              size.width > 0, size.height > 0 else { return nil }
+        return CGRect(origin: point, size: size)
+    }
 }
 
 /// 聚焦欄位快照：secure 偵測＋游標錨位（UTF-16）
