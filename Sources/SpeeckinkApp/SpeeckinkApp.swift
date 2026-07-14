@@ -90,9 +90,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             traditionalize = nil
             hud.present(.notice("簡繁保險絲初始化失敗，zh-TW 輸出可能殘留簡體"))
         }
-        // ASR 引擎帶詞彙偏置（規格 §4.8）
+        // ASR 引擎帶詞彙偏置（規格 §4.8）。與 prompt 第 6 層同受 profile.vocabEnabled 節制
+        // （規格 §4.4：特定 App 停用詞彙表以 profile 功能開關實現——兩路注入都要管，終審 finding）。
         let asrEngine = SpeechAnalyzerEngine()
-        asrEngine.contextualStrings = { [vocabStore] in vocabStore!.all().map(\.phrase) }
+        asrEngine.contextualStrings = { [vocabStore, profileStore] in
+            if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+               profileStore!.profile(for: bundle).vocabEnabled == false {
+                return []
+            }
+            return vocabStore!.all().map(\.phrase)
+        }
 
         // 語系解析（M4 設計裁決 4）：session 覆蓋 > profile 固定 > 全域。
         // 標 @MainActor：closure 讀 profileStore／settings 並碰 NSWorkspace 前景 App，

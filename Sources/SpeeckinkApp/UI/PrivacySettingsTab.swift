@@ -11,7 +11,7 @@ struct PrivacySettingsTab: View {
             Section("資料流向") {
                 LabeledContent("語音辨識", value: "本機（Apple SpeechAnalyzer），不出機器")
                 LabeledContent("LLM 端點", value: settings.llmBaseURLString)
-                LabeledContent("送出的內容", value: "轉錄文字、session 全文／選取文字、游標前後文、OCR 螢幕參考、詞彙表、前景 App 名稱")
+                LabeledContent("送出的內容", value: "轉錄文字、session 全文／選取文字、游標前後文、OCR 螢幕參考、詞彙表、前景 App 名稱、你的自訂規則與 per-app 追加規則")
                 Text("使用本地端點（Ollama／LM Studio／MLX）時，以上內容皆不出機器。")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -21,7 +21,7 @@ struct PrivacySettingsTab: View {
             Section("OCR 備援") {
                 LabeledContent("螢幕錄製權限",
                                value: CGPreflightScreenCaptureAccess() ? "已授權（AX 讀不到欄位時啟用小區域截圖）" : "未授權（OCR 備援停用；選配，可於系統設定開啟）")
-                Text("OCR 由 Vision 於本機執行；截圖不落地、辨識文字僅作當次 LLM 語境。")
+                Text("OCR 由 Vision 於本機執行；截圖不落地、辨識文字僅作當次 LLM 語境。截圖範圍是聚焦欄位附近的螢幕可見畫面——若鄰近有其他 App 視窗露出，其可見文字可能一併入鏡。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("密碼欄位") {

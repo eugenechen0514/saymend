@@ -94,20 +94,24 @@ public final class GRDBHistoryStore: HistoryRecording {
         return try GRDBHistoryStore(databaseQueue: dbQueue)
     }
 
+    // 聽寫路徑的寫入一律 asyncWrite（終審 finding）：呼叫端是 @MainActor 的
+    // DictationController，同步 write 會把磁碟 I/O 押在主執行緒上——DB 鎖住/爭用時聽寫會頓。
+    // 歷史是輔助功能且本就 try? 吞錯，失敗靜默即可；GRDB 的 asyncWrite 保證同佇列序列化，
+    // begin→exchange→finish 的順序不變。
+
     public func beginSession(_ record: HistorySessionRecord) {
-        try? dbQueue.write { try record.insert($0) }
+        dbQueue.asyncWrite({ try record.insert($0) }, completion: { _, _ in })
     }
 
     public func recordExchange(_ record: HistoryExchangeRecord) {
-        var r = record
-        try? dbQueue.write { try r.insert($0) }
+        dbQueue.asyncWrite({ try record.insert($0) }, completion: { _, _ in })
     }
 
     public func finishSession(id: String, finalText: String?) {
-        try? dbQueue.write { db in
+        dbQueue.asyncWrite({ db in
             try db.execute(sql: "UPDATE history_session SET finalText = ? WHERE id = ?",
                            arguments: [finalText, id])
-        }
+        }, completion: { _, _ in })
     }
 
     public func recentSessions(limit: Int) -> [HistorySessionRecord] {

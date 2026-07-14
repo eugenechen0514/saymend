@@ -1,6 +1,7 @@
 import AppKit
 import ScreenCaptureKit
 import Vision
+import os
 import os.log
 
 /// OCR 備援上下文（規格 §4.7 OCRReader）：AX 讀不到前後文時，截取聚焦欄位附近小區域
@@ -47,12 +48,23 @@ final class OCRContextReader {
 
     private static func recognize(_ image: CGImage) async -> String? {
         await withCheckedContinuation { continuation in
+            // 單次 resume 守門（終審 finding）：Vision 正常保證 completion 與 perform-throw 互斥，
+            // 但 withCheckedContinuation 重複 resume 是致命 trap——不賭框架行為，自己鎖一道。
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+            let resumeOnce: (String?) -> Void = { value in
+                let first = resumed.withLock { done -> Bool in
+                    if done { return false }
+                    done = true
+                    return true
+                }
+                if first { continuation.resume(returning: value) }
+            }
             let request = VNRecognizeTextRequest { request, _ in
                 let lines = (request.results as? [VNRecognizedTextObservation])?
                     .compactMap { $0.topCandidates(1).first?.string } ?? []
                 let joined = lines.joined(separator: "\n")
                 let trimmed = joined.count > maxCharacters ? String(joined.prefix(maxCharacters)) : joined
-                continuation.resume(returning: trimmed.isEmpty ? nil : trimmed)
+                resumeOnce(trimmed.isEmpty ? nil : trimmed)
             }
             request.recognitionLevel = .accurate
             request.recognitionLanguages = ["zh-Hant", "en-US"]
@@ -60,7 +72,7 @@ final class OCRContextReader {
             let handler = VNImageRequestHandler(cgImage: image)
             DispatchQueue.global(qos: .userInitiated).async {
                 do { try handler.perform([request]) } catch {
-                    continuation.resume(returning: nil)
+                    resumeOnce(nil)
                 }
             }
         }
