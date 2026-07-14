@@ -4,7 +4,7 @@ import GRDB
 /// 聽寫歷史（規格 §4.9）：每 session 一筆＋每 utterance 一筆 exchange。
 /// 收斂裁決（M4 設計裁決 7）：不存 LLM 完整 prompt（含前後文/OCR，隱私面大）；
 /// raw＋outcome 已足回查除錯。secure session 從不開帳，天然不留史。
-public struct HistorySessionRecord: Codable, Equatable, Sendable, FetchableRecord, PersistableRecord {
+public struct HistorySessionRecord: Codable, Equatable, Sendable, Identifiable, FetchableRecord, PersistableRecord {
     public static let databaseTableName = "history_session"
     public var id: String
     public var startedAt: Date

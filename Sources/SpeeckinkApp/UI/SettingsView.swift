@@ -81,26 +81,3 @@ struct GeneralSettingsTab: View {
         .onChange(of: apiKey) { _, v in settings.llmAPIKey = v.isEmpty ? nil : v }
     }
 }
-
-// MARK: - Task 13 前的空殼（Task 13 抽出成獨立檔並填實）
-
-/// 歷史分頁空殼——Task 13 以 `HistorySettingsTab.swift` 取代。
-struct HistorySettingsTab: View {
-    let store: (any HistoryRecording)?
-    let settings: AppSettings
-
-    var body: some View {
-        Text("歷史")
-            .padding()
-    }
-}
-
-/// 隱私分頁空殼——Task 13 以 `PrivacySettingsTab.swift` 取代。
-struct PrivacySettingsTab: View {
-    let settings: AppSettings
-
-    var body: some View {
-        Text("隱私")
-            .padding()
-    }
-}
