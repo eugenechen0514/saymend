@@ -13,8 +13,10 @@ final class SpeechAnalyzerEngine: ASREngine {
     private var pumpTask: Task<Void, Never>?
 
     /// 詞彙表 ASR 偏置（規格 §4.8：引擎支援才餵——SDK 已查證：AnalysisContext.contextualStrings）。
-    /// 每次 start 時讀取，設定變更下個 session 生效。
-    var contextualStrings: (() -> [String])?
+    /// 每次 start 時讀取，設定變更下個 session 生效。標 @MainActor 並於 MainActor 上呼叫：
+    /// closure 讀 App 端未加鎖的 FileVocabStore.entries，而 start 的泵 Task 跑在並行 executor，
+    /// 直接讀會與設定頁詞彙表 CRUD 的 MainActor 寫入並發（資料競爭）。
+    var contextualStrings: (@MainActor () -> [String])?
 
     private func withState<T>(_ body: (inout SpeechAnalyzer?, inout AsyncStream<AnalyzerInput>.Continuation?, inout Task<Void, Never>?) -> T) -> T {
         stateLock.lock()
@@ -40,7 +42,10 @@ final class SpeechAnalyzerEngine: ASREngine {
                     let analyzer = SpeechAnalyzer(modules: [transcriber])
                     self?.withState { a, _, _ in a = analyzer }
 
-                    if let phrases = self?.contextualStrings?(), !phrases.isEmpty {
+                    // 詞彙表快照在 MainActor 上讀取（見屬性註解）：本 Task 跑在並行 executor，
+                    // 顯式跳回 MainActor 呼叫 closure，讀 FileVocabStore 才不會與設定頁 CRUD 競爭。
+                    let phrases = await MainActor.run { [weak self] in self?.contextualStrings?() ?? [] }
+                    if !phrases.isEmpty {
                         let context = AnalysisContext()
                         context.contextualStrings = [.general: phrases]
                         try? await analyzer.setContext(context)   // 偏置失敗不影響聽寫（輔助功能）

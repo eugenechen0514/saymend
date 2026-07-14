@@ -94,8 +94,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let asrEngine = SpeechAnalyzerEngine()
         asrEngine.contextualStrings = { [vocabStore] in vocabStore!.all().map(\.phrase) }
 
-        // 語系解析（M4 設計裁決 4）：session 覆蓋 > profile 固定 > 全域
-        let resolveLanguage: () -> OutputLanguage = { [settings, profileStore] in
+        // 語系解析（M4 設計裁決 4）：session 覆蓋 > profile 固定 > 全域。
+        // 標 @MainActor：closure 讀 profileStore／settings 並碰 NSWorkspace 前景 App，
+        // IntentService 會在 MainActor 上呼叫（避免與設定 CRUD／能力回填的資料競爭）。
+        let resolveLanguage: @MainActor () -> OutputLanguage = { [settings, profileStore] in
             if let override = settings.sessionLanguageOverride { return override }
             if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
                let fixed = profileStore!.profile(for: bundle).fixedLanguage {
@@ -104,8 +106,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             return settings.outputLanguage
         }
 
-        // prompt 4-6 層來源（每次 LLM 呼叫時讀取，設定即時生效）
-        let promptSources: () -> PromptLayerSources = { [settings, profileStore, vocabStore] in
+        // prompt 4-6 層來源（每次 LLM 呼叫時讀取，設定即時生效）。
+        // 標 @MainActor：closure 讀 vocabStore／profileStore／settings 並碰 NSWorkspace 前景 App，
+        // IntentService 會在 MainActor 上呼叫（避免與設定 CRUD／能力回填的資料競爭）。
+        let promptSources: @MainActor () -> PromptLayerSources = { [settings, profileStore, vocabStore] in
             let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
             let profile = bundle.map { profileStore!.profile(for: $0) }
             return PromptLayerSources(

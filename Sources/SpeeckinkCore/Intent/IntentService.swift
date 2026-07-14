@@ -52,14 +52,18 @@ public final class IntentService: IntentServing {
     public static let editTimeout: TimeInterval = 6.0
 
     private let provider: any LLMProvider
-    private let language: () -> OutputLanguage
+    /// 語系與 prompt 來源解析器（App 端組裝）。皆標 @MainActor：closure 內部會讀取
+    /// App 層 store（詞彙表／profile／sessionLanguageOverride）與 NSWorkspace 前景 App，
+    /// 這些都是 MainActor 專屬可變狀態；process() 為 nonisolated async（跑並行 executor），
+    /// 必須跳回 MainActor 才能安全讀取（見 process 內註解）。
+    private let language: @MainActor () -> OutputLanguage
     private let traditionalize: TraditionalizeGuard?
-    private let sources: () -> PromptLayerSources
+    private let sources: @MainActor () -> PromptLayerSources
 
     public init(provider: any LLMProvider,
-                language: @escaping () -> OutputLanguage,
+                language: @escaping @MainActor () -> OutputLanguage,
                 traditionalize: TraditionalizeGuard?,
-                sources: @escaping () -> PromptLayerSources = { PromptLayerSources() }) {
+                sources: @escaping @MainActor () -> PromptLayerSources = { PromptLayerSources() }) {
         self.provider = provider
         self.language = language
         self.traditionalize = traditionalize
@@ -67,8 +71,15 @@ public final class IntentService: IntentServing {
     }
 
     public func process(utteranceRaw: String, context: IntentContext) async -> IntentOutcome {
-        let lang = language()
-        let assembler = PromptAssembler(language: lang, sources: sources())
+        // 語系與 prompt 來源必須在 MainActor 上解析：這兩個 closure 會讀取 App 端未加鎖的可變狀態
+        // （FileVocabStore.entries／FileAppProfileStore.overrides／AppSettings.sessionLanguageOverride）
+        // 並存取主執行緒專屬的 NSWorkspace.frontmostApplication。本方法為 nonisolated async，
+        // 跑在並行 executor，直接呼叫會與設定 CRUD／能力回填／選單語系切換的 MainActor 寫入並發（資料競爭）
+        // 且 off-main 碰 AppKit。顯式跳回 MainActor 取快照即可序列化所有存取、消除競爭。
+        let resolveLanguage = language
+        let resolveSources = sources
+        let (lang, promptSources) = await MainActor.run { (resolveLanguage(), resolveSources()) }
+        let assembler = PromptAssembler(language: lang, sources: promptSources)
         let timeout = context.targetText.isEmpty ? Self.polishTimeout : Self.editTimeout
         do {
             let raw = try await provider.complete(
