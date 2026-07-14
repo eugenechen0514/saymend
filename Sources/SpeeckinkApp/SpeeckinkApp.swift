@@ -12,7 +12,7 @@ struct SpeeckinkApp: App {
             MenuContent(delegate: delegate)
         }
         Settings {
-            SettingsView(settings: delegate.settings)
+            SettingsView(settings: delegate.settings, vocab: delegate.vocabStore, history: delegate.historyStore)
         }
     }
 }

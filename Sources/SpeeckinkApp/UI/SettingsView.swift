@@ -1,9 +1,40 @@
 import SwiftUI
 import SpeeckinkCore
 
+/// 設定殼：TabView 分頁（一般／詞彙表／Prompt／歷史／隱私）。
+/// vocab／history 由 App 注入（nil＝預覽態，分頁自行停用）。
+struct SettingsView: View {
+    let settings: AppSettings
+    let vocab: (any VocabStore)?
+    let history: (any HistoryRecording)?
+
+    init(settings: AppSettings, vocab: (any VocabStore)? = nil, history: (any HistoryRecording)? = nil) {
+        self.settings = settings
+        self.vocab = vocab
+        self.history = history
+    }
+
+    var body: some View {
+        TabView {
+            GeneralSettingsTab(settings: settings)
+                .tabItem { Label("一般", systemImage: "gearshape") }
+            VocabSettingsTab(store: vocab)
+                .tabItem { Label("詞彙表", systemImage: "character.book.closed") }
+            PromptSettingsTab(settings: settings)
+                .tabItem { Label("Prompt", systemImage: "text.badge.checkmark") }
+            HistorySettingsTab(store: history, settings: settings)
+                .tabItem { Label("歷史", systemImage: "clock.arrow.circlepath") }
+            PrivacySettingsTab(settings: settings)
+                .tabItem { Label("隱私", systemImage: "hand.raised") }
+        }
+        .frame(width: 560, height: 420)
+        .padding()
+    }
+}
+
 /// 基本設定（規格 §8 M1：熱鍵／API key／語系）＋ LLM 端點。
 /// AppSettings 非 ObservableObject，故以 @State 快照＋onChange 寫回。
-struct SettingsView: View {
+struct GeneralSettingsTab: View {
     let settings: AppSettings
 
     @State private var hotkey: HotkeyChoice
@@ -48,5 +79,28 @@ struct SettingsView: View {
         .onChange(of: baseURL) { _, v in settings.llmBaseURLString = v }
         .onChange(of: model) { _, v in settings.llmModel = v }
         .onChange(of: apiKey) { _, v in settings.llmAPIKey = v.isEmpty ? nil : v }
+    }
+}
+
+// MARK: - Task 13 前的空殼（Task 13 抽出成獨立檔並填實）
+
+/// 歷史分頁空殼——Task 13 以 `HistorySettingsTab.swift` 取代。
+struct HistorySettingsTab: View {
+    let store: (any HistoryRecording)?
+    let settings: AppSettings
+
+    var body: some View {
+        Text("歷史")
+            .padding()
+    }
+}
+
+/// 隱私分頁空殼——Task 13 以 `PrivacySettingsTab.swift` 取代。
+struct PrivacySettingsTab: View {
+    let settings: AppSettings
+
+    var body: some View {
+        Text("隱私")
+            .padding()
     }
 }
