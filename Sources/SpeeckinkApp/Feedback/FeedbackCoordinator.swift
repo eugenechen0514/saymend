@@ -11,6 +11,7 @@ import os.log
 final class FeedbackCoordinator: SessionFeedbackPresenting {
     private let overlay: OverlayWindowController
     private let hud: HUDWindowController
+    private let profiles: (any AppProfileStore)?
     private var capability: [String: Bool] = [:]
     private var lastUpdate: FeedbackUpdate?
     private var pollTimer: Timer?
@@ -47,9 +48,11 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         return 1.0 - (fadeElapsed / highlightFadeDuration)
     }
 
-    init(overlay: OverlayWindowController, hud: HUDWindowController) {
+    init(overlay: OverlayWindowController, hud: HUDWindowController,
+         profiles: (any AppProfileStore)? = nil) {
         self.overlay = overlay
         self.hud = hud
+        self.profiles = profiles
     }
 
     // MARK: - SessionFeedbackPresenting
@@ -76,9 +79,18 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         // 能力＝該元素是否宣告 BoundsForRange 參數化屬性（一次探測入快取）。
         // 不可用「首繪成敗」判能力：鍵入是非同步落地，首繪查座標常跑在文字之前（時序，非能力）。
         let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
-        if capability[bundle] == nil, let element = sessionElement {
-            capability[bundle] = Self.supportsBoundsForRange(element)
-            Self.logger.debug("能力探測 \(bundle, privacy: .public)：BoundsForRange=\(self.capability[bundle] ?? false)")
+        if capability[bundle] == nil {
+            if let known = profiles?.profile(for: bundle).boundsForRangeCapable {
+                capability[bundle] = known             // 持久 profile（內建庫或先前探測）優先
+            } else if let element = sessionElement {
+                let probed = Self.supportsBoundsForRange(element)
+                capability[bundle] = probed
+                if var p = profiles?.profile(for: bundle) {   // 探測結果回填持久層（M4）
+                    p.boundsForRangeCapable = probed
+                    profiles?.update(p)
+                }
+                Self.logger.debug("能力探測 \(bundle, privacy: .public)：BoundsForRange=\(probed)")
+            }
         }
         guard capability[bundle] == true else {
             diffFallback(update)
@@ -265,5 +277,15 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         }
         axObserver = nil
         observedElement = nil
+    }
+
+    deinit {
+        // 防禦性拆除（M3 終審 minor）：目前為 App 生命週期單例，deinit 實務不可達；
+        // 但若日後可重建，跟隨中釋放會留孤兒 timer 與 run-loop source。
+        // deinit 無 actor 隔離：只做去註冊，不碰其他 MainActor 狀態。
+        pollTimer?.invalidate()
+        if let observer = axObserver {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        }
     }
 }
