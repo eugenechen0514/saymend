@@ -56,10 +56,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let audio = AudioCapture()
     private let keystroke = KeystrokeInserter()
 
-    // M4 持久層：Task 12/13 的設定 UI 分頁讀這些（詞彙表／profile／歷史）
-    private(set) var vocabStore: FileVocabStore!
-    private(set) var profileStore: FileAppProfileStore!
-    private(set) var historyStore: GRDBHistoryStore?
+    // M4 持久層：Task 12/13 的設定 UI 分頁讀這些（詞彙表／profile／歷史）。
+    // 一律屬性初始化、不放 didFinishLaunching：SwiftUI 的 Settings scene body 在啟動時
+    // 就會求值（早於 didFinishLaunching），IUO 延遲初始化會讓 SettingsView 抓到 nil 快照、
+    // 整頁停用（實機驗收 finding）。目錄由 App 注入，Core 只吃 URL。
+    private static let supportDir: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Speeckink", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+    let vocabStore = FileVocabStore(fileURL: AppDelegate.supportDir.appendingPathComponent("vocab.json"))
+    let profileStore = FileAppProfileStore(fileURL: AppDelegate.supportDir.appendingPathComponent("profiles.json"))
+    let historyStore = try? GRDBHistoryStore.onDisk(directory: AppDelegate.supportDir)
     private let ocrReader = OCRContextReader()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -67,13 +76,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
 
-        // M4 持久層組裝（既有組裝之前）：目錄由 App 注入，Core 只吃 URL
-        let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Speeckink", isDirectory: true)
-        try? FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
-        vocabStore = FileVocabStore(fileURL: supportDir.appendingPathComponent("vocab.json"))
-        profileStore = FileAppProfileStore(fileURL: supportDir.appendingPathComponent("profiles.json"))
-        historyStore = try? GRDBHistoryStore.onDisk(directory: supportDir)
         historyStore?.purge(olderThanDays: settings.historyRetentionDays)   // 啟動時清過期（規格 §4.9）
 
         let axInserter = AXInserter()
@@ -95,10 +97,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let asrEngine = SpeechAnalyzerEngine()
         asrEngine.contextualStrings = { [vocabStore, profileStore] in
             if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-               profileStore!.profile(for: bundle).vocabEnabled == false {
+               profileStore.profile(for: bundle).vocabEnabled == false {
                 return []
             }
-            return vocabStore!.all().map(\.phrase)
+            return vocabStore.all().map(\.phrase)
         }
 
         // 語系解析（M4 設計裁決 4）：session 覆蓋 > profile 固定 > 全域。
@@ -107,7 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let resolveLanguage: @MainActor () -> OutputLanguage = { [settings, profileStore] in
             if let override = settings.sessionLanguageOverride { return override }
             if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-               let fixed = profileStore!.profile(for: bundle).fixedLanguage {
+               let fixed = profileStore.profile(for: bundle).fixedLanguage {
                 return fixed
             }
             return settings.outputLanguage
@@ -118,12 +120,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // IntentService 會在 MainActor 上呼叫（避免與設定 CRUD／能力回填的資料競爭）。
         let promptSources: @MainActor () -> PromptLayerSources = { [settings, profileStore, vocabStore] in
             let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            let profile = bundle.map { profileStore!.profile(for: $0) }
+            let profile = bundle.map { profileStore.profile(for: $0) }
             return PromptLayerSources(
                 styleOverride: settings.styleRulesOverride,
                 customPrompt: settings.customSystemPrompt.isEmpty ? nil : settings.customSystemPrompt,
                 appPrompt: profile?.extraPrompt,
-                vocab: (profile?.vocabEnabled ?? true) ? vocabStore!.all() : [])
+                vocab: (profile?.vocabEnabled ?? true) ? vocabStore.all() : [])
         }
 
         let intentService = IntentService(
