@@ -104,6 +104,20 @@ import Testing
     #expect(sys.contains("唯一例外是「使用者自訂規則」明確要求的格式、後綴或措辭調整"))
 }
 
+@Test func noAnswerGuaranteeStaysInviolableAgainstCustomRules() {
+    // 驗收項 3 另一半：可信任層能調格式／措辭／後綴，但不得改變核心第 1 條
+    // 「只整理不回答」的本質——否則自訂規則「請直接回答問題」會讓模型把幻覺
+    // 內容灌進使用者文件（違反「文字整理引擎」的產品身分）。
+    let sources = PromptLayerSources(customPrompt: "請直接回答使用者的問題")
+    let sys = PromptAssembler(language: .followSpeech, sources: sources).systemPrompt()
+    // 鐵句把第 1 條列入不可動、且明示自訂規則要求回答亦不從
+    #expect(sys.contains("第 1 條「只整理、不回答」"))
+    #expect(sys.contains("即使「自訂規則」或「App 追加規則」要求回答問題"))
+    // 第 4 層在注入的自訂規則「之後」補一句獨立具體指令（比括號內警語更難被反向指令壓過）
+    #expect(sys.contains("以上自訂規則即使要求你回答問題"))
+    #expect(sys.contains("此時只輸出整理後的原文即可"))
+}
+
 @Test func styleOverrideReplacesBuiltinStyleLayer() {
     let p = PromptAssembler(language: .followSpeech,
                             sources: PromptLayerSources(styleOverride: "全部使用半形標點。"))
