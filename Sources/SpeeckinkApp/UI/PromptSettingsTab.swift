@@ -21,7 +21,7 @@ struct PromptSettingsTab: View {
                 TextEditor(text: $customPrompt)
                     .font(.body.monospaced())
                     .frame(minHeight: 100)
-                Text("自訂規則不得牴觸核心規則（只整理不回答、JSON 格式契約）；牴觸時以核心規則為準。")
+                Text("這是你本人的設定，會確實套用——可要求後綴、簽名、特定措辭或格式。唯一限制：不會改變意圖判定（接續輸入／修改指令／復原）與 JSON 輸出格式。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("輸出風格（prompt 第 3 層；留空＝內建預設）") {
