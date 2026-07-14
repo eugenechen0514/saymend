@@ -12,6 +12,10 @@ final class SpeechAnalyzerEngine: ASREngine {
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
     private var pumpTask: Task<Void, Never>?
 
+    /// 詞彙表 ASR 偏置（規格 §4.8：引擎支援才餵——SDK 已查證：AnalysisContext.contextualStrings）。
+    /// 每次 start 時讀取，設定變更下個 session 生效。
+    var contextualStrings: (() -> [String])?
+
     private func withState<T>(_ body: (inout SpeechAnalyzer?, inout AsyncStream<AnalyzerInput>.Continuation?, inout Task<Void, Never>?) -> T) -> T {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -35,6 +39,12 @@ final class SpeechAnalyzerEngine: ASREngine {
                     }
                     let analyzer = SpeechAnalyzer(modules: [transcriber])
                     self?.withState { a, _, _ in a = analyzer }
+
+                    if let phrases = self?.contextualStrings?(), !phrases.isEmpty {
+                        let context = AnalysisContext()
+                        context.contextualStrings = [.general: phrases]
+                        try? await analyzer.setContext(context)   // 偏置失敗不影響聽寫（輔助功能）
+                    }
 
                     guard let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
                         continuation.finish()

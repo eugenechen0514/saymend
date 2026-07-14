@@ -23,6 +23,17 @@ struct MenuContent: View {
     var body: some View {
         Text(delegate.statusLine)
         Divider()
+        Menu("輸出語系（本次聽寫）") {
+            Button("跟隨設定：\(delegate.settings.outputLanguage.displayName)") {
+                delegate.settings.sessionLanguageOverride = nil
+            }
+            Divider()
+            ForEach(OutputLanguage.allCases, id: \.self) { lang in
+                Button(lang.displayName) {
+                    delegate.settings.sessionLanguageOverride = lang
+                }
+            }
+        }
         SettingsLink { Text("設定…") }
         Button("測試插入（2 秒後打進聚焦欄位）") { delegate.debugInsert() }
         Button("測試替換（插入後 1 秒潤飾替換）") { delegate.debugReplace() }
@@ -45,13 +56,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let audio = AudioCapture()
     private let keystroke = KeystrokeInserter()
 
+    // M4 持久層：Task 12/13 的設定 UI 分頁讀這些（詞彙表／profile／歷史）
+    private(set) var vocabStore: FileVocabStore!
+    private(set) var profileStore: FileAppProfileStore!
+    private(set) var historyStore: GRDBHistoryStore?
+    private let ocrReader = OCRContextReader()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 輔助功能權限：沒有就跳系統提示（熱鍵與鍵入都靠它）
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
 
+        // M4 持久層組裝（既有組裝之前）：目錄由 App 注入，Core 只吃 URL
+        let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Speeckink", isDirectory: true)
+        try? FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
+        vocabStore = FileVocabStore(fileURL: supportDir.appendingPathComponent("vocab.json"))
+        profileStore = FileAppProfileStore(fileURL: supportDir.appendingPathComponent("profiles.json"))
+        historyStore = try? GRDBHistoryStore.onDisk(directory: supportDir)
+        historyStore?.purge(olderThanDays: settings.historyRetentionDays)   // 啟動時清過期（規格 §4.9）
+
         let axInserter = AXInserter()
-        let axReader = AXFieldReader()
+        let axReader = AXFieldReader(profiles: profileStore)
         let coordinator = InsertionCoordinator(keystroke: keystroke, paste: PasteInserter(),
                                                rangeReplacer: axInserter)
         let provider = OpenAICompatProvider(configProvider: { [settings] in settings.openAIConfig() })
@@ -64,15 +90,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             traditionalize = nil
             hud.present(.notice("簡繁保險絲初始化失敗，zh-TW 輸出可能殘留簡體"))
         }
+        // ASR 引擎帶詞彙偏置（規格 §4.8）
+        let asrEngine = SpeechAnalyzerEngine()
+        asrEngine.contextualStrings = { [vocabStore] in vocabStore!.all().map(\.phrase) }
+
+        // 語系解析（M4 設計裁決 4）：session 覆蓋 > profile 固定 > 全域
+        let resolveLanguage: () -> OutputLanguage = { [settings, profileStore] in
+            if let override = settings.sessionLanguageOverride { return override }
+            if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+               let fixed = profileStore!.profile(for: bundle).fixedLanguage {
+                return fixed
+            }
+            return settings.outputLanguage
+        }
+
+        // prompt 4-6 層來源（每次 LLM 呼叫時讀取，設定即時生效）
+        let promptSources: () -> PromptLayerSources = { [settings, profileStore, vocabStore] in
+            let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            let profile = bundle.map { profileStore!.profile(for: $0) }
+            return PromptLayerSources(
+                styleOverride: settings.styleRulesOverride,
+                customPrompt: settings.customSystemPrompt.isEmpty ? nil : settings.customSystemPrompt,
+                appPrompt: profile?.extraPrompt,
+                vocab: (profile?.vocabEnabled ?? true) ? vocabStore!.all() : [])
+        }
+
         let intentService = IntentService(
             provider: provider,
-            language: { [settings] in settings.outputLanguage },
-            traditionalize: traditionalize
+            language: resolveLanguage,
+            traditionalize: traditionalize,
+            sources: promptSources
         )
-        feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: hud)
+        feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: hud, profiles: profileStore)
         controller = DictationController(
             audio: audio,
-            asr: SpeechAnalyzerEngine(),
+            asr: asrEngine,
             coordinator: coordinator,
             intent: intentService,
             hud: hud,
@@ -83,7 +135,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 NSPasteboard.general.setString(text, forType: .string)
             },
             fieldReader: axReader,
-            feedback: feedbackCoordinator
+            feedback: feedbackCoordinator,
+            history: historyStore,
+            contextOCR: { [ocrReader] in await ocrReader.captureText() }
         )
         audio.levelHandler = { [weak self] level in self?.hud.updateLevel(level) }
 

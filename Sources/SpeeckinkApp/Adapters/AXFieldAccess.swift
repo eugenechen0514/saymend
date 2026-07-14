@@ -152,6 +152,9 @@ final class AXFieldReader: FieldContextProviding {
             context.isSecure = true
             return context
         }
+        // 前景 App 欄位在 secure 短路之後填（密碼欄位快照維持最小資訊，規格 §4.7 FrontAppInfo）
+        context.frontAppBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        context.frontAppName = NSWorkspace.shared.frontmostApplication?.localizedName
         var rangeRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
            let rangeValue = rangeRef, CFGetTypeID(rangeValue) == AXValueGetTypeID() {
