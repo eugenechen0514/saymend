@@ -78,15 +78,18 @@ func keychainStoreRoundTrip() throws {
     #expect(s.styleRulesOverride == nil)
     #expect(s.historyEnabled)
     #expect(s.historyRetentionDays == 30)
+    #expect(!s.ocrContextEnabled)          // OCR 預設關（opt-in）
     s.customSystemPrompt = "簽名 --E"
     s.styleRulesOverride = "半形標點"
     s.historyEnabled = false
     s.historyRetentionDays = 7
+    s.ocrContextEnabled = true
     let reloaded = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
     #expect(reloaded.customSystemPrompt == "簽名 --E")
     #expect(reloaded.styleRulesOverride == "半形標點")
     #expect(!reloaded.historyEnabled)
     #expect(reloaded.historyRetentionDays == 7)
+    #expect(reloaded.ocrContextEnabled)    // 開啟後持久化
 }
 
 @Test func sessionLanguageOverrideIsTransient() {

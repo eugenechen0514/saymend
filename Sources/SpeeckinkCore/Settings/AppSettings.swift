@@ -46,6 +46,7 @@ public final class AppSettings {
         static let styleRulesOverride = "styleRulesOverride"
         static let historyEnabled = "historyEnabled"
         static let historyRetentionDays = "historyRetentionDays"
+        static let ocrContextEnabled = "ocrContextEnabled"
     }
 
     private let defaults: UserDefaults
@@ -100,6 +101,14 @@ public final class AppSettings {
     public var historyEnabled: Bool {
         get { defaults.object(forKey: K.historyEnabled) as? Bool ?? true }
         set { defaults.set(newValue, forKey: K.historyEnabled) }
+    }
+
+    /// OCR 螢幕語境備援開關（規格 §4.7）。預設關（opt-in）：螢幕擷取最具侵入性，
+    /// 由使用者明確開啟才動用。開啟後仍受既有降級序節制——僅在 AX 讀不到前後文、
+    /// 非安全欄位、且螢幕錄製權限已授權時才實際截圖。
+    public var ocrContextEnabled: Bool {
+        get { defaults.object(forKey: K.ocrContextEnabled) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: K.ocrContextEnabled) }
     }
 
     /// 歷史保留天數（規格 §4.9「可設保留天數」；啟動時清除過期）

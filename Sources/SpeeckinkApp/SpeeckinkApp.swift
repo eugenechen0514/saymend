@@ -150,7 +150,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             fieldReader: axReader,
             feedback: feedbackCoordinator,
             history: historyStore,
-            contextOCR: { [ocrReader] in await ocrReader.captureText() }
+            contextOCR: { [ocrReader, settings] in
+                // 設定開關為總閘（規格 §4.7）：關閉時連截圖都不嘗試。開啟後才進入既有降級序
+                // （DictationController 僅在 AX 無前後文且非安全欄位時呼叫此 closure）。
+                guard settings.ocrContextEnabled else { return nil }
+                return await ocrReader.captureText()
+            }
         )
         audio.levelHandler = { [weak self] level in self?.hud.updateLevel(level) }
 

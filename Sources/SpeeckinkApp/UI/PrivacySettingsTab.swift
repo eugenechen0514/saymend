@@ -5,6 +5,12 @@ import SpeeckinkCore
 /// 隱私透明（規格 §4.9）：明列「哪些內容會送到哪個 LLM 端點」。
 struct PrivacySettingsTab: View {
     let settings: AppSettings
+    @State private var ocrEnabled: Bool
+
+    init(settings: AppSettings) {
+        self.settings = settings
+        _ocrEnabled = State(initialValue: settings.ocrContextEnabled)
+    }
 
     var body: some View {
         Form {
@@ -18,10 +24,15 @@ struct PrivacySettingsTab: View {
             Section("錄音") {
                 LabeledContent("錄音檔", value: "不儲存（預設且目前無此功能）")
             }
-            Section("OCR 備援") {
+            Section("OCR 螢幕語境備援") {
+                Toggle("啟用 OCR 螢幕語境備援", isOn: $ocrEnabled)
                 LabeledContent("螢幕錄製權限",
-                               value: CGPreflightScreenCaptureAccess() ? "已授權（AX 讀不到欄位時啟用小區域截圖）" : "未授權（OCR 備援停用；選配，可於系統設定開啟）")
-                Text("OCR 由 Vision 於本機執行；截圖不落地、辨識文字僅作當次 LLM 語境。截圖範圍是聚焦欄位附近的螢幕可見畫面——若鄰近有其他 App 視窗露出，其可見文字可能一併入鏡。")
+                               value: CGPreflightScreenCaptureAccess() ? "已授權" : "未授權（需於系統設定開啟後才能實際截圖）")
+                if ocrEnabled, !CGPreflightScreenCaptureAccess() {
+                    Text("已開啟，但尚未取得螢幕錄製權限——目前不會截圖。請到「系統設定 › 隱私權與安全性 › 螢幕錄製」授權。")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                Text("預設關閉。開啟後，僅在輔助使用讀不到游標前後文、且非安全欄位時，才截取聚焦欄位附近的小區域畫面。OCR 由 Vision 於本機執行；截圖不落地、辨識文字僅作當次 LLM 語境、不留歷史。截圖範圍是螢幕可見畫面——若鄰近有其他 App 視窗露出，其可見文字可能一併入鏡。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("密碼欄位") {
@@ -31,5 +42,6 @@ struct PrivacySettingsTab: View {
         }
         .formStyle(.grouped)
         .padding()
+        .onChange(of: ocrEnabled) { _, v in settings.ocrContextEnabled = v }
     }
 }
