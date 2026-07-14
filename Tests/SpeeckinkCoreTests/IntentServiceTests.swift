@@ -87,6 +87,14 @@ private func makeService(_ provider: ScriptedIntentProvider,
     #expect(outcome == .editedSession("正式版本"))
 }
 
+@Test func intentServiceInjectsSourcesIntoSystemPrompt() async {
+    let provider = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"好。"}"#))
+    let service = IntentService(provider: provider, language: { .followSpeech }, traditionalize: nil,
+                                sources: { PromptLayerSources(customPrompt: "簽名 --E") })
+    _ = await service.process(utteranceRaw: "好", context: .session(""))
+    #expect(provider.lastSystem?.contains("簽名 --E") == true)
+}
+
 @Test func traditionalizeGuardAppliesToBothTextOutcomes() async throws {
     let p1 = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"干净"}"#))
     let o1 = await makeService(p1, language: .zhTW, traditionalize: try TraditionalizeGuard()).process(utteranceRaw: "x", context: .session(""))

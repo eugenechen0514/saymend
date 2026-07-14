@@ -17,13 +17,20 @@ public struct IntentContext: Equatable, Sendable {
     public var targetText: String
     public var contextBefore: String?
     public var contextAfter: String?
+    /// 前景 App 名稱（第 7 層動態上下文，規格 §4.7 FrontAppInfo）
+    public var frontAppName: String?
+    /// OCR 螢幕參考文字（AX 讀不到前後文時的備援，規格 §4.7 OCRReader）
+    public var ocrText: String?
 
     public init(targetKind: Target = .session, targetText: String = "",
-                contextBefore: String? = nil, contextAfter: String? = nil) {
+                contextBefore: String? = nil, contextAfter: String? = nil,
+                frontAppName: String? = nil, ocrText: String? = nil) {
         self.targetKind = targetKind
         self.targetText = targetText
         self.contextBefore = contextBefore
         self.contextAfter = contextAfter
+        self.frontAppName = frontAppName
+        self.ocrText = ocrText
     }
 
     public static func session(_ text: String) -> IntentContext {
@@ -47,18 +54,21 @@ public final class IntentService: IntentServing {
     private let provider: any LLMProvider
     private let language: () -> OutputLanguage
     private let traditionalize: TraditionalizeGuard?
+    private let sources: () -> PromptLayerSources
 
     public init(provider: any LLMProvider,
                 language: @escaping () -> OutputLanguage,
-                traditionalize: TraditionalizeGuard?) {
+                traditionalize: TraditionalizeGuard?,
+                sources: @escaping () -> PromptLayerSources = { PromptLayerSources() }) {
         self.provider = provider
         self.language = language
         self.traditionalize = traditionalize
+        self.sources = sources
     }
 
     public func process(utteranceRaw: String, context: IntentContext) async -> IntentOutcome {
         let lang = language()
-        let assembler = PromptAssembler(language: lang)
+        let assembler = PromptAssembler(language: lang, sources: sources())
         let timeout = context.targetText.isEmpty ? Self.polishTimeout : Self.editTimeout
         do {
             let raw = try await provider.complete(
