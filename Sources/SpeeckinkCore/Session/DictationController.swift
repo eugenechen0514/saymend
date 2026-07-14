@@ -60,6 +60,12 @@ public final class DictationController {
     private let fieldReader: (any FieldContextProviding)?
     /// 視覺回饋層（規格 §3.5）：Core 只發語意事件，App 端 FeedbackCoordinator 決定畫不畫、畫哪裡
     private let feedback: (any SessionFeedbackPresenting)?
+    /// 聽寫歷史（規格 §4.9）：nil＝不記錄。寫入失敗不得影響聽寫主流程。
+    private let history: (any HistoryRecording)?
+    /// OCR 備援上下文（規格 §4.7）：AX 讀不到前後文時的非同步截圖辨識，App 端注入；nil＝停用。
+    private let contextOCR: (() async -> String?)?
+    /// 時間來源（歷史記錄時戳）；測試可注入固定時鐘。
+    private let now: () -> Date
 
     /// session 帳本（測試經 @testable 檢視）
     private(set) var ledger = SessionLedger()
@@ -88,6 +94,14 @@ public final class DictationController {
     /// 熱鍵按下當下的前後文窗口（LLM 語境；tail 與 selection 模式皆用）
     private var capturedContextBefore: String?
     private var capturedContextAfter: String?
+    /// 進行中 session 的歷史 id（nil＝未記錄，如歷史關閉或密碼欄位）
+    private var historySessionID: String?
+    /// 熱鍵按下當下的前景 App 名稱（第 7 層動態上下文，規格 §4.7）
+    private var capturedFrontAppName: String?
+    /// OCR 備援落地的螢幕參考文字（趕上哪句算哪句——M4 設計裁決 5）
+    private var capturedOCRText: String?
+    /// internal 供測試 await（OCR 非同步落地，趕上哪句算哪句——M4 設計裁決 5）
+    private(set) var ocrTask: Task<Void, Never>?
 
     public init(audio: any AudioCaptureService,
                 asr: any ASREngine,
@@ -98,7 +112,10 @@ public final class DictationController {
                 segmenter: UtteranceSegmenter = UtteranceSegmenter(),
                 clipboardRescue: ((String) -> Void)? = nil,
                 fieldReader: (any FieldContextProviding)? = nil,
-                feedback: (any SessionFeedbackPresenting)? = nil) {
+                feedback: (any SessionFeedbackPresenting)? = nil,
+                history: (any HistoryRecording)? = nil,
+                contextOCR: (() async -> String?)? = nil,
+                now: @escaping () -> Date = Date.init) {
         self.audio = audio
         self.asr = asr
         self.coordinator = coordinator
@@ -109,6 +126,9 @@ public final class DictationController {
         self.clipboardRescue = clipboardRescue
         self.fieldReader = fieldReader
         self.feedback = feedback
+        self.history = history
+        self.contextOCR = contextOCR
+        self.now = now
     }
 
     // MARK: - 熱鍵事件
@@ -326,6 +346,27 @@ public final class DictationController {
                     sessionTarget = .tail
                     ledger.begin(axAnchor: field.caretLocation)   // UTF-16 單位，僅 AX 路徑使用
                 }
+                capturedFrontAppName = field.frontAppName
+                if settings.historyEnabled, let history {
+                    let hid = UUID().uuidString
+                    historySessionID = hid
+                    let kind = { if case .selectionPending = sessionTarget { return "selection" }; return "tail" }()
+                    history.beginSession(.init(id: hid, startedAt: now(),
+                                               appBundleID: field.frontAppBundleID,
+                                               appName: field.frontAppName,
+                                               targetKind: kind, finalText: nil))
+                }
+                // OCR 備援（規格 §4.7 降級序：AX 讀得到就不動用）；非同步，結果趕上哪句算哪句。
+                capturedOCRText = nil
+                ocrTask?.cancel()
+                ocrTask = nil
+                if field.contextBefore == nil, field.contextAfter == nil, !field.isSecure,
+                   let contextOCR {
+                    ocrTask = Task { [weak self] in
+                        let text = await contextOCR()
+                        await MainActor.run { self?.capturedOCRText = text }
+                    }
+                }
             }
             sessionID &+= 1
             let sid = sessionID
@@ -363,6 +404,15 @@ public final class DictationController {
     }
 
     private func archiveSession() {
+        // 定稿入史（規格 §4.9）：ledger.archive() 會清空 sessionText，故先抓最終全文。
+        if let hid = historySessionID {
+            let final = ledger.sessionText
+            history?.finishSession(id: hid, finalText: final.isEmpty ? nil : final)
+            historySessionID = nil
+        }
+        ocrTask?.cancel()
+        ocrTask = nil
+        capturedOCRText = nil
         ledger.archive()
         feedback?.sessionEnded()            // 封存：overlay 立即隱藏
         internalPhase = .idle
@@ -402,10 +452,12 @@ public final class DictationController {
         switch sessionTarget {
         case .tail:
             context = IntentContext(targetKind: .session, targetText: sessionBefore,
-                                    contextBefore: capturedContextBefore, contextAfter: capturedContextAfter)
+                                    contextBefore: capturedContextBefore, contextAfter: capturedContextAfter,
+                                    frontAppName: capturedFrontAppName, ocrText: capturedOCRText)
         case .selectionPending(_, let original):
             context = IntentContext(targetKind: .selection, targetText: original,
-                                    contextBefore: capturedContextBefore, contextAfter: capturedContextAfter)
+                                    contextBefore: capturedContextBefore, contextAfter: capturedContextAfter,
+                                    frontAppName: capturedFrontAppName, ocrText: capturedOCRText)
         }
         // 這句話是否在 selectionPending 期間被緩衝（從未上屏）——dispatch 時據此走緩衝落地路徑
         let wasBuffered = { if case .selectionPending = sessionTarget { return true }; return false }()
@@ -430,6 +482,12 @@ public final class DictationController {
                           generation: Int,
                           wasBuffered: Bool) {
         pendingIntents = max(0, pendingIntents - 1)
+        // 歷史記錄（規格 §4.9）：丟棄的 outcome 也入史——回查除錯正是要看見被丟棄的（守衛之前記）。
+        if settings.historyEnabled, let hid = historySessionID {
+            history?.recordExchange(.init(sessionID: hid, at: now(),
+                                          utteranceRaw: snapshot.text.isEmpty ? sessionBefore : snapshot.text,
+                                          outcomeKind: outcome.historyKind, outcomeText: outcome.historyText))
+        }
         // 世代檢查：archive→begin 之後，舊 session 在途的 outcome 一律丟棄——
         // 不能用 sessionID（延續窗 resume 也跳號，會誤殺同 session 的合法在途潤飾）。
         // 但緩衝句（選取模式）的 outcome 不能無聲蒸發：它的原文從未上屏，丟棄＝使用者白說話。

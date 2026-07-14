@@ -19,6 +19,9 @@ public struct FieldContext: Equatable, Sendable {
     public var selectedText: String?
     public var contextBefore: String?
     public var contextAfter: String?
+    /// 前景 App（規格 §4.7 FrontAppInfo；App 端 AXFieldReader 以 NSWorkspace 填入）
+    public var frontAppBundleID: String?
+    public var frontAppName: String?
 
     public init(hasFocusedElement: Bool = false,
                 isSecure: Bool = false,
@@ -26,7 +29,9 @@ public struct FieldContext: Equatable, Sendable {
                 selectedRange: SelectedRange? = nil,
                 selectedText: String? = nil,
                 contextBefore: String? = nil,
-                contextAfter: String? = nil) {
+                contextAfter: String? = nil,
+                frontAppBundleID: String? = nil,
+                frontAppName: String? = nil) {
         self.hasFocusedElement = hasFocusedElement
         self.isSecure = isSecure
         self.caretLocation = caretLocation
@@ -34,6 +39,8 @@ public struct FieldContext: Equatable, Sendable {
         self.selectedText = selectedText
         self.contextBefore = contextBefore
         self.contextAfter = contextAfter
+        self.frontAppBundleID = frontAppBundleID
+        self.frontAppName = frontAppName
     }
 
     /// 選取即目標的門檻：range 有長度且真的讀到了文字。

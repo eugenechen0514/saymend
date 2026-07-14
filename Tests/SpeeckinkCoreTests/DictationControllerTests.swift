@@ -1138,3 +1138,100 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     c.hotkeyPressed(at: 10.0)                        // 麥克風啟動失敗
     #expect(c.settings.sessionLanguageOverride == nil)
 }
+
+// MARK: - Task 9：歷史記錄、OCR 注入、前景 App 上下文
+
+@MainActor
+@Test func historyRecordsSessionExchangeAndFinalText() async {
+    let intent = GatedIntentService()
+    intent.outcome = .newContent("你好。")
+    let history = FakeHistory()
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0,
+                                  frontAppBundleID: "com.apple.TextEdit", frontAppName: "TextEdit")
+    let (c, _, asr, _, _, _) = makeController(polisher: intent, fieldReader: reader, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("呃你好"), at: 10.5)
+    c.hotkeyReleased(at: 11.0)
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.1)
+    await c.lastIntentTask?.value
+    c.escapePressed()                                // 延續窗 Esc＝封存＝定稿入史
+    #expect(history.sessions.count == 1)
+    #expect(history.sessions[0].appBundleID == "com.apple.TextEdit")
+    #expect(history.sessions[0].appName == "TextEdit")
+    #expect(history.sessions[0].targetKind == "tail")
+    #expect(history.exchanges.count == 1)
+    #expect(history.exchanges[0].utteranceRaw == "呃你好")
+    #expect(history.exchanges[0].outcomeKind == "newContent")
+    #expect(history.exchanges[0].outcomeText == "你好。")
+    #expect(history.finished.count == 1)
+    #expect(history.finished[0].finalText == "你好。")
+}
+
+@MainActor
+@Test func historyDisabledRecordsNothing() async {
+    let intent = GatedIntentService()
+    let history = FakeHistory()
+    let (c, _, _, _, _, _) = makeController(polisher: intent, history: history)
+    c.settings.historyEnabled = false
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("字"), at: 10.5)
+    c.tick(at: 12.1)
+    await c.lastIntentTask?.value
+    c.escapePressed()
+    #expect(history.sessions.isEmpty && history.exchanges.isEmpty && history.finished.isEmpty)
+}
+
+@MainActor
+@Test func secureFieldLeavesNoHistory() {
+    let history = FakeHistory()
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: true)
+    let (c, _, _, _, _, _) = makeController(fieldReader: reader, history: history)
+    c.hotkeyPressed(at: 10.0)                        // 密碼欄位：不開 session
+    #expect(history.sessions.isEmpty)                // 規格 §5.3 不留歷史
+}
+
+@MainActor
+@Test func ocrRunsOnlyWhenAXContextMissingAndFeedsContext() async {
+    let intent = GatedIntentService()
+    var ocrCalls = 0
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0)   // 無前後文
+    let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader,
+                                            contextOCR: { ocrCalls += 1; return "螢幕參考" })
+    c.hotkeyPressed(at: 10.0)
+    await c.ocrTask?.value                           // 等非同步 OCR 落地
+    c.handleTranscript(.finalized("你好"), at: 10.5)
+    c.tick(at: 12.1)
+    await c.lastIntentTask?.value
+    #expect(ocrCalls == 1)
+    #expect(intent.calls.last?.context.ocrText == "螢幕參考")
+}
+
+@MainActor
+@Test func ocrSkippedWhenAXContextPresent() async {
+    let intent = GatedIntentService()
+    var ocrCalls = 0
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 3, contextBefore: "前文")
+    let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader,
+                                            contextOCR: { ocrCalls += 1; return "不該用到" })
+    c.hotkeyPressed(at: 10.0)
+    #expect(c.ocrTask == nil)
+    #expect(ocrCalls == 0)                           // AX 讀得到＝不動用 OCR（規格 §4.7 降級序）
+}
+
+@MainActor
+@Test func frontAppNameFlowsIntoIntentContext() async {
+    let intent = GatedIntentService()
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, frontAppName: "Slack")
+    let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("哈囉"), at: 10.5)
+    c.tick(at: 12.1)
+    await c.lastIntentTask?.value
+    #expect(intent.calls.last?.context.frontAppName == "Slack")
+}

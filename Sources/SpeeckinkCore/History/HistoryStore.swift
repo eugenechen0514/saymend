@@ -141,3 +141,22 @@ public final class GRDBHistoryStore: HistoryRecording {
         }
     }
 }
+
+public extension IntentOutcome {
+    /// 歷史記錄用的種類字串與文字（規格 §4.9）
+    var historyKind: String {
+        switch self {
+        case .newContent: return "newContent"
+        case .editedSession: return "editedSession"
+        case .undo: return "undo"
+        case .degraded: return "degraded"
+        }
+    }
+    var historyText: String? {
+        switch self {
+        case .newContent(let t), .editedSession(let t): return t
+        case .degraded(let reason): return reason
+        case .undo: return nil
+        }
+    }
+}

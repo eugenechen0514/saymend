@@ -110,6 +110,20 @@ final class FakeFieldReader: FieldContextProviding {
     func snapshot() -> FieldContext { context }
 }
 
+/// 歷史 spy
+final class FakeHistory: HistoryRecording {
+    private(set) var sessions: [HistorySessionRecord] = []
+    private(set) var exchanges: [HistoryExchangeRecord] = []
+    private(set) var finished: [(id: String, finalText: String?)] = []
+    func beginSession(_ record: HistorySessionRecord) { sessions.append(record) }
+    func recordExchange(_ record: HistoryExchangeRecord) { exchanges.append(record) }
+    func finishSession(id: String, finalText: String?) { finished.append((id, finalText)) }
+    func recentSessions(limit: Int) -> [HistorySessionRecord] { Array(sessions.suffix(limit).reversed()) }
+    func exchanges(sessionID: String) -> [HistoryExchangeRecord] { exchanges.filter { $0.sessionID == sessionID } }
+    func purge(olderThanDays: Int) {}
+    func deleteAll() { sessions = []; exchanges = []; finished = [] }
+}
+
 /// 回饋層 spy（M3 overlay／diff 的 Core 側接點）
 final class FakeFeedback: SessionFeedbackPresenting {
     enum Event: Equatable {
@@ -131,7 +145,9 @@ func makeController(
     rangeReplacer: FakeRangeReplacer? = nil,
     clipboard: ClipboardSpy? = nil,
     fieldReader: FakeFieldReader? = nil,
-    feedback: FakeFeedback? = nil
+    feedback: FakeFeedback? = nil,
+    history: FakeHistory? = nil,
+    contextOCR: (() async -> String?)? = nil
 ) -> (DictationController, FakeAudio, FakeASR, RecordingInserter, GatedIntentService, FakeHUD) {
     let audio = FakeAudio()
     let asr = FakeASR()
@@ -146,7 +162,9 @@ func makeController(
         intent: polisher, hud: hud, settings: settings,
         clipboardRescue: clipboard.map { spy in { spy.rescue($0) } },
         fieldReader: fieldReader,
-        feedback: feedback
+        feedback: feedback,
+        history: history,
+        contextOCR: contextOCR
     )
     return (controller, audio, asr, key, polisher, hud)
 }
