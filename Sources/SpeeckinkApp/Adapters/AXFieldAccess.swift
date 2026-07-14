@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import SpeeckinkCore
 
@@ -135,6 +136,13 @@ enum AXFieldAccess {
 
 /// 聚焦欄位快照：secure 偵測＋游標錨位（UTF-16）
 final class AXFieldReader: FieldContextProviding {
+    private let profiles: (any AppProfileStore)?
+    private let clipboardFallback = ClipboardSelectionReader()
+
+    init(profiles: (any AppProfileStore)? = nil) {
+        self.profiles = profiles
+    }
+
     func snapshot() -> FieldContext {
         guard let element = AXFieldAccess.focusedElement() else { return FieldContext() }
         var context = FieldContext(hasFocusedElement: true)
@@ -156,6 +164,11 @@ final class AXFieldReader: FieldContextProviding {
                     if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selRef) == .success,
                        let sel = selRef as? String, !sel.isEmpty {
                         context.selectedText = sel
+                    } else if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                              profiles?.profile(for: bundle).cmdCSelectionFallback == true {
+                        // 白名單備援（M4 設計裁決 6）：AX 有 range 沒文字（部分 Electron），
+                        // 以 Cmd+C 抓選取。仍讀不到＝維持 hasSelection false（一般聽寫）。
+                        context.selectedText = clipboardFallback.readSelection()
                     }
                     // 讀到 range 卻讀不到文字＝hasSelection 為 false，自然退回一般聽寫（Task 1 裁決）
                 }
