@@ -130,6 +130,8 @@ import Testing
     ctx.frontAppName = "Slack"
     ctx.ocrText = "螢幕上的參考資訊"
     let payload = p.userPayload(utteranceRaw: "你好", context: ctx)
-    #expect(payload.contains("目前目標 App：Slack"))
+    // 前景 App 名稱與 OCR 皆須帶「不要輸出它」守衛（驗收：選取編輯時 App 名稱鷹架洩漏進輸出）
+    #expect(payload.contains("目前目標 App（僅供理解語境，不要輸出它）：Slack"))
     #expect(payload.contains("螢幕參考文字（OCR，僅供理解語境，不要輸出它）：\n螢幕上的參考資訊"))
+    #expect(!payload.contains("目前目標 App：Slack"))   // 不得再有無守衛的裸行
 }
