@@ -69,6 +69,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let vocabStore = FileVocabStore(fileURL: AppDelegate.supportDir.appendingPathComponent("vocab.json"))
     let profileStore = FileAppProfileStore(fileURL: AppDelegate.supportDir.appendingPathComponent("profiles.json"))
     let historyStore = try? GRDBHistoryStore.onDisk(directory: AppDelegate.supportDir)
+    // M5 新增：一律屬性初始化、不放 didFinishLaunching——SwiftUI Settings scene body
+    // 在啟動時即求值，早於 didFinishLaunching（M4 驗收踩過的坑，commit 13ad337）。
+    let coreModeStore = FileCoreModeStore(fileURL: AppDelegate.supportDir.appendingPathComponent("core_modes.json"))
+    let coreModeResolver = CoreModeResolver()
     private let ocrReader = OCRContextReader()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -103,40 +107,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             return vocabStore.all().map(\.phrase)
         }
 
-        // 語系解析（M4 設計裁決 4）：session 覆蓋 > profile 固定 > 全域。
-        // 標 @MainActor：closure 讀 profileStore／settings 並碰 NSWorkspace 前景 App，
-        // IntentService 會在 MainActor 上呼叫（避免與設定 CRUD／能力回填的資料競爭）。
-        let resolveLanguage: @MainActor () -> OutputLanguage = { [settings, profileStore] in
-            if let override = settings.sessionLanguageOverride { return override }
-            if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-               let fixed = profileStore.profile(for: bundle).fixedLanguage {
-                return fixed
-            }
-            return settings.outputLanguage
-        }
-
-        // prompt 4-6 層來源（每次 LLM 呼叫時讀取，設定即時生效）。
-        // 標 @MainActor：closure 讀 vocabStore／profileStore／settings 並碰 NSWorkspace 前景 App，
-        // IntentService 會在 MainActor 上呼叫（避免與設定 CRUD／能力回填的資料競爭）。
-        let promptSources: @MainActor () -> PromptLayerSources = { [settings, profileStore, vocabStore] in
+        // prompt 輸入單一快照（規格 §3.5）：同一次呼叫內只讀一次 frontmostApplication 與 profile，
+        // language / sources / mode 三者由同一個 bundle+profile 衍生——torn read 在構造上不可能發生。
+        // 標 @MainActor：讀 vocabStore／profileStore／coreModeStore／settings 並碰 NSWorkspace 前景 App；
+        // IntentService 會在單一 MainActor.run 內呼叫本 closure。
+        let promptInputs: @MainActor () -> PromptInputs = {
+            [settings, profileStore, vocabStore, coreModeStore, coreModeResolver] in
+            // ① 只讀一次
             let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
             let profile = bundle.map { profileStore.profile(for: $0) }
-            return PromptLayerSources(
+
+            // ② 語系解析（M4 設計裁決 4）：session 覆蓋 > profile 固定 > 全域
+            let language: OutputLanguage = {
+                if let override = settings.sessionLanguageOverride { return override }
+                if let fixed = profile?.fixedLanguage { return fixed }
+                return settings.outputLanguage
+            }()
+
+            // ③ prompt 3-6 層來源（M4 既有）
+            let sources = PromptLayerSources(
                 styleOverride: settings.styleRulesOverride,
                 customPrompt: settings.customSystemPrompt.isEmpty ? nil : settings.customSystemPrompt,
                 appPrompt: profile?.extraPrompt,
                 vocab: (profile?.vocabEnabled ?? true) ? vocabStore.all() : [])
-        }
 
-        // M5 Task 8 過渡態：mode 暫時固定為內建預設，CoreModeResolver 接入排在 Task 10。
-        let resolveInputs: @MainActor () -> PromptInputs = {
-            PromptInputs(language: resolveLanguage(), sources: promptSources(),
-                        mode: PromptAssembler.pureDictationMode)
+            // ④ 核心模式解析（M5 §3.1）：session > per-app > 全域 > 內建預設
+            let mode = coreModeResolver.resolve(
+                sessionModeID: settings.sessionCoreModeID,
+                appModeID: profile?.coreModeID,
+                defaultModeID: settings.defaultCoreModeID,
+                availableModes: PromptAssembler.builtinCoreModes + coreModeStore.allUserModes())
+
+            return PromptInputs(language: language, sources: sources, mode: mode)
         }
         let intentService = IntentService(
             provider: provider,
             traditionalize: traditionalize,
-            inputs: resolveInputs
+            inputs: promptInputs
         )
         feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: hud, profiles: profileStore)
         controller = DictationController(
@@ -259,5 +266,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             try? await Task.sleep(for: .seconds(1))
             _ = try? coordinator.replaceTail(snapshot, with: "測試👨‍👩‍👧‍👦文字。")
         }
+    }
+
+    /// 選單列「將目前 App 綁定為此模式」（規格 §4.3）：寫入 AppProfile.coreModeID。
+    /// 無 frontmost bundle ID 時不動作（選單項於該情境停用）。
+    @MainActor
+    func bindFrontAppToMode(_ modeID: String?) {
+        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return }
+        var p = profileStore.profile(for: bundleID)
+        p.coreModeID = modeID          // nil ＝「跟隨全域」解除綁定
+        profileStore.update(p)
+    }
+
+    /// 選單列顯示用：目前實際生效的模式（走完整解析鏈，非只讀 raw setting）。
+    @MainActor
+    func currentActiveMode() -> CoreMode {
+        let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let profile = bundle.map { profileStore.profile(for: $0) }
+        return coreModeResolver.resolve(
+            sessionModeID: settings.sessionCoreModeID,
+            appModeID: profile?.coreModeID,
+            defaultModeID: settings.defaultCoreModeID,
+            availableModes: PromptAssembler.builtinCoreModes + coreModeStore.allUserModes())
+    }
+
+    /// 選單列與設定分頁共用的可選模式清單。
+    @MainActor
+    func allSelectableModes() -> [CoreMode] {
+        PromptAssembler.builtinCoreModes + coreModeStore.allUserModes()
     }
 }
