@@ -19,6 +19,7 @@ struct MenuContent: View {
                 }
             }
         }
+        CoreModeMenu(delegate: delegate)      // M5 新增
         SettingsLink { Text("設定…") }
         Button("測試插入（2 秒後打進聚焦欄位）") { delegate.debugInsert() }
         Button("測試替換（插入後 1 秒潤飾替換）") { delegate.debugReplace() }

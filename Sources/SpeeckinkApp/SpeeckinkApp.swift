@@ -23,6 +23,12 @@ struct SpeeckinkApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let settings = AppSettings()
     @Published var statusLine = "待機"
+    /// 核心模式狀態版本號：session/default/per-app 綁定改動時遞增。這些狀態存在
+    /// AppSettings／FileAppProfileStore（皆非 ObservableObject），SwiftUI 無從得知
+    /// 何時該重建選單。改模式的動作一律走 delegate 方法並 bump 此值，讓觀察 delegate
+    /// 的 MenuBarExtra 內容在「使用者真的改了模式」時重建一次（而非靠 0.25s tick 狂重建
+    /// ——那正是子選單閃退的成因），使勾勾反映最新的解析結果。
+    @Published private(set) var coreModeMenuToken = 0
 
     private(set) var controller: DictationController!
     private let hud = HUDWindowController()
@@ -196,6 +202,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                   app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
             Task { @MainActor in
                 self?.controller.userActivityDetected(at: Date().timeIntervalSinceReferenceDate)
+                // 切前景 App 會改變 per-app 的核心模式解析結果，選單勾勾必須跟著重算——
+                // token 只被三個改模式的 delegate 方法 bump，這條事件也要 bump，否則
+                // 切 App 後選單勾勾會 stale（不反映新前景 App 的綁定）。
+                self?.coreModeMenuToken += 1
             }
         }
         do {
@@ -251,6 +261,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    /// 選單列點選第一區＝設本次聽寫的 session 覆蓋（規格 §3.2）。
+    @MainActor
+    func selectSessionCoreMode(_ modeID: String?) {
+        settings.sessionCoreModeID = modeID
+        coreModeMenuToken += 1
+    }
+
+    /// 選單列「設為全域預設」（規格 §3.2）。nil ＝ 回內建預設。
+    @MainActor
+    func selectDefaultCoreMode(_ modeID: String?) {
+        settings.defaultCoreModeID = modeID
+        coreModeMenuToken += 1
+    }
+
     /// 選單列「將目前 App 綁定為此模式」（規格 §4.3）：寫入 AppProfile.coreModeID。
     /// 無 frontmost bundle ID 時不動作（選單項於該情境停用）。
     @MainActor
@@ -259,6 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         var p = profileStore.profile(for: bundleID)
         p.coreModeID = modeID          // nil ＝「跟隨全域」解除綁定
         profileStore.update(p)
+        coreModeMenuToken += 1
     }
 
     /// 選單列顯示用：目前實際生效的模式（走完整解析鏈，非只讀 raw setting）。
@@ -277,5 +302,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @MainActor
     func allSelectableModes() -> [CoreMode] {
         PromptAssembler.builtinCoreModes + coreModeStore.allUserModes()
+    }
+
+    /// 開啟設定視窗（規格 §4.3「管理模式…」）。
+    /// macOS 14+ 與更早版本的 selector 名稱不同；分頁定位由 SwiftUI 記憶上次選取的 tab 提供，
+    /// 無公開 API 可強制切到特定 tab——使用者首次需自行點「核心模式」分頁。
+    /// （此為 SwiftUI Settings scene 的已知限制，記入 §8。）
+    @MainActor
+    func openCoreModeSettings() {
+        if #available(macOS 14, *) {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
 }
