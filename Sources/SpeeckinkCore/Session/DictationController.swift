@@ -569,7 +569,7 @@ public final class DictationController {
             if ledger.frozen {
                 hud.present(.notice("未潤飾"))
             } else {
-                keepRaw(snapshot, notice: "未潤飾")
+                keepRawWithoutVersion(snapshot, notice: "未潤飾")   // A4：mirror 但不建版本
             }
         }
     }
@@ -729,6 +729,17 @@ public final class DictationController {
     private func keepRaw(_ snapshot: InsertionCoordinator.UtteranceSnapshot, notice: String) {
         if !snapshot.text.isEmpty {
             ledger.commit(ledger.sessionText + snapshot.text)
+        }
+        hud.present(.notice(notice))
+        emitFeedback()
+    }
+
+    /// tail 的 .degraded 專用（規格 §1.2 A4）：raw 已上屏，只同步欄位鏡像，**不建立 undo 版本**。
+    /// 與 keepRaw 的差別＝語意不同：keepRaw 用於「有效 outcome 但套用失敗」（我們動過、可退回），
+    /// 本路徑用於「LLM 回應未取得寫入資格」（我們什麼都沒做、無版本可退）。
+    private func keepRawWithoutVersion(_ snapshot: InsertionCoordinator.UtteranceSnapshot, notice: String) {
+        if !snapshot.text.isEmpty {
+            ledger.synchronizeObservedTail(ledger.sessionText + snapshot.text)
         }
         hud.present(.notice(notice))
         emitFeedback()

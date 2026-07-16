@@ -32,6 +32,15 @@ public struct SessionLedger {
         sessionText = newFullText
     }
 
+    /// tail 的 .degraded 專用鏡像校準（規格 §1.2 A4）：raw 已由 ASR 上屏且存在於欄位，
+    /// ledger 的欄位鏡像必須同步，否則下一句的 context、field mismatch 與 history 會和
+    /// 實際欄位分歧。但這是「對已觀察到之 raw 的鏡像校準」，不是接受 LLM outcome——
+    /// 因此不推入版本堆疊：我們什麼都沒改寫，就沒有東西可以復原。
+    public mutating func synchronizeObservedTail(_ fullText: String) {
+        sessionText = fullText
+        // versions 不變 → canUndo 與 undo stack 不受影響
+    }
+
     /// 回上一版。回傳 (from: 目前全文, to: 上一版全文) 供物理替換；堆疊空回 nil。
     public mutating func undo() -> (from: String, to: String)? {
         guard let previous = versions.popLast() else { return nil }

@@ -91,3 +91,30 @@ import Testing
     ledger.begin(axAnchor: nil)
     #expect(ledger.sessionText == "")
 }
+
+@Test func synchronizeObservedTailUpdatesMirrorWithoutVersion() {
+    var ledger = SessionLedger()
+    ledger.begin(axAnchor: nil)
+    #expect(ledger.canUndo == false)
+
+    ledger.synchronizeObservedTail("已上屏 raw")
+
+    #expect(ledger.sessionText == "已上屏 raw")
+    #expect(ledger.canUndo == false)          // 關鍵：不得推進 undo stack
+    #expect(ledger.undo() == nil)             // 沒有版本可退
+}
+
+@Test func synchronizeObservedTailDoesNotDisturbExistingVersions() {
+    var ledger = SessionLedger()
+    ledger.begin(axAnchor: nil)
+    ledger.commit("第一句。")                  // versions = [""]
+    #expect(ledger.canUndo)
+
+    ledger.synchronizeObservedTail("第一句。第二句原文")
+
+    #expect(ledger.sessionText == "第一句。第二句原文")
+    #expect(ledger.canUndo)                   // 既有版本仍在
+    // undo 目標是「第一句。」之前的空字串——degraded 那句不佔版本
+    let step = ledger.undo()
+    #expect(step?.to == "")
+}

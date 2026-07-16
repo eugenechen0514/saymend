@@ -119,6 +119,51 @@ import Testing
 }
 
 @MainActor
+@Test func fallbackPathTailKeepsRaw() async {
+    let polisher = GatedIntentService()
+    polisher.outcome = .degraded(reason: "測試降級")
+    let clip = ClipboardSpy()
+    let (c, _, _, key, _, hud) = makeController(polisher: polisher, clipboard: clip)
+
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("原文"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+
+    // 1. 欄位：raw 保留、無退格、無 LLM 文字落地
+    #expect(key.ops == [.insert("原文")])
+    // 2. ledger 鏡像已同步
+    #expect(c.ledger.sessionText == "原文")
+    // 3. 不建立 undo 版本（空 session 首句 degraded → 仍不可 undo）
+    #expect(c.ledger.canUndo == false)
+    // 4. tail 不碰剪貼簿
+    #expect(clip.texts.isEmpty)
+    // 5. HUD 提示
+    #expect(hud.states.contains(.notice("未潤飾")))
+}
+
+@MainActor
+@Test func fallbackPathSelectionPutsCommandRawInClipboard() async {
+    // selection degraded：既有行為（clipboardRescue(commandRaw)），本 task 驗證未被破壞
+    let polisher = GatedIntentService()
+    polisher.outcome = .degraded(reason: "測試降級")
+    let clip = ClipboardSpy()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("既有選取", location: 0)
+    let (c, _, _, _, _, hud) = makeController(polisher: polisher, clipboard: clip, fieldReader: reader)
+
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+
+    #expect(clip.texts == ["改正式一點"])          // 指令話語進剪貼簿
+    #expect(hud.states.contains(where: { if case .notice(let s) = $0 { return s.contains("轉錄已入剪貼簿") }; return false }))
+}
+
+@MainActor
 @Test func streamEndFlushesRemainderThroughPolish() async {
     let polisher = GatedIntentService()
     polisher.outcome = .newContent("尾巴。")
@@ -329,8 +374,10 @@ import Testing
     c.handleTranscript(.finalized("第二句原文"), at: 13.0)
     c.tick(at: 14.6)
     await c.lastIntentTask?.value
-    #expect(c.ledger.sessionText == "第一句。第二句原文")   // degraded 以原文入帳（欄位鏡像）
+    #expect(c.ledger.sessionText == "第一句。第二句原文")   // degraded 以原文同步鏡像（不建版本）
     #expect(c.ledger.canUndo)
+    // A4（M5）：canUndo 為真來自首句 newContent 的版本；degraded 那句只做鏡像同步、不佔版本，
+    // 因此 undo 會直接回到首句之前（""），不會停在「第一句。」。
 }
 
 @MainActor
