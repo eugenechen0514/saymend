@@ -110,6 +110,12 @@ public final class FileCoreModeStore: CoreModeStore {
     /// 控制字元黑名單排除 \t\n\r——這三個是合法的多行格式字元，systemRules 本來就是
     /// 多行文字（內建模式與『新增模式』預載的範本都含真實換行）；不排除的話任何多行
     /// 規則都會被誤判為 forbiddenUnicode，Task 11 手動驗證時發現連預載範本都存不了。
+    ///
+    /// SPEC §3.3 明文只列「允許 \t 與 \n」，此處額外允許 \r（0x0D）：
+    /// §3.3 的措辭是「禁止字元集合至少包含」＝下限而非上限，未禁止擴張允許清單。
+    /// \r 是行分隔符（Windows CRLF 貼上），非隱形注入字元，威脅性質與 zero-width／bidi 不同；
+    /// 拒絕它會讓貼上的多行規則失敗。與 EnvelopeParser 的 allowedWhitespace 保持一致，
+    /// 避免兩處字元規則分歧——本 bug（bb5d687）正是兩處分歧造成的。
     private static let forbiddenScalars: Set<Unicode.Scalar> = {
         var s: Set<Unicode.Scalar> = []
         let allowedWhitespace: Set<UInt32> = [0x09, 0x0A, 0x0D]  // \t \n \r
