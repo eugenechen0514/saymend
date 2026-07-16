@@ -30,6 +30,7 @@ let package = Package(
                 .copy("Fixtures/CoreMode/golden-default.zh-TW.json"),
                 .copy("Fixtures/CoreMode/golden-default.zh-CN.json"),
                 .copy("Fixtures/CoreMode/golden-default.en.json"),
+                .copy("Fixtures/Adversarial/envelope-corpus.json"),
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
