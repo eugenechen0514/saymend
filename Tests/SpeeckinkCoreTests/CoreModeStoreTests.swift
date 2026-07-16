@@ -100,9 +100,21 @@ private func tempStore() -> (FileCoreModeStore, URL) {
 }
 
 @Test func hermeticMatrix_ZeroByteFileIsEmptyNotCorrupt() throws {
-    let (s, dir) = tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
-    try Data().write(to: URL(fileURLWithPath: dir.appendingPathComponent("core_modes.json").path))
+    // 順序關鍵：先寫 0-byte 檔、再建 store，才會實際走到 0-byte 分支
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("coreModeZero-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("core_modes.json")
+
+    try Data().write(to: url)                       // 先寫 0-byte
+    let s = FileCoreModeStore(fileURL: url)         // 再建 store
+
     #expect(s.allUserModes().isEmpty)
+    // 判別性斷言：0-byte 是「初始空」不是 corrupt → 不得產生備份
+    let backups = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?
+        .filter { $0.contains(".corrupt-") } ?? []
+    #expect(backups.isEmpty, "0-byte 不該被當成 corrupt 備份")
 }
 
 @Test func hermeticMatrix_RoundTripAddReload() throws {
