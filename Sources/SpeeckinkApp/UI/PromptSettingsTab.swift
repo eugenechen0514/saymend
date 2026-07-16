@@ -2,17 +2,29 @@ import SwiftUI
 import SpeeckinkCore
 
 /// 全域自訂 system prompt＋輸出風格覆寫（規格 §4.4 第 3/4 層）。
-/// 核心規則唯讀可檢視（規格：置頂且不可編輯，使用者內容不得覆蓋）。
+/// 組裝後的 system prompt 唯讀可檢視（規格：置頂且不可編輯，使用者內容不得覆蓋）。
 struct PromptSettingsTab: View {
     let settings: AppSettings
+    let coreModes: (any CoreModeStore)?
     @State private var customPrompt: String
     @State private var styleOverride: String
     @State private var showCoreRules = false
 
-    init(settings: AppSettings) {
+    init(settings: AppSettings, coreModes: (any CoreModeStore)? = nil) {
         self.settings = settings
+        self.coreModes = coreModes
         _customPrompt = State(initialValue: settings.customSystemPrompt)
         _styleOverride = State(initialValue: settings.styleRulesOverride ?? "")
+    }
+
+    /// 預覽用的有效模式。`appModeID` 傳 nil：預覽時 frontmost app 就是 Speeckink
+    /// 自己，拿它去查 per-app 綁定沒有意義；故預覽呈現「不含 per-app 綁定」的情境。
+    private var previewMode: CoreMode {
+        CoreModeResolver().resolve(
+            sessionModeID: settings.sessionCoreModeID,
+            appModeID: nil,
+            defaultModeID: settings.defaultCoreModeID,
+            availableModes: PromptAssembler.builtinCoreModes + (coreModes?.allUserModes() ?? []))
     }
 
     var body: some View {
@@ -31,13 +43,18 @@ struct PromptSettingsTab: View {
                 Button("恢復內建預設") { styleOverride = "" }
             }
             Section {
-                DisclosureGroup("檢視內建核心規則（唯讀）", isExpanded: $showCoreRules) {
-                    ScrollView {
-                        Text(PromptAssembler(language: settings.outputLanguage).systemPrompt())
-                            .font(.caption.monospaced())
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                DisclosureGroup("檢視組裝後的 system prompt（唯讀）", isExpanded: $showCoreRules) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("目前模式：\(previewMode.name)　（不含 per-app 綁定；實際送出時會套用目標 App 的綁定）")
+                            .font(.caption).foregroundStyle(.secondary)
+                        ScrollView {
+                            Text(PromptAssembler(language: settings.outputLanguage,
+                                                 mode: previewMode).systemPrompt())
+                                .font(.caption.monospaced())
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 160)
                     }
-                    .frame(maxHeight: 160)
                 }
             }
         }

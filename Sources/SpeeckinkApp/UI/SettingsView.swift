@@ -1,33 +1,40 @@
 import SwiftUI
 import SpeeckinkCore
 
-/// 設定殼：TabView 分頁（一般／詞彙表／Prompt／歷史／隱私）。
-/// vocab／history 由 App 注入（nil＝預覽態，分頁自行停用）。
+/// 設定殼：TabView 分頁（一般／核心模式／詞彙表／Prompt／歷史／隱私）。
+/// vocab／history／coreModes 由 App 注入（nil＝預覽態，分頁自行停用）。
 struct SettingsView: View {
     let settings: AppSettings
     let vocab: (any VocabStore)?
     let history: (any HistoryRecording)?
+    let coreModes: (any CoreModeStore)?
 
-    init(settings: AppSettings, vocab: (any VocabStore)? = nil, history: (any HistoryRecording)? = nil) {
+    init(settings: AppSettings,
+         vocab: (any VocabStore)? = nil,
+         history: (any HistoryRecording)? = nil,
+         coreModes: (any CoreModeStore)? = nil) {
         self.settings = settings
         self.vocab = vocab
         self.history = history
+        self.coreModes = coreModes
     }
 
     var body: some View {
         TabView {
             GeneralSettingsTab(settings: settings)
                 .tabItem { Label("一般", systemImage: "gearshape") }
+            CoreModeSettingsTab(store: coreModes)
+                .tabItem { Label("核心模式", systemImage: "square.stack.3d.up") }
             VocabSettingsTab(store: vocab)
                 .tabItem { Label("詞彙表", systemImage: "character.book.closed") }
-            PromptSettingsTab(settings: settings)
+            PromptSettingsTab(settings: settings, coreModes: coreModes)
                 .tabItem { Label("Prompt", systemImage: "text.badge.checkmark") }
             HistorySettingsTab(store: history, settings: settings)
                 .tabItem { Label("歷史", systemImage: "clock.arrow.circlepath") }
             PrivacySettingsTab(settings: settings)
                 .tabItem { Label("隱私", systemImage: "hand.raised") }
         }
-        .frame(width: 560, height: 420)
+        .frame(width: 560, height: 460)
         .padding()
     }
 }
