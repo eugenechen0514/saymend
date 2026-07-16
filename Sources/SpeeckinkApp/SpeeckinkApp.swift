@@ -217,12 +217,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func refreshStatus() {
+        let next: String
         switch controller.phase {
         case .idle:
-            statusLine = controller.isLingering ? "可修正（延續窗）" : "待機"
-        case .listening(.hold): statusLine = "聽寫中（按住）"
-        case .listening(.locked): statusLine = "聽寫中（鎖定）"
+            next = controller.isLingering ? "可修正（延續窗）" : "待機"
+        case .listening(.hold): next = "聽寫中（按住）"
+        case .listening(.locked): next = "聽寫中（鎖定）"
         }
+        // 只在真的變動時才寫回：statusLine 是 @Published，每次賦值（即使值相同）都會觸發
+        // objectWillChange。0.25s tick 每輪都呼叫本函式，若無條件賦值，閒置時每 250ms 就
+        // 讓觀察 delegate 的 MenuBarExtra 內容重建一次，開著的子選單會被立刻關掉（閃退）。
+        guard statusLine != next else { return }
+        statusLine = next
     }
 
     /// 除錯用：2 秒內切到任一文字欄位，驗證鍵入路徑
