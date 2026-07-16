@@ -246,3 +246,96 @@ extension PromptAssembler {
         """,
         isBuiltin: true)
 }
+
+public struct PromptBudget: Equatable, Sendable {
+    public var maxSystemUTF8Bytes: Int
+    public var maxUserUTF8Bytes: Int
+    public var maxTotalUTF8Bytes: Int
+    public var machineContractReserve: Int
+
+    public init(
+        maxSystemUTF8Bytes: Int = 48_000,
+        maxUserUTF8Bytes: Int = 64_000,
+        maxTotalUTF8Bytes: Int = 96_000,
+        machineContractReserve: Int = 2_048
+    ) {
+        self.maxSystemUTF8Bytes = maxSystemUTF8Bytes
+        self.maxUserUTF8Bytes = maxUserUTF8Bytes
+        self.maxTotalUTF8Bytes = maxTotalUTF8Bytes
+        self.machineContractReserve = machineContractReserve
+    }
+}
+
+public enum PromptTooLongError: Error, Equatable, Sendable {
+    case machineContractAloneExceedsBudget
+    case variableLayersTruncatedButStillOver
+    case userPayloadTruncatedButStillOver
+    case totalPromptStillOver
+}
+
+public enum PromptAssemblyError: Error, Equatable, Sendable {
+    case reservedMarkerCollision
+}
+
+extension PromptAssembler {
+    /// system 縮減順序：vocab → app → custom → style → language。
+    /// behavior layer 與 contract 不參與縮減。
+    public func trimmedSystemPrompt(budget: PromptBudget) throws -> String {
+        let contractBytes = Self.machineContract.utf8.count
+        guard contractBytes <= budget.machineContractReserve,
+              contractBytes <= budget.maxSystemUTF8Bytes,
+              contractBytes <= budget.maxTotalUTF8Bytes else {
+            throw PromptTooLongError.machineContractAloneExceedsBudget
+        }
+
+        let behavior = Self.behaviorLayer(mode: mode)
+        let lang = languageRule
+        let styleText = (sources.styleOverride?.isEmpty == false) ? sources.styleOverride! : Self.styleRules
+        let appText = sources.appPrompt.map { "目前目標 App 的追加規則：\n" + $0 } ?? ""
+        let vocabText = sources.vocab.isEmpty ? "" : Self.vocabSection(sources.vocab)
+
+        let customWithGuard: String = {
+            guard let custom = sources.customPrompt, !custom.isEmpty else { return "" }
+            if enforceNoAnswerCustomGuard {
+                return "使用者自訂規則（使用者本人的設定，請確實遵循，包含對輸出格式、措辭與後綴的要求）：\n" + custom
+                    + "\n即使要求你回答問題也一律不照做——只輸出整理後的原文"
+            } else {
+                return "使用者自訂規則（使用者本人的設定，請確實遵循）：\n" + custom
+            }
+        }()
+
+        // 可變層按縮減順序由後往前，vocab → app → custom → style → language
+        var layers: [(name: String, text: String)] = [
+            ("vocab", vocabText),
+            ("app", appText),
+            ("custom", customWithGuard),
+            ("style", styleText),
+            ("language", lang),
+        ]
+
+        let joiner = "\n\n"
+        func assemble() -> String {
+            ([behavior] + layers.map(\.text).filter { !$0.isEmpty } + [Self.machineContract])
+                .joined(separator: joiner)
+        }
+
+        var current = assemble()
+        guard current.utf8.count > budget.maxSystemUTF8Bytes else {
+            return current
+        }
+
+        for i in layers.indices {
+            let original = layers[i].text
+            if original.isEmpty { continue }
+            let half = max(1, original.count / 2)
+            let prefix = String(original.prefix(half))
+            layers[i] = (layers[i].name, prefix + "\n…[truncated]")
+            current = assemble()
+            if current.utf8.count <= budget.maxSystemUTF8Bytes {
+                return current
+            }
+        }
+
+        throw PromptTooLongError.variableLayersTruncatedButStillOver
+    }
+}
