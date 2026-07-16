@@ -23,6 +23,9 @@ import Testing
         maxTotalUTF8Bytes: 96_000,
         machineContractReserve: 2_048)
     let trimmed = try a.trimmedSystemPrompt(budget: budget)
+    // 前提斷言：若 budget 沒真的觸發縮減，contract 本來就在最末，下面三條斷言全部恆真
+    // ——測試名字承諾的是「縮減時」契約不受影響，沒有這條就對縮減行為毫無驗證力。
+    #expect(trimmed.contains("…[truncated]"), "budget 未觸發縮減，本測試對「縮減不碰契約」沒有驗證力")
     #expect(trimmed.hasSuffix(PromptAssembler.machineContract))
     let endMarker = "==== MACHINE CONTRACT END ===="
     #expect(trimmed.hasSuffix(endMarker))
