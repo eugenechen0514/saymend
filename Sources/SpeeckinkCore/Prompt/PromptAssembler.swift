@@ -366,8 +366,9 @@ extension PromptAssembler {
             utteranceRaw: utteranceRaw)
     }
 
-    /// user payload 縮減（先 session 全文前後 25% → 再 OCR 前 50% → 移除整個 OCR 區塊）
-    /// 保留 contextBefore/After、targetText、frontAppName、utteranceRaw 不截斷。
+    /// user payload 縮減（SPEC §5.6）：先 session 全文前後 25% → 再 OCR 前 50%
+    /// → 仍超限則移除 OCR 內容但保留欄位標示。保留 contextBefore/After、
+    /// targetText、frontAppName、utteranceRaw 不截斷。
     public func trimmedUserPayload(
         utteranceRaw: String,
         context: IntentContext,
@@ -401,8 +402,10 @@ extension PromptAssembler {
             current = assemble()
             if current.utf8.count <= budget.maxUserUTF8Bytes { return current }
 
-            // 3. 移除整個 OCR 區塊（不只是內容，欄位本身也不再出現）
-            parts.ocrText = nil
+            // 3. 移除 OCR 內容但保留欄位標示（SPEC §5.6 rule 2）：nil 會讓 userPayload
+            // 的 if let ocr = ..., !ocr.isEmpty 整段消失、連標示都不見；佔位符才能讓
+            // 模型知道「螢幕語境存在但未被納入」，而不是誤以為根本沒有螢幕內容。
+            parts.ocrText = "…[ocr omitted]"
             current = assemble()
             if current.utf8.count <= budget.maxUserUTF8Bytes { return current }
         }
