@@ -16,6 +16,11 @@ struct CoreModeMenu: View {
                 frontAppBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
 
             // ── 第一區：點選 = 設 session override（只影響本次 session）
+            // 頂部清除項（比照 M4「輸出語系」子選單「跟隨設定：X」）：清掉本次聽寫覆蓋，
+            // 讓解析回到 per-app／全域。Option A 純動作按鈕、不帶勾勾——勾勾語意固定在
+            // 「解析後的有效模式」上，不是「有沒有 session 覆蓋」。
+            Button("跟隨（不覆蓋本次）") { delegate.selectSessionCoreMode(nil) }
+            Divider()
             ForEach(model.allModes) { m in
                 Button {
                     delegate.selectSessionCoreMode(m.id)
