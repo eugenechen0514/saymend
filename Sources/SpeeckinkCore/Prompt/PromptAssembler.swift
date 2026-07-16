@@ -339,3 +339,118 @@ extension PromptAssembler {
         throw PromptTooLongError.variableLayersTruncatedButStillOver
     }
 }
+
+public struct UserPayloadParts {
+    public var targetKind: IntentContext.Target
+    public var targetText: String
+    public var contextBefore: String?
+    public var contextAfter: String?
+    public var frontAppName: String?
+    public var ocrText: String?
+    public var utteranceRaw: String
+}
+
+extension PromptAssembler {
+    /// 結構化 user payload；6B 才有 structured 入口。
+    public func assembleUserPayloadParts(
+        utteranceRaw: String,
+        context: IntentContext
+    ) -> UserPayloadParts {
+        UserPayloadParts(
+            targetKind: context.targetKind,
+            targetText: context.targetText,
+            contextBefore: context.contextBefore,
+            contextAfter: context.contextAfter,
+            frontAppName: context.frontAppName,
+            ocrText: context.ocrText,
+            utteranceRaw: utteranceRaw)
+    }
+
+    /// user payload 縮減（先 session 全文前後 25% → 再 OCR 前 50% → 移除整個 OCR 區塊）
+    /// 保留 contextBefore/After、targetText、frontAppName、utteranceRaw 不截斷。
+    public func trimmedUserPayload(
+        utteranceRaw: String,
+        context: IntentContext,
+        budget: PromptBudget
+    ) throws -> String {
+        var parts = assembleUserPayloadParts(utteranceRaw: utteranceRaw, context: context)
+
+        func assemble() -> String { userPayload(utteranceRaw: parts.utteranceRaw, context: IntentContext(
+            targetKind: parts.targetKind,
+            targetText: parts.targetText,
+            contextBefore: parts.contextBefore,
+            contextAfter: parts.contextAfter,
+            frontAppName: parts.frontAppName,
+            ocrText: parts.ocrText)) }
+
+        var current = assemble()
+        guard current.utf8.count > budget.maxUserUTF8Bytes else { return current }
+
+        // 1. session 全文縮至前後各 25%
+        if parts.targetText.count > 0 && parts.targetKind == .session {
+            let half = max(1, parts.targetText.count / 4)
+            parts.targetText = String(parts.targetText.prefix(half)) + "\n…[session truncated]…\n" + String(parts.targetText.suffix(half))
+            current = assemble()
+            if current.utf8.count <= budget.maxUserUTF8Bytes { return current }
+        }
+
+        // 2. OCR 縮至前 50%
+        if let ocr = parts.ocrText, !ocr.isEmpty {
+            let half = max(1, ocr.count / 2)
+            parts.ocrText = String(ocr.prefix(half)) + "\n…[ocr truncated]"
+            current = assemble()
+            if current.utf8.count <= budget.maxUserUTF8Bytes { return current }
+
+            // 3. 移除整個 OCR 區塊（不只是內容，欄位本身也不再出現）
+            parts.ocrText = nil
+            current = assemble()
+            if current.utf8.count <= budget.maxUserUTF8Bytes { return current }
+        }
+
+        throw PromptTooLongError.userPayloadTruncatedButStillOver
+    }
+}
+
+extension PromptAssembler {
+    /// provider-bound 唯一入口的組成部分（M5 §7.2 主路徑；IntentService 於 Task 8 接入）：
+    /// marker 檢查 → system trim → user trim → total bytes。任一步失敗都在這裡就拋錯。
+    public func validatedPrompt(
+        utteranceRaw: String,
+        context: IntentContext,
+        budget: PromptBudget = PromptBudget()
+    ) throws -> (system: String, user: String) {
+        // 1. marker 檢查
+        try Self.assertNoReservedMarkers(
+            modeName: mode.name,
+            modeSystemRules: mode.systemRules,
+            styleOverride: sources.styleOverride,
+            customPrompt: sources.customPrompt,
+            appPrompt: sources.appPrompt,
+            vocabText: sources.vocab.isEmpty ? nil : Self.vocabSection(sources.vocab))
+        // 2. system trim
+        let system = try trimmedSystemPrompt(budget: budget)
+        // 3. user trim
+        let user = try trimmedUserPayload(utteranceRaw: utteranceRaw, context: context, budget: budget)
+        // 4. total
+        let total = system.utf8.count + user.utf8.count
+        guard total <= budget.maxTotalUTF8Bytes else {
+            throw PromptTooLongError.totalPromptStillOver
+        }
+        return (system, user)
+    }
+
+    static func assertNoReservedMarkers(
+        modeName: String, modeSystemRules: String,
+        styleOverride: String?, customPrompt: String?, appPrompt: String?,
+        vocabText: String?
+    ) throws {
+        let markers = ["==== MACHINE CONTRACT START ====", "==== MACHINE CONTRACT END ===="]
+        let fields: [String] = [
+            modeName, modeSystemRules,
+            styleOverride ?? "", customPrompt ?? "", appPrompt ?? "", vocabText ?? "",
+        ]
+        for field in fields where markers.contains(where: field.contains) {
+            throw PromptAssemblyError.reservedMarkerCollision
+        }
+    }
+}
