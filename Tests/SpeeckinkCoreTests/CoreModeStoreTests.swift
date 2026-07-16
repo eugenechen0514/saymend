@@ -33,6 +33,17 @@ private func tempStore() -> (FileCoreModeStore, URL) {
     }
 }
 
+@Test func multilineSystemRulesWithTabsAndNewlinesAreAccepted() {
+    // Task 11 手動驗證發現的迴歸：\t\n\r 曾被 forbiddenScalars 誤判為控制字元，
+    // 導致連「新增模式」預載的多行範本都存不了。這裡鎖住多行＋Tab 規則可正常儲存。
+    let (s, dir) = tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
+    let multiline = "第一行規則。\n第二行規則：\n\t縮排項目一\n\t縮排項目二\r\n第三行（CRLF）。"
+    #expect(throws: Never.self) {
+        try s.add(CoreMode(name: "多行測試", systemRules: multiline))
+    }
+    #expect(s.allUserModes().count == 1)
+}
+
 @Test func builtinMutationForbiddenOnAdd() {
     let (s, dir) = tempStore(); defer { try? FileManager.default.removeItem(at: dir) }
     let bad = CoreMode(id: PromptAssembler.pureDictationMode.id, name: "X",

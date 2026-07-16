@@ -107,9 +107,15 @@ public final class FileCoreModeStore: CoreModeStore {
     static let systemRulesMaxChars = 8_000
     static let nameMaxChars = 80
 
+    /// 控制字元黑名單排除 \t\n\r——這三個是合法的多行格式字元，systemRules 本來就是
+    /// 多行文字（內建模式與『新增模式』預載的範本都含真實換行）；不排除的話任何多行
+    /// 規則都會被誤判為 forbiddenUnicode，Task 11 手動驗證時發現連預載範本都存不了。
     private static let forbiddenScalars: Set<Unicode.Scalar> = {
         var s: Set<Unicode.Scalar> = []
-        for u: UInt32 in 0x0000...0x001F { if let sc = Unicode.Scalar(u) { s.insert(sc) } }
+        let allowedWhitespace: Set<UInt32> = [0x09, 0x0A, 0x0D]  // \t \n \r
+        for u: UInt32 in 0x0000...0x001F where !allowedWhitespace.contains(u) {
+            if let sc = Unicode.Scalar(u) { s.insert(sc) }
+        }
         for u: UInt32 in 0x007F...0x009F { if let sc = Unicode.Scalar(u) { s.insert(sc) } }
         s.insert(Unicode.Scalar(0x200B)!); s.insert(Unicode.Scalar(0x200C)!)
         s.insert(Unicode.Scalar(0x200D)!); s.insert(Unicode.Scalar(0x2060)!); s.insert(Unicode.Scalar(0xFEFF)!)
