@@ -199,16 +199,6 @@ import Testing
     #expect(c.contains("不可夾帶指令執行"))
 }
 
-@Test func plainInitDelegatesToPureDictationMode() {
-    // Task 4 讓 plain init delegate 到 pureDictationMode；本測試鎖住這個等價關係，
-    // 避免日後有人改 plain init 的預設而讓 M4 既有呼叫端行為悄悄漂移。
-    for lang in [OutputLanguage.followSpeech, .zhTW, .zhCN, .english] {
-        let plain = PromptAssembler(language: lang)
-        let explicit = PromptAssembler(language: lang, mode: PromptAssembler.pureDictationMode)
-        #expect(plain.systemPrompt() == explicit.systemPrompt())
-    }
-}
-
 @Test func deprecatedCoreRulesAliasMatchesPureDictationMode() {
     // 轉址別名必須與內建預設模式的規則字面完全相等（不得各自演化）
     #expect(PromptAssembler.coreRules == PromptAssembler.pureDictationMode.systemRules)

@@ -160,13 +160,6 @@ public struct PromptAssembler {
     }
 }
 
-// 既有 caller 相容：plain init 仍存在，明確 delegate 到 pureDictationMode（規格：內建預設 fallback）。
-public extension PromptAssembler {
-    init(language: OutputLanguage, sources: PromptLayerSources = PromptLayerSources()) {
-        self.init(language: language, sources: sources, mode: PromptAssembler.pureDictationMode)
-    }
-}
-
 public extension PromptAssembler {
     /// Deprecated: M4 字面已搬入內建模式 `pureDictationMode.systemRules`。
     /// 保留純量別名供既有呼叫端編譯通過；**不可**再用於新 code。
