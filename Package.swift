@@ -25,6 +25,12 @@ let package = Package(
         .testTarget(
             name: "SpeeckinkCoreTests",
             dependencies: ["SpeeckinkCore"],
+            resources: [
+                .copy("Fixtures/CoreMode/golden-default.follow-speech.json"),
+                .copy("Fixtures/CoreMode/golden-default.zh-TW.json"),
+                .copy("Fixtures/CoreMode/golden-default.zh-CN.json"),
+                .copy("Fixtures/CoreMode/golden-default.en.json"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
