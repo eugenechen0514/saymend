@@ -45,6 +45,34 @@ public protocol IntentServing {
     func process(utteranceRaw: String, context: IntentContext) async -> IntentOutcome
 }
 
+/// envelope.text 上限（規格 §6.4）：預設 20,000 個 Swift Character。可注入供測試構造確定性案例。
+public struct EnvelopeTextLimit: Equatable, Sendable {
+    public var averageUserInputCharacters: Int
+    public var multiplier: Int
+
+    public init(averageUserInputCharacters: Int = 2_000, multiplier: Int = 10) {
+        self.averageUserInputCharacters = averageUserInputCharacters
+        self.multiplier = multiplier
+    }
+
+    /// production 預設 20,000 個 Swift Character（2,000 × 10）
+    public var maxCharacters: Int { averageUserInputCharacters * multiplier }
+}
+
+/// 一次取齊的 prompt 輸入快照。App 層負責在同一次 MainActor run、
+/// 用同一個 bundleID + profile 產生三個衍生值——torn read 在構造上不可能發生。
+public struct PromptInputs: Sendable {
+    public let language: OutputLanguage
+    public let sources: PromptLayerSources
+    public let mode: CoreMode
+
+    public init(language: OutputLanguage, sources: PromptLayerSources, mode: CoreMode) {
+        self.language = language
+        self.sources = sources
+        self.mode = mode
+    }
+}
+
 /// 意圖分類＋產文合併呼叫（規格 §3.3／§4.3）。任何失敗都回 degraded——使用者不能白說話。
 public final class IntentService: IntentServing {
     /// 無既有內容＝純潤飾：3 秒；有既有內容＝可能是修正：6 秒（規格 §4.3）
@@ -52,64 +80,98 @@ public final class IntentService: IntentServing {
     public static let editTimeout: TimeInterval = 6.0
 
     private let provider: any LLMProvider
-    /// 語系與 prompt 來源解析器（App 端組裝）。皆標 @MainActor：closure 內部會讀取
-    /// App 層 store（詞彙表／profile／sessionLanguageOverride）與 NSWorkspace 前景 App，
-    /// 這些都是 MainActor 專屬可變狀態；process() 為 nonisolated async（跑並行 executor），
-    /// 必須跳回 MainActor 才能安全讀取（見 process 內註解）。
-    private let language: @MainActor () -> OutputLanguage
     private let traditionalize: TraditionalizeGuard?
-    private let sources: @MainActor () -> PromptLayerSources
+    /// 單一 prompt 輸入解析器（App 端組裝）。標 @MainActor：closure 內部會讀取
+    /// App 層 store（詞彙表／profile／sessionLanguageOverride／CoreModeStore）與
+    /// NSWorkspace 前景 App，這些都是 MainActor 專屬可變狀態；process() 為
+    /// nonisolated async（跑並行 executor），必須跳回 MainActor 才能安全讀取。
+    /// 語系／來源／模式三值合併成單一 closure，由同一個 bundleID+profile 衍生，
+    /// torn read 在構造上不可能發生（規格 §3.5）。
+    private let inputs: @MainActor () -> PromptInputs
+    private let promptBudget: PromptBudget
+    private let envelopeTextLimit: EnvelopeTextLimit
 
     public init(provider: any LLMProvider,
-                language: @escaping @MainActor () -> OutputLanguage,
                 traditionalize: TraditionalizeGuard?,
-                sources: @escaping @MainActor () -> PromptLayerSources = { PromptLayerSources() }) {
+                inputs: @escaping @MainActor () -> PromptInputs,
+                promptBudget: PromptBudget = PromptBudget(),
+                envelopeTextLimit: EnvelopeTextLimit = EnvelopeTextLimit()) {
         self.provider = provider
-        self.language = language
         self.traditionalize = traditionalize
-        self.sources = sources
+        self.inputs = inputs
+        self.promptBudget = promptBudget
+        self.envelopeTextLimit = envelopeTextLimit
     }
 
     public func process(utteranceRaw: String, context: IntentContext) async -> IntentOutcome {
-        // 語系與 prompt 來源必須在 MainActor 上解析：這兩個 closure 會讀取 App 端未加鎖的可變狀態
-        // （FileVocabStore.entries／FileAppProfileStore.overrides／AppSettings.sessionLanguageOverride）
-        // 並存取主執行緒專屬的 NSWorkspace.frontmostApplication。本方法為 nonisolated async，
-        // 跑在並行 executor，直接呼叫會與設定 CRUD／能力回填／選單語系切換的 MainActor 寫入並發（資料競爭）
-        // 且 off-main 碰 AppKit。顯式跳回 MainActor 取快照即可序列化所有存取、消除競爭。
-        let resolveLanguage = language
-        let resolveSources = sources
-        let (lang, promptSources) = await MainActor.run { (resolveLanguage(), resolveSources()) }
-        let assembler = PromptAssembler(language: lang, sources: promptSources)
-        let timeout = context.targetText.isEmpty ? Self.polishTimeout : Self.editTimeout
+        let resolveInputs = inputs
+        let snapshot: PromptInputs = await MainActor.run { resolveInputs() }
+
+        let assembler = PromptAssembler(language: snapshot.language,
+                                        sources: snapshot.sources,
+                                        mode: snapshot.mode)
+
+        // provider-bound 唯一入口：任何失敗都在呼叫 provider 之前降級（marker 檢查 →
+        // system trim → user trim → total bytes，provider call count 必為 0）。
+        let prompt: (system: String, user: String)
         do {
-            let raw = try await provider.complete(
-                system: assembler.systemPrompt(),
-                user: assembler.userPayload(utteranceRaw: utteranceRaw, context: context),
-                timeout: timeout
-            )
-            guard case .success(let envelope) = EnvelopeParser.parse(raw) else {
-                return .degraded(reason: "回應格式不合法")
-            }
-            let guarded: (String) -> String = { [traditionalize] text in
-                traditionalize?.apply(text, language: lang) ?? text
-            }
-            switch envelope.intent {
-            case "edit_command":
-                // 防禦：空目標不可能有修正對象；空全文視同格式不合法
-                guard !context.targetText.isEmpty, !envelope.text.isEmpty else {
-                    return .degraded(reason: "修正指令不成立")
-                }
-                return .editedSession(guarded(envelope.text))
-            case "undo":
-                guard !context.targetText.isEmpty else { return .degraded(reason: "無可復原內容") }
-                return .undo
-            default:
-                // new_content 與未知意圖一律走新內容（意圖模糊→new_content，規格 §3.3）
-                guard !envelope.text.isEmpty else { return .degraded(reason: "回應內容為空") }
-                return .newContent(guarded(envelope.text))
-            }
+            prompt = try assembler.validatedPrompt(utteranceRaw: utteranceRaw,
+                                                   context: context,
+                                                   budget: promptBudget)
+        } catch is PromptAssemblyError {
+            return .degraded(reason: "Prompt 含保留 marker")
+        } catch is PromptTooLongError {
+            return .degraded(reason: "Prompt 超過安全長度上限")
+        } catch {
+            return .degraded(reason: "Prompt 組裝失敗")
+        }
+
+        let timeout = context.targetText.isEmpty ? Self.polishTimeout : Self.editTimeout
+        let raw: String
+        do {
+            raw = try await provider.complete(system: prompt.system,
+                                              user: prompt.user,
+                                              timeout: timeout)
         } catch {
             return .degraded(reason: "LLM 呼叫失敗或逾時")
+        }
+
+        // strict parser（不得自動 lenient fallback）
+        let envelope: LLMEnvelope
+        switch EnvelopeParser.parse(raw, mode: .strict) {
+        case .success(let e):
+            envelope = e
+        case .failure(.forbiddenUnicode), .failure(.forbiddenBOM), .failure(.structuralHomoglyph):
+            return .degraded(reason: "回應含不允許字元")
+        case .failure:
+            return .degraded(reason: "回應格式不合法")
+        }
+
+        // envelope.text 長度上限（先於 intent mapping；截斷後 JSON 語意與 edit 全文可能不完整，故不截斷）
+        guard envelope.text.count <= envelopeTextLimit.maxCharacters else {
+            return .degraded(reason: "回應過長")
+        }
+
+        let guarded: (String) -> String = { [traditionalize] text in
+            traditionalize?.apply(text, language: snapshot.language) ?? text
+        }
+
+        switch envelope.intent {
+        case "edit_command":
+            // 防禦：空目標不可能有修正對象；空全文視同格式不合法
+            guard !context.targetText.isEmpty, !envelope.text.isEmpty else {
+                return .degraded(reason: "修正指令不成立")
+            }
+            return .editedSession(guarded(envelope.text))
+        case "undo":
+            guard !context.targetText.isEmpty else { return .degraded(reason: "無可復原內容") }
+            return .undo
+        case "new_content":
+            guard !envelope.text.isEmpty else { return .degraded(reason: "回應內容為空") }
+            return .newContent(guarded(envelope.text))
+        default:
+            // M4 漏洞修：未知名 intent 不再吃成 new_content（規格 §3.3 fail-closed）
+            return .degraded(reason: "意圖非合約列舉值")
         }
     }
 }

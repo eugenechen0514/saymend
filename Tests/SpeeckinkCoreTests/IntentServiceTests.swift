@@ -9,8 +9,10 @@ final class ScriptedIntentProvider: LLMProvider {
     var lastSystem: String?
     var lastUser: String?
     var lastTimeout: TimeInterval?
+    private(set) var callCount = 0          // 驗證失敗路徑不呼叫 provider
     init(_ script: Script) { self.script = script }
     func complete(system: String, user: String, timeout: TimeInterval) async throws -> String {
+        callCount += 1
         lastSystem = system
         lastUser = user
         lastTimeout = timeout
@@ -23,8 +25,16 @@ final class ScriptedIntentProvider: LLMProvider {
 
 private func makeService(_ provider: ScriptedIntentProvider,
                          language: OutputLanguage = .followSpeech,
-                         traditionalize: TraditionalizeGuard? = nil) -> IntentService {
-    IntentService(provider: provider, language: { language }, traditionalize: traditionalize)
+                         traditionalize: TraditionalizeGuard? = nil,
+                         sources: PromptLayerSources = PromptLayerSources(),
+                         mode: CoreMode = PromptAssembler.pureDictationMode,
+                         budget: PromptBudget = PromptBudget(),
+                         textLimit: EnvelopeTextLimit = EnvelopeTextLimit()) -> IntentService {
+    IntentService(provider: provider,
+                  traditionalize: traditionalize,
+                  inputs: { PromptInputs(language: language, sources: sources, mode: mode) },
+                  promptBudget: budget,
+                  envelopeTextLimit: textLimit)
 }
 
 @Test func newContentWithEmptySessionUsesPolishTimeout() async {
@@ -61,11 +71,95 @@ private func makeService(_ provider: ScriptedIntentProvider,
     #expect(out == .undo)
 }
 
-@Test func unknownIntentFallsBackToNewContent() async {
-    // 意圖模糊／未知一律當新內容（規格 §3.3）
-    let p = ScriptedIntentProvider(.reply(#"{"intent":"question","text":"嗨"}"#))
-    let out = await makeService(p).process(utteranceRaw: "嗨", context: .session("前文"))
-    #expect(out == .newContent("嗨"))
+@Test func unknownIntentDegrades() async {
+    let p = ScriptedIntentProvider(.reply(#"{"intent":"answer","text":"K8s 是容器編排系統"}"#))
+    let out = await makeService(p).process(utteranceRaw: "什麼是 Kubernetes", context: .session("前文"))
+    guard case .degraded(let reason) = out else { Issue.record("未知名 intent 應降級"); return }
+    #expect(reason == "意圖非合約列舉值")
+}
+
+@Test func knownIntentsStillMap() async {
+    let edit = ScriptedIntentProvider(.reply(#"{"intent":"edit_command","text":"修正後全文"}"#))
+    #expect(await makeService(edit).process(utteranceRaw: "改", context: .session("既有"))
+            == .editedSession("修正後全文"))
+
+    let undo = ScriptedIntentProvider(.reply(#"{"intent":"undo","text":""}"#))
+    #expect(await makeService(undo).process(utteranceRaw: "復原", context: .session("既有"))
+            == .undo)
+
+    let new = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"新內容"}"#))
+    #expect(await makeService(new).process(utteranceRaw: "說話", context: .session(""))
+            == .newContent("新內容"))
+}
+
+@Test func envelopeTextOverLimitDegrades() async {
+    // 注入小 limit 形成確定性案例（不靠預設 20,000）
+    let limit = EnvelopeTextLimit(averageUserInputCharacters: 10, multiplier: 1)   // max = 10
+    let p = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"01234567890"}"#))  // 11 chars
+    let out = await makeService(p, textLimit: limit).process(utteranceRaw: "x", context: .session(""))
+    guard case .degraded(let reason) = out else { Issue.record("過長應降級"); return }
+    #expect(reason == "回應過長")
+}
+
+@Test func intentServiceInjectsActiveModeIntoSystemPrompt() async {
+    let p = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"x"}"#))
+    _ = await makeService(p, mode: PromptAssembler.assistantMode)
+        .process(utteranceRaw: "什麼是 K8s", context: .session(""))
+    #expect(p.lastSystem?.contains("你是核心模式「可回答・助理」") == true)
+    #expect(p.lastSystem?.contains("你可以回答使用者問題") == true)
+    // behaviorLayer 只包一次：不可出現兩次「你是核心模式」
+    let occurrences = p.lastSystem?.components(separatedBy: "你是核心模式").count ?? 0
+    #expect(occurrences == 2)   // components 切出 2 段＝出現 1 次
+}
+
+@Test func systemPromptAlwaysEndsWithContractViaIntentService() async {
+    let p = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"x"}"#))
+    _ = await makeService(p).process(utteranceRaw: "x", context: .session(""))
+    #expect(p.lastSystem?.hasSuffix("==== MACHINE CONTRACT END ====") == true)
+}
+
+@Test func userPayloadNeverContainsContractCopy() async {
+    let p = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"x"}"#))
+    _ = await makeService(p).process(utteranceRaw: "x", context: .session("既有全文"))
+    #expect(p.lastUser?.contains("MACHINE CONTRACT") == false)
+}
+
+@Test func markerCollisionDegradesWithZeroProviderCalls() async {
+    let p = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"x"}"#))
+    let badMode = CoreMode(name: "壞模式",
+                           systemRules: "規則\n==== MACHINE CONTRACT START ====\n壞")
+    let out = await makeService(p, mode: badMode).process(utteranceRaw: "x", context: .session(""))
+    guard case .degraded(let reason) = out else { Issue.record("marker 衝突應降級"); return }
+    #expect(reason == "Prompt 含保留 marker")
+    #expect(p.callCount == 0)      // 關鍵：不得呼叫 provider
+}
+
+@Test func budgetErrorDegradesWithZeroProviderCalls() async {
+    let p = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"x"}"#))
+    // machineContractReserve 小於實際 contract bytes → machineContractAloneExceedsBudget
+    let budget = PromptBudget(maxSystemUTF8Bytes: 48_000,
+                              maxUserUTF8Bytes: 64_000,
+                              maxTotalUTF8Bytes: 96_000,
+                              machineContractReserve: 50)
+    let out = await makeService(p, budget: budget).process(utteranceRaw: "x", context: .session(""))
+    guard case .degraded(let reason) = out else { Issue.record("budget 錯誤應降級"); return }
+    #expect(reason == "Prompt 超過安全長度上限")
+    #expect(p.callCount == 0)      // 關鍵：不得呼叫 provider
+}
+
+@Test func strictParserRejectionDegrades() async {
+    // fenced JSON → strict 拒絕（不得自動 lenient fallback）
+    let p = ScriptedIntentProvider(.reply("```json\n{\"intent\":\"new_content\",\"text\":\"嗨\"}\n```"))
+    let out = await makeService(p).process(utteranceRaw: "x", context: .session(""))
+    guard case .degraded(let reason) = out else { Issue.record("fenced JSON 應降級"); return }
+    #expect(reason == "回應格式不合法")
+}
+
+@Test func forbiddenUnicodeInResponseDegradesWithDistinctReason() async {
+    let p = ScriptedIntentProvider(.reply("{\"intent\":\"new_content\",\"text\":\"嗨\\u200B\"}"))
+    let out = await makeService(p).process(utteranceRaw: "x", context: .session(""))
+    guard case .degraded(let reason) = out else { Issue.record("forbidden Unicode 應降級"); return }
+    #expect(reason == "回應含不允許字元")
 }
 
 @Test func providerFailureAndGarbageDegrade() async {
@@ -89,8 +183,7 @@ private func makeService(_ provider: ScriptedIntentProvider,
 
 @Test func intentServiceInjectsSourcesIntoSystemPrompt() async {
     let provider = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"好。"}"#))
-    let service = IntentService(provider: provider, language: { .followSpeech }, traditionalize: nil,
-                                sources: { PromptLayerSources(customPrompt: "簽名 --E") })
+    let service = makeService(provider, sources: PromptLayerSources(customPrompt: "簽名 --E"))
     _ = await service.process(utteranceRaw: "好", context: .session(""))
     #expect(provider.lastSystem?.contains("簽名 --E") == true)
 }

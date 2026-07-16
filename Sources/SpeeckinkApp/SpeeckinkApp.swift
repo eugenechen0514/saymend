@@ -128,11 +128,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 vocab: (profile?.vocabEnabled ?? true) ? vocabStore.all() : [])
         }
 
+        // M5 Task 8 過渡態：mode 暫時固定為內建預設，CoreModeResolver 接入排在 Task 10。
+        let resolveInputs: @MainActor () -> PromptInputs = {
+            PromptInputs(language: resolveLanguage(), sources: promptSources(),
+                        mode: PromptAssembler.pureDictationMode)
+        }
         let intentService = IntentService(
             provider: provider,
-            language: resolveLanguage,
             traditionalize: traditionalize,
-            sources: promptSources
+            inputs: resolveInputs
         )
         feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: hud, profiles: profileStore)
         controller = DictationController(
