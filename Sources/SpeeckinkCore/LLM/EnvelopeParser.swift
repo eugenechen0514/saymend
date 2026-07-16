@@ -101,14 +101,15 @@ public enum EnvelopeParser {
         if containsStructuralHomoglyphOutsideStrings(raw) {
             return .failure(.structuralHomoglyph)
         }
-        // 4. 必須是單一 JSON 物件：前後不得有任何贅字，且只能有一組大括號
+        // 4. 必須是單一 JSON 物件：前後不得有任何贅字
+        //    （原本這裡還有一段對 trimmed 全字串數 { } 的 guard，用來擋多個物件；
+        //    但那段計數沒有排除字串字面內部，導致 text 值裡含 { 或 }（例如口述程式碼、
+        //    或提到「設定 {name} 欄位」）就會被誤判為多物件而拒絕——VSCode profile 明文
+        //    要求「識別字與程式碼片段原樣保留」，這條路徑上講出 { 就必掛。這段 guard 本身
+        //    也是多餘的：多物件 {...}{...} 交給 JSONSerialization 解析就會自然失敗，
+        //    不需要自己數大括號。已移除。）
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.first == "{", trimmed.last == "}" else {
-            return .failure(.malformedEnvelope)
-        }
-        let openCount = trimmed.filter { $0 == "{" }.count
-        let closeCount = trimmed.filter { $0 == "}" }.count
-        guard openCount == 1, closeCount == 1 else {
             return .failure(.malformedEnvelope)
         }
         // 5. 不可含 fenced JSON 圍欄
@@ -116,32 +117,35 @@ public enum EnvelopeParser {
             return .failure(.malformedEnvelope)
         }
 
-        // 6. 嚴格解碼：JSONDecoder 會忽略多餘欄位，所以自己驗 top-level key set
-        guard let topKeys = topLevelKeys(in: trimmed), topKeys == Set(["intent", "text"]) else {
+        // 6. 嚴格解碼：JSONDecoder 會忽略多餘欄位，所以自己驗 top-level key set，
+        //    且自己驗型別——不可沿用 LLMEnvelope 的寬容 decodeIfPresent 語意：
+        //    JSON null 會讓 decodeIfPresent 回 nil 而套用預設值（intent 靜默變成
+        //    "new_content"），等同「LLM 回 null intent 就被當成新內容插入」，
+        //    直接違反 SPEC §6.1（缺欄位／型別錯誤一律拒絕，寬容補值只屬於 lenient）。
+        guard let dict = topLevelObject(in: trimmed),
+              Set(dict.keys) == Set(["intent", "text"]) else {
+            return .failure(.missingOrExtraFields)
+        }
+        guard let intentValue = dict["intent"] as? String,
+              let textValue = dict["text"] as? String else {
             return .failure(.missingOrExtraFields)
         }
 
-        let data = Data(trimmed.utf8)
-        do {
-            let env = try JSONDecoder().decode(LLMEnvelope.self, from: data)
-            // 7. 二次掃描 decoded 值內的 forbidden（防 JSON escape，如 ​ 繞過 raw 掃描）
-            if env.intent.unicodeScalars.contains(where: { reservedScalars.contains($0) })
-                || env.text.unicodeScalars.contains(where: { reservedScalars.contains($0) }) {
-                return .failure(.forbiddenUnicode)
-            }
-            return .success(env)
-        } catch {
-            return .failure(.malformedEnvelope)
+        // 7. 二次掃描 decoded 值內的 forbidden（防 JSON escape，如 ​ 繞過 raw 掃描）
+        if intentValue.unicodeScalars.contains(where: { reservedScalars.contains($0) })
+            || textValue.unicodeScalars.contains(where: { reservedScalars.contains($0) }) {
+            return .failure(.forbiddenUnicode)
         }
+        return .success(LLMEnvelope(intent: intentValue, text: textValue))
     }
 
-    /// top-level key set：交給 JSONSerialization 解析後直接取 dictionary keys，
+    /// top-level JSON 物件：交給 JSONSerialization 解析後直接取 dictionary，
     /// 避免手寫 tokenizer 重造 JSON 解析容易出的 depth 追蹤錯誤。
-    private static func topLevelKeys(in json: String) -> Set<String>? {
+    private static func topLevelObject(in json: String) -> [String: Any]? {
         guard let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
               let dict = obj as? [String: Any] else { return nil }
-        return Set(dict.keys)
+        return dict
     }
 
     private static func parseLenient(_ raw: String) -> Result<LLMEnvelope, EnvelopeParseError> {
