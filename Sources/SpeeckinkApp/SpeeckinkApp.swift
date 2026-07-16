@@ -126,8 +126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let intentService = IntentService(
             provider: provider,
             traditionalize: traditionalize,
-            inputs: promptInputs
-        )
+            inputs: promptInputs,
+            promptBudget: PromptBudget.productionDefault())   // Debug 可由 E2E env 注入；Release 恆為預設
         feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: hud, profiles: profileStore)
         controller = DictationController(
             audio: audio,

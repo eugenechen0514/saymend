@@ -1,3 +1,5 @@
+import Foundation
+
 /// 第 3–6 層的可變來源（規格 §4.4）：風格覆寫、全域自訂、per-app 追加、詞彙表。
 /// 每次組 prompt 時由呼叫端提供（closure 注入 IntentService），設定變更即時生效。
 public struct PromptLayerSources: Equatable, Sendable {
@@ -256,6 +258,26 @@ public struct PromptBudget: Equatable, Sendable {
         self.maxUserUTF8Bytes = maxUserUTF8Bytes
         self.maxTotalUTF8Bytes = maxTotalUTF8Bytes
         self.machineContractReserve = machineContractReserve
+    }
+}
+
+extension PromptBudget: Codable {}
+
+extension PromptBudget {
+    /// production 進入點。Debug build 允許 E2E 以環境變數注入小 budget（規格 §7.5）；
+    /// Release build 因 `#if DEBUG` 在編譯期即移除該分支，env 不可能生效——這是安全邊界，
+    /// 不可讓 Release 讀這個 env（否則成為注入向量）。
+    public static func productionDefault() -> PromptBudget {
+        #if DEBUG
+        if let json = ProcessInfo.processInfo.environment["SPEECKINK_E2E_PROMPT_BUDGET_JSON"],
+           let data = json.data(using: .utf8),
+           let injected = try? JSONDecoder().decode(PromptBudget.self, from: data),
+           injected.maxSystemUTF8Bytes > 0, injected.maxUserUTF8Bytes > 0,
+           injected.maxTotalUTF8Bytes > 0, injected.machineContractReserve > 0 {
+            return injected
+        }
+        #endif
+        return PromptBudget()
     }
 }
 
