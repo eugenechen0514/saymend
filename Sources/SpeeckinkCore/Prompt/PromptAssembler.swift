@@ -167,6 +167,13 @@ public extension PromptAssembler {
     }
 }
 
+public extension PromptAssembler {
+    /// Deprecated: M4 字面已搬入內建模式 `pureDictationMode.systemRules`。
+    /// 保留純量別名供既有呼叫端編譯通過；**不可**再用於新 code。
+    @available(*, deprecated, message: "Use PromptAssembler.pureDictationMode.systemRules")
+    static var coreRules: String { PromptAssembler.pureDictationMode.systemRules }
+}
+
 extension PromptAssembler {
     /// M4 既有 coreRules 字面快照。M5 Task 4 拆 coreRules 後此常數供
     /// 外部 golden fixture 比對用。不參與 systemPrompt() 拼接。
