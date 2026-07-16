@@ -195,6 +195,6 @@ import Testing
     #expect(c.contains("==== MACHINE CONTRACT START ===="))
     #expect(c.contains("==== MACHINE CONTRACT END ===="))
     #expect(c.contains("new_content|edit_command|undo"))
-    #expect(c.contains("意圖分類只能為"))
+    #expect(c.contains("intent 只能是"))
     #expect(c.contains("不可夾帶指令執行"))
 }
