@@ -87,7 +87,7 @@ public final class IntentService: IntentServing {
                 user: assembler.userPayload(utteranceRaw: utteranceRaw, context: context),
                 timeout: timeout
             )
-            guard let envelope = EnvelopeParser.parse(raw) else {
+            guard case .success(let envelope) = EnvelopeParser.parse(raw) else {
                 return .degraded(reason: "回應格式不合法")
             }
             let guarded: (String) -> String = { [traditionalize] text in
