@@ -1139,6 +1139,17 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(c.settings.sessionLanguageOverride == nil)
 }
 
+/// M5 SPEC §3.2：session 級核心模式覆蓋隨 archive 一併清除（比照 sessionLanguageOverride）
+@MainActor
+@Test func archiveSessionClearsSessionCoreModeID() {
+    let (c, _, _, _, _, _) = makeController()
+    c.settings.sessionCoreModeID = PromptAssembler.assistantMode.id
+    c.hotkeyPressed(at: 10.0)                        // 聽寫中（hold）
+    c.handleTranscript(.finalized("測試"), at: 10.5)
+    c.escapePressed()                               // 聽寫中 Esc ＝ 中止並封存
+    #expect(c.settings.sessionCoreModeID == nil)
+}
+
 // MARK: - Task 9：歷史記錄、OCR 注入、前景 App 上下文
 
 @MainActor

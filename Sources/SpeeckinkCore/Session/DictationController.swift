@@ -419,6 +419,7 @@ public final class DictationController {
         hud.present(.hidden)
         sessionTarget = .tail               // 封存即重置目標模式
         settings.sessionLanguageOverride = nil   // per-session 臨時覆蓋隨封存失效（規格 §4.5）
+        settings.sessionCoreModeID = nil     // per-session 核心模式覆蓋隨封存失效（規格 §3.2）
     }
 
     /// 密碼欄位中途切入：立即停止錄音與辨識、封存 session、不上屏任何後續文字（規格 §5.3）。

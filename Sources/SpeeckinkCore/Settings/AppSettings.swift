@@ -47,6 +47,7 @@ public final class AppSettings {
         static let historyEnabled = "historyEnabled"
         static let historyRetentionDays = "historyRetentionDays"
         static let ocrContextEnabled = "ocrContextEnabled"
+        static let defaultCoreModeID = "defaultCoreModeID"
     }
 
     private let defaults: UserDefaults
@@ -123,6 +124,19 @@ public final class AppSettings {
     /// per-session 臨時語系覆蓋（規格 §4.5 快速切換）。純記憶體：不持久化，
     /// session 封存時由 DictationController 清除。解析序：本值 > profile 固定語系 > outputLanguage。
     public var sessionLanguageOverride: OutputLanguage?
+
+    /// 全域預設核心模式（規格 §3.2）。nil＝未設定，解析式落到內建預設。
+    public var defaultCoreModeID: String? {
+        get { defaults.string(forKey: K.defaultCoreModeID) }
+        set {
+            if let v = newValue { defaults.set(v, forKey: K.defaultCoreModeID) }
+            else { defaults.removeObject(forKey: K.defaultCoreModeID) }
+        }
+    }
+
+    /// per-session 臨時核心模式覆蓋（規格 §3.2）。純記憶體、不寫 UserDefaults。
+    /// Session 封存時由 DictationController.archiveSession 清除。
+    public var sessionCoreModeID: String?
 
     public var llmAPIKey: String? {
         get { try? secrets.get(forKey: Self.apiKeyKey) }

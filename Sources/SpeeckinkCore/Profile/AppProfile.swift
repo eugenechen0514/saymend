@@ -12,6 +12,8 @@ public struct AppProfile: Codable, Equatable, Sendable {
     public var vocabEnabled: Bool
     /// Cmd+C 選取讀取備援白名單（M3 互審裁決：不盲發，profile 明示才觸發）
     public var cmdCSelectionFallback: Bool
+    /// per-app 核心模式綁定（規格 §3.2）。nil＝未綁定，解析式落到全域預設。
+    public var coreModeID: String?
 
     public init(bundleID: String,
                 boundsForRangeCapable: Bool? = nil,
@@ -19,7 +21,8 @@ public struct AppProfile: Codable, Equatable, Sendable {
                 fixedLanguage: OutputLanguage? = nil,
                 extraPrompt: String? = nil,
                 vocabEnabled: Bool = true,
-                cmdCSelectionFallback: Bool = false) {
+                cmdCSelectionFallback: Bool = false,
+                coreModeID: String? = nil) {
         self.bundleID = bundleID
         self.boundsForRangeCapable = boundsForRangeCapable
         self.axInsertCapable = axInsertCapable
@@ -27,6 +30,7 @@ public struct AppProfile: Codable, Equatable, Sendable {
         self.extraPrompt = extraPrompt
         self.vocabEnabled = vocabEnabled
         self.cmdCSelectionFallback = cmdCSelectionFallback
+        self.coreModeID = coreModeID
     }
 
     /// 內建常見 App 預設庫（規格 §4.6；隨手動測試矩陣回填）

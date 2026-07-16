@@ -99,3 +99,19 @@ func keychainStoreRoundTrip() throws {
     let reloaded = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
     #expect(reloaded.sessionLanguageOverride == nil)   // 不持久化
 }
+
+@Test func sessionCoreModeIDDoesNotPersist() {
+    let suite = "test-\(UUID().uuidString)"
+    let s = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+    s.sessionCoreModeID = PromptAssembler.assistantMode.id
+    let reloaded = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+    #expect(reloaded.sessionCoreModeID == nil)
+}
+
+@Test func defaultCoreModeIDPersists() {
+    let suite = "test-\(UUID().uuidString)"
+    let s = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+    s.defaultCoreModeID = PromptAssembler.verbatimTranscriptMode.id
+    let reloaded = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+    #expect(reloaded.defaultCoreModeID == PromptAssembler.verbatimTranscriptMode.id)
+}
