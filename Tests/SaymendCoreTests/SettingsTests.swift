@@ -115,3 +115,42 @@ func keychainStoreRoundTrip() throws {
     let reloaded = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
     #expect(reloaded.defaultCoreModeID == PromptAssembler.verbatimTranscriptMode.id)
 }
+
+// MARK: - Provider 選擇與 per-provider timeout（spec §5/§6）
+
+@Test func providerKindDefaultsToOpenAICompatAndPersists() {
+    let (s, _) = freshSettings()
+    #expect(s.providerKind == .openAICompat)          // 升級後零行為變化
+    s.providerKind = .claudeCLI
+    #expect(s.providerKind == .claudeCLI)
+}
+
+@Test func claudeCLIConfigDefaults() {
+    let (s, _) = freshSettings()
+    let c = s.claudeCLIConfig()
+    #expect(c.cliPathOverride == nil)
+    #expect(c.model == "sonnet")   // spike 定案：haiku 真實長 prompt 圍欄 44-56%、sonnet 0/16
+    s.claudeCLIPathOverride = "/opt/x/claude"
+    s.claudeCLIModel = "sonnet"
+    #expect(s.claudeCLIConfig() == ClaudeCLIConfig(cliPathOverride: "/opt/x/claude", model: "sonnet"))
+}
+
+@Test func timeoutDefaultsPerProvider() {
+    let (s, _) = freshSettings()
+    #expect(s.providerTimeouts(for: .openAICompat) == (3.0, 6.0))
+    #expect(s.providerTimeouts(for: .claudeCLI) == (20.0, 20.0))   // spike 定案：並行 14.6s 逼近 15s，提高到 20
+}
+
+@Test func timeoutReadClampsInvalidPersistedValues() {
+    let (s, _) = freshSettings()
+    s.cliPolishTimeout = 30
+    #expect(s.cliPolishTimeout == 30)                 // 合法值原樣
+    s.cliPolishTimeout = 0                            // 超界（<1）→ 回預設
+    #expect(s.cliPolishTimeout == 20.0)
+    s.cliPolishTimeout = 200                          // 超界（>120）→ 回預設
+    #expect(s.cliPolishTimeout == 20.0)
+    s.cliPolishTimeout = .nan                         // 非有限 → 回預設
+    #expect(s.cliPolishTimeout == 20.0)
+    s.oaiEditTimeout = -5
+    #expect(s.oaiEditTimeout == 6.0)
+}

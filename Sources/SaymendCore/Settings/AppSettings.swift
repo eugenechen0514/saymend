@@ -48,6 +48,13 @@ public final class AppSettings {
         static let historyRetentionDays = "historyRetentionDays"
         static let ocrContextEnabled = "ocrContextEnabled"
         static let defaultCoreModeID = "defaultCoreModeID"
+        static let providerKind = "providerKind"
+        static let cliPathOverride = "claudeCLIPathOverride"
+        static let cliModel = "claudeCLIModel"
+        static let oaiPolishTimeout = "oaiPolishTimeout"
+        static let oaiEditTimeout = "oaiEditTimeout"
+        static let cliPolishTimeout = "cliPolishTimeout"
+        static let cliEditTimeout = "cliEditTimeout"
     }
 
     private let defaults: UserDefaults
@@ -152,5 +159,63 @@ public final class AppSettings {
     public func openAIConfig() -> OpenAICompatConfig {
         let url = URL(string: llmBaseURLString) ?? URL(string: "https://api.openai.com/v1")!
         return OpenAICompatConfig(baseURL: url, apiKey: llmAPIKey, model: llmModel)
+    }
+
+    // MARK: - Provider 選擇與 per-provider timeout（spec §5/§6）
+
+    /// 使用者設定值合法範圍（configured deadline；runner 收到的剩餘 budget 不在此限——spec §5）
+    public static let timeoutRange: ClosedRange<TimeInterval> = 1...120
+
+    public var providerKind: ProviderKind {
+        get { defaults.string(forKey: K.providerKind).flatMap(ProviderKind.init(rawValue:)) ?? .openAICompat }
+        set { defaults.set(newValue.rawValue, forKey: K.providerKind) }
+    }
+
+    public var claudeCLIPathOverride: String? {
+        get {
+            let v = defaults.string(forKey: K.cliPathOverride)
+            return (v?.isEmpty ?? true) ? nil : v
+        }
+        set { defaults.set(newValue ?? "", forKey: K.cliPathOverride) }
+    }
+
+    public var claudeCLIModel: String {
+        get { defaults.string(forKey: K.cliModel) ?? "sonnet" }   // spike 定案
+        set { defaults.set(newValue, forKey: K.cliModel) }
+    }
+
+    /// 讀取防線（spec §5）：缺失／非數值／NaN／Inf／超出 [1,120] 一律回該 provider 預設值。
+    private func readTimeout(_ key: String, default def: TimeInterval) -> TimeInterval {
+        guard let v = defaults.object(forKey: key) as? Double, v.isFinite,
+              Self.timeoutRange.contains(v) else { return def }
+        return v
+    }
+
+    public var oaiPolishTimeout: TimeInterval {
+        get { readTimeout(K.oaiPolishTimeout, default: 3.0) }
+        set { defaults.set(newValue, forKey: K.oaiPolishTimeout) }
+    }
+    public var oaiEditTimeout: TimeInterval {
+        get { readTimeout(K.oaiEditTimeout, default: 6.0) }
+        set { defaults.set(newValue, forKey: K.oaiEditTimeout) }
+    }
+    public var cliPolishTimeout: TimeInterval {
+        get { readTimeout(K.cliPolishTimeout, default: 20.0) }     // spike 定案（單句 ~5s、並行近序列 14.6s）
+        set { defaults.set(newValue, forKey: K.cliPolishTimeout) }
+    }
+    public var cliEditTimeout: TimeInterval {
+        get { readTimeout(K.cliEditTimeout, default: 20.0) }
+        set { defaults.set(newValue, forKey: K.cliEditTimeout) }
+    }
+
+    public func providerTimeouts(for kind: ProviderKind) -> (polish: TimeInterval, edit: TimeInterval) {
+        switch kind {
+        case .openAICompat: return (oaiPolishTimeout, oaiEditTimeout)
+        case .claudeCLI: return (cliPolishTimeout, cliEditTimeout)
+        }
+    }
+
+    public func claudeCLIConfig() -> ClaudeCLIConfig {
+        ClaudeCLIConfig(cliPathOverride: claudeCLIPathOverride, model: claudeCLIModel)
     }
 }
