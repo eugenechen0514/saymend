@@ -1,5 +1,7 @@
 # Saymend
 
+> *Say it. Consider it mended.*
+
 macOS 語音輸入工具：說完即成稿，改稿用嘴不用滑鼠（M1 為核心聽寫；口頭修正見規格 M2）。
 
 ## 需求
@@ -39,3 +41,7 @@ Saymend 的 JSON 輸出格式、意圖分類（new_content／edit_command／undo
 ## 開發
     swift test          # 核心邏輯全部單元測試
     swift build         # 編譯
+
+## 靈感來源
+
+本專案的產品概念靈感來自 [Soink](https://www.soink.ai/)——一款主打即時語音輸入與語音編輯的 Mac 語音鍵盤。
