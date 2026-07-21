@@ -33,7 +33,14 @@ public enum HotkeyChoice: String, CaseIterable, Codable, Sendable {
 }
 
 /// App 設定（規格 §4.9）。一般值進 UserDefaults；API key 進 SecretStore。
-public final class AppSettings {
+///
+/// `@unchecked Sendable`（三件事誠實揭露，勿以「stored 全 let」誤讀）：
+/// ① `defaults`（UserDefaults）與 `secrets`（SecretStore）皆為 `let`、底層 thread-safe。
+/// ② `sessionLanguageOverride`／`sessionCoreModeID` 是兩個純記憶體 stored `var`，MainActor-by-convention
+///    （非編譯器強制）；本標記**不**為其提供跨執行緒安全，僅約定由 MainActor 存取，標記前後風險不變。
+/// ③ 本標記只是把既有 de facto 契約顯式化：M1 起 `OpenAICompatProvider.complete()` 已在背景 executor
+///    呼叫 `configProvider()`（即 defaults/secrets-backed 存取早已跨執行緒），非新開風險。
+public final class AppSettings: @unchecked Sendable {
     public static let apiKeyKey = "openaiCompatAPIKey"
 
     private enum K {
