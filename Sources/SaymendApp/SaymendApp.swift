@@ -57,6 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let coreModeStore = FileCoreModeStore(fileURL: AppDelegate.supportDir.appendingPathComponent("core_modes.json"))
     let coreModeResolver = CoreModeResolver()
     private let ocrReader = OCRContextReader()
+    /// ClaudeCLI 偵測器：設定 UI（Task 8）與 provider 共用同一實例＝共享 (path, mtime) 快取（spec §4.1）。
+    let claudeCLIDetector = ClaudeCLIDetector.live()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 輔助功能權限：沒有就跳系統提示（熱鍵與鍵入都靠它）
@@ -70,6 +72,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let coordinator = InsertionCoordinator(keystroke: keystroke, paste: PasteInserter(),
                                                rangeReplacer: axInserter)
         let provider = OpenAICompatProvider(configProvider: { [settings] in settings.openAIConfig() })
+        // ClaudeCLI（spec §4）：偵測器 UI 與 provider 共用（快取共享）；config 每次呼叫讀取即時生效
+        let cliProvider = ClaudeCLIProvider(
+            configProvider: { [settings] in settings.claudeCLIConfig() },
+            detect: { [claudeCLIDetector] override in await claudeCLIDetector.detect(override: override) })
+        let router = ProviderRouter(openAICompat: provider, claudeCLI: cliProvider)
         // 簡繁保險絲初始化失敗不得無聲吞掉（規格 §5.1）：一次性 HUD 通知後以無保險絲模式續行。
         // apply() 本身不會 throw，init 是唯一失敗點。
         let traditionalize: TraditionalizeGuard?
@@ -127,8 +134,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             return PromptInputs(language: language, sources: sources, mode: mode,
                                 providerKind: kind, polishTimeout: t.polish, editTimeout: t.edit)
         }
-        let router = ProviderRouter(openAICompat: provider,
-                                    claudeCLI: provider)   // Task 7 換成真 ClaudeCLIProvider
         let intentService = IntentService(
             provider: router,
             traditionalize: traditionalize,
