@@ -60,26 +60,34 @@ public struct EnvelopeTextLimit: Equatable, Sendable {
 }
 
 /// 一次取齊的 prompt 輸入快照。App 層負責在同一次 MainActor run、
-/// 用同一個 bundleID + profile 產生三個衍生值——torn read 在構造上不可能發生。
+/// 用同一個 bundleID + profile 產生衍生值——torn read 在構造上不可能發生。
+/// providerKind/timeout 同屬本快照（spec §5）：路由與 timeout 出自同一次讀取。
+/// 三個 provider 欄位刻意**無預設值**（M5 教訓：預設值＝靜默 footgun）。
 public struct PromptInputs: Sendable {
     public let language: OutputLanguage
     public let sources: PromptLayerSources
     public let mode: CoreMode
+    public let providerKind: ProviderKind
+    public let polishTimeout: TimeInterval
+    public let editTimeout: TimeInterval
 
-    public init(language: OutputLanguage, sources: PromptLayerSources, mode: CoreMode) {
+    public init(language: OutputLanguage, sources: PromptLayerSources, mode: CoreMode,
+                providerKind: ProviderKind, polishTimeout: TimeInterval, editTimeout: TimeInterval) {
         self.language = language
         self.sources = sources
         self.mode = mode
+        self.providerKind = providerKind
+        self.polishTimeout = polishTimeout
+        self.editTimeout = editTimeout
     }
 }
 
 /// 意圖分類＋產文合併呼叫（規格 §3.3／§4.3）。任何失敗都回 degraded——使用者不能白說話。
 public final class IntentService: IntentServing {
-    /// 無既有內容＝純潤飾：3 秒；有既有內容＝可能是修正：6 秒（規格 §4.3）
-    public static let polishTimeout: TimeInterval = 3.0
-    public static let editTimeout: TimeInterval = 6.0
+    /// timeout 值已遷入 AppSettings per-provider 設定（spec §5）；polish/edit 語意（§4.3）
+    /// 仍由本類依 context.targetText.isEmpty 決定，值取自快照。
 
-    private let provider: any LLMProvider
+    private let provider: any RoutedLLMProvider
     private let traditionalize: TraditionalizeGuard?
     /// 單一 prompt 輸入解析器（App 端組裝）。標 @MainActor：closure 內部會讀取
     /// App 層 store（詞彙表／profile／sessionLanguageOverride／CoreModeStore）與
@@ -91,7 +99,7 @@ public final class IntentService: IntentServing {
     private let promptBudget: PromptBudget
     private let envelopeTextLimit: EnvelopeTextLimit
 
-    public init(provider: any LLMProvider,
+    public init(provider: any RoutedLLMProvider,
                 traditionalize: TraditionalizeGuard?,
                 inputs: @escaping @MainActor () -> PromptInputs,
                 promptBudget: PromptBudget = PromptBudget(),
@@ -126,10 +134,11 @@ public final class IntentService: IntentServing {
             return .degraded(reason: "Prompt 組裝失敗")
         }
 
-        let timeout = context.targetText.isEmpty ? Self.polishTimeout : Self.editTimeout
+        let timeout = context.targetText.isEmpty ? snapshot.polishTimeout : snapshot.editTimeout
         let raw: String
         do {
-            raw = try await provider.complete(system: prompt.system,
+            raw = try await provider.complete(kind: snapshot.providerKind,
+                                              system: prompt.system,
                                               user: prompt.user,
                                               timeout: timeout)
         } catch {

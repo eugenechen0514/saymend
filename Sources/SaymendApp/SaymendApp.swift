@@ -121,10 +121,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 defaultModeID: settings.defaultCoreModeID,
                 availableModes: PromptAssembler.builtinCoreModes + coreModeStore.allUserModes())
 
-            return PromptInputs(language: language, sources: sources, mode: mode)
+            // ⑤ provider 選擇與 timeout（spec §5）：與 language/sources/mode 同一快照
+            let kind = settings.providerKind
+            let t = settings.providerTimeouts(for: kind)
+            return PromptInputs(language: language, sources: sources, mode: mode,
+                                providerKind: kind, polishTimeout: t.polish, editTimeout: t.edit)
         }
+        let router = ProviderRouter(openAICompat: provider,
+                                    claudeCLI: provider)   // Task 7 換成真 ClaudeCLIProvider
         let intentService = IntentService(
-            provider: provider,
+            provider: router,
             traditionalize: traditionalize,
             inputs: promptInputs,
             promptBudget: PromptBudget.productionDefault())   // Debug 可由 E2E env 注入；Release 恆為預設

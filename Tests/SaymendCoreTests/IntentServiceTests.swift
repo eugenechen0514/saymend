@@ -3,16 +3,18 @@ import Testing
 @testable import SaymendCore
 
 /// 本檔專用的腳本化 provider（PolishServiceTests 的 ScriptedProvider 將於 Task 8 隨檔刪除，名稱錯開避免重複宣告）
-final class ScriptedIntentProvider: LLMProvider {
+final class ScriptedIntentProvider: RoutedLLMProvider, @unchecked Sendable {
     enum Script { case reply(String), fail }
     var script: Script
+    var lastKind: ProviderKind?
     var lastSystem: String?
     var lastUser: String?
     var lastTimeout: TimeInterval?
     private(set) var callCount = 0          // 驗證失敗路徑不呼叫 provider
     init(_ script: Script) { self.script = script }
-    func complete(system: String, user: String, timeout: TimeInterval) async throws -> String {
+    func complete(kind: ProviderKind, system: String, user: String, timeout: TimeInterval) async throws -> String {
         callCount += 1
+        lastKind = kind
         lastSystem = system
         lastUser = user
         lastTimeout = timeout
@@ -28,11 +30,16 @@ private func makeService(_ provider: ScriptedIntentProvider,
                          traditionalize: TraditionalizeGuard? = nil,
                          sources: PromptLayerSources = PromptLayerSources(),
                          mode: CoreMode = PromptAssembler.pureDictationMode,
+                         kind: ProviderKind = .openAICompat,
+                         polishTimeout: TimeInterval = 3.0,
+                         editTimeout: TimeInterval = 6.0,
                          budget: PromptBudget = PromptBudget(),
                          textLimit: EnvelopeTextLimit = EnvelopeTextLimit()) -> IntentService {
     IntentService(provider: provider,
                   traditionalize: traditionalize,
-                  inputs: { PromptInputs(language: language, sources: sources, mode: mode) },
+                  inputs: { PromptInputs(language: language, sources: sources, mode: mode,
+                                         providerKind: kind,
+                                         polishTimeout: polishTimeout, editTimeout: editTimeout) },
                   promptBudget: budget,
                   envelopeTextLimit: textLimit)
 }
@@ -41,14 +48,14 @@ private func makeService(_ provider: ScriptedIntentProvider,
     let p = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"你好。"}"#))
     let out = await makeService(p).process(utteranceRaw: "呃你好", context: .session(""))
     #expect(out == .newContent("你好。"))
-    #expect(p.lastTimeout == IntentService.polishTimeout)   // 3 秒
+    #expect(p.lastTimeout == 3.0)   // 空 session＝polish（snapshot 預設值）
     #expect(p.lastUser?.contains("目前沒有可修正的既有內容") == true)
 }
 
 @Test func nonEmptySessionUsesEditTimeoutAndCarriesSession() async {
     let p = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"續句。"}"#))
     _ = await makeService(p).process(utteranceRaw: "續句", context: .session("首句。"))
-    #expect(p.lastTimeout == IntentService.editTimeout)     // 6 秒
+    #expect(p.lastTimeout == 6.0)   // 有既有內容＝edit
     #expect(p.lastUser?.contains("首句。") == true)
 }
 
@@ -172,7 +179,7 @@ private func makeService(_ provider: ScriptedIntentProvider,
 @Test func selectionTargetUsesEditTimeout() async {
     let p = ScriptedIntentProvider(.reply(#"{"intent":"edit_command","text":"正式版本"}"#))
     _ = await makeService(p).process(utteranceRaw: "改正式一點", context: .selection("嗨大家"))
-    #expect(p.lastTimeout == IntentService.editTimeout)   // 有目標文字＝可能修正＝6s
+    #expect(p.lastTimeout == 6.0)   // 有目標文字＝可能修正＝edit
 }
 
 @Test func selectionEditCommandReturnsEditedSession() async {
@@ -195,4 +202,16 @@ private func makeService(_ provider: ScriptedIntentProvider,
     let p2 = ScriptedIntentProvider(.reply(#"{"intent":"edit_command","text":"干净的字"}"#))
     let o2 = await makeService(p2, language: .zhTW, traditionalize: try TraditionalizeGuard()).process(utteranceRaw: "改", context: .session("髒的字"))
     #expect(o2 == .editedSession("乾淨的字"))
+}
+
+@Test func snapshotKindAndTimeoutsFlowToRouter() async {
+    // kind 與 timeout 出自同一快照（spec §5 無 torn read 的可觀測面）
+    let p = ScriptedIntentProvider(.reply(#"{"intent":"new_content","text":"嗨。"}"#))
+    _ = await makeService(p, kind: .claudeCLI, polishTimeout: 11, editTimeout: 22)
+        .process(utteranceRaw: "嗨", context: .session(""))
+    #expect(p.lastKind == .claudeCLI)
+    #expect(p.lastTimeout == 11)                                    // 空 session → polish
+    _ = await makeService(p, kind: .claudeCLI, polishTimeout: 11, editTimeout: 22)
+        .process(utteranceRaw: "改一下", context: .session("既有全文"))
+    #expect(p.lastTimeout == 22)                                    // 有目標 → edit
 }
