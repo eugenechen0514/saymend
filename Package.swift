@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Speeckink",
+    name: "Saymend",
     platforms: [.macOS("26.0")],
     dependencies: [
         .package(url: "https://github.com/ddddxxx/SwiftyOpenCC", from: "2.0.0-beta"),
@@ -10,7 +10,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "SpeeckinkCore",
+            name: "SaymendCore",
             dependencies: [
                 .product(name: "OpenCC", package: "SwiftyOpenCC"),
                 .product(name: "GRDB", package: "GRDB.swift"),
@@ -18,13 +18,13 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
-            name: "SpeeckinkApp",
-            dependencies: ["SpeeckinkCore"],
+            name: "SaymendApp",
+            dependencies: ["SaymendCore"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
-            name: "SpeeckinkCoreTests",
-            dependencies: ["SpeeckinkCore"],
+            name: "SaymendCoreTests",
+            dependencies: ["SaymendCore"],
             resources: [
                 .copy("Fixtures/CoreMode/golden-default.follow-speech.json"),
                 .copy("Fixtures/CoreMode/golden-default.zh-TW.json"),
@@ -35,8 +35,8 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
-            name: "SpeeckinkAppTests",
-            dependencies: ["SpeeckinkApp"],
+            name: "SaymendAppTests",
+            dependencies: ["SaymendApp"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

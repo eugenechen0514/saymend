@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Speeckink E2E 用的 OpenAI-compatible stub endpoint（規格 §7.5）。
+"""Saymend E2E 用的 OpenAI-compatible stub endpoint（規格 §7.5）。
 
 用法：
     SCENARIO=fenced_json python3 Scripts/e2e-stub-server.py --port 18080
@@ -28,7 +28,7 @@ SCENARIOS = {
     "valid":            '{"intent":"new_content","text":"整理後的文字。"}',
 }
 
-TRANSCRIPT = os.environ.get("STUB_TRANSCRIPT", "/tmp/speeckink-e2e-stub-transcript.jsonl")
+TRANSCRIPT = os.environ.get("STUB_TRANSCRIPT", "/tmp/saymend-e2e-stub-transcript.jsonl")
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):

@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>io.speeckink.app</string>
+    <string>io.saymend.app</string>
     <key>CFBundleName</key>
-    <string>Speeckink</string>
+    <string>Saymend</string>
     <key>CFBundleExecutable</key>
-    <string>Speeckink</string>
+    <string>Saymend</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -19,8 +19,8 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Speeckink 需要麥克風進行語音輸入。</string>
+    <string>Saymend 需要麥克風進行語音輸入。</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Speeckink 使用裝置端語音辨識將語音轉為文字。</string>
+    <string>Saymend 使用裝置端語音辨識將語音轉為文字。</string>
 </dict>
 </plist>
