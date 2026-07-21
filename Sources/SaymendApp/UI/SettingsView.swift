@@ -8,20 +8,23 @@ struct SettingsView: View {
     let vocab: (any VocabStore)?
     let history: (any HistoryRecording)?
     let coreModes: (any CoreModeStore)?
+    let detector: ClaudeCLIDetector?
 
     init(settings: AppSettings,
          vocab: (any VocabStore)? = nil,
          history: (any HistoryRecording)? = nil,
-         coreModes: (any CoreModeStore)? = nil) {
+         coreModes: (any CoreModeStore)? = nil,
+         detector: ClaudeCLIDetector? = nil) {
         self.settings = settings
         self.vocab = vocab
         self.history = history
         self.coreModes = coreModes
+        self.detector = detector
     }
 
     var body: some View {
         TabView {
-            GeneralSettingsTab(settings: settings)
+            GeneralSettingsTab(settings: settings, detector: detector)
                 .tabItem { Label("一般", systemImage: "gearshape") }
             CoreModeSettingsTab(store: coreModes)
                 .tabItem { Label("核心模式", systemImage: "square.stack.3d.up") }
@@ -43,20 +46,38 @@ struct SettingsView: View {
 /// AppSettings 非 ObservableObject，故以 @State 快照＋onChange 寫回。
 struct GeneralSettingsTab: View {
     let settings: AppSettings
+    let detector: ClaudeCLIDetector?
 
     @State private var hotkey: HotkeyChoice
     @State private var language: OutputLanguage
     @State private var baseURL: String
     @State private var model: String
     @State private var apiKey: String
+    // Provider 選擇（spec §7）
+    @State private var providerKind: ProviderKind
+    @State private var cliModel: String
+    @State private var cliPathOverride: String
+    @State private var oaiPolish: Double
+    @State private var oaiEdit: Double
+    @State private var cliPolish: Double
+    @State private var cliEdit: Double
+    @State private var detection: ClaudeCLIDetection?
 
-    init(settings: AppSettings) {
+    init(settings: AppSettings, detector: ClaudeCLIDetector? = nil) {
         self.settings = settings
+        self.detector = detector
         _hotkey = State(initialValue: settings.hotkey)
         _language = State(initialValue: settings.outputLanguage)
         _baseURL = State(initialValue: settings.llmBaseURLString)
         _model = State(initialValue: settings.llmModel)
         _apiKey = State(initialValue: settings.llmAPIKey ?? "")
+        _providerKind = State(initialValue: settings.providerKind)
+        _cliModel = State(initialValue: settings.claudeCLIModel)
+        _cliPathOverride = State(initialValue: settings.claudeCLIPathOverride ?? "")
+        _oaiPolish = State(initialValue: settings.oaiPolishTimeout)
+        _oaiEdit = State(initialValue: settings.oaiEditTimeout)
+        _cliPolish = State(initialValue: settings.cliPolishTimeout)
+        _cliEdit = State(initialValue: settings.cliEditTimeout)
     }
 
     var body: some View {
@@ -69,22 +90,87 @@ struct GeneralSettingsTab: View {
                     ForEach(OutputLanguage.allCases, id: \.self) { Text($0.displayName).tag($0) }
                 }
             }
-            Section("LLM（OpenAI Compatible）") {
-                TextField("Base URL", text: $baseURL, prompt: Text("https://api.openai.com/v1"))
-                TextField("模型", text: $model, prompt: Text("gpt-4o-mini"))
-                SecureField("API Key（存於 Keychain）", text: $apiKey)
-                Text("本地模型（Ollama／LM Studio）也走這裡：填 http://localhost:11434/v1 之類的端點即可。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Section("LLM Provider") {
+                Picker("Provider", selection: $providerKind) {
+                    Text("OpenAI 相容").tag(ProviderKind.openAICompat)
+                    Text("Claude CLI").tag(ProviderKind.claudeCLI)
+                }
+                .pickerStyle(.segmented)
+            }
+            if providerKind == .openAICompat {
+                Section("OpenAI 相容") {
+                    TextField("Base URL", text: $baseURL, prompt: Text("https://api.openai.com/v1"))
+                    TextField("模型", text: $model, prompt: Text("gpt-4o-mini"))
+                    SecureField("API Key（存於 Keychain）", text: $apiKey)
+                    Text("本地模型（Ollama／LM Studio）也走這裡：填 http://localhost:11434/v1 之類的端點即可。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    timeoutControls(polish: $oaiPolish, edit: $oaiEdit,
+                                    defaults: (3, 6))
+                }
+            } else {
+                Section("Claude CLI") {
+                    detectionStatusRow
+                    TextField("CLI 路徑（留空＝自動偵測）", text: $cliPathOverride)
+                    TextField("模型", text: $cliModel, prompt: Text("sonnet"))
+                    Text("沿用本機 claude CLI 的既有登入，毋需 API Key。聽寫內容以隔離模式呼叫：不寫入 Claude Code session、不觸發 hooks、不載入 CLAUDE.md。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    timeoutControls(polish: $cliPolish, edit: $cliEdit,
+                                    defaults: (20, 20))
+                }
             }
         }
         .formStyle(.grouped)
         .frame(width: 460)
         .padding()
+        .task(id: cliPathOverride + providerKind.rawValue) {
+            guard providerKind == .claudeCLI, let detector else { return }
+            detection = await detector.detect(override: cliPathOverride.isEmpty ? nil : cliPathOverride)
+        }
         .onChange(of: hotkey) { _, v in settings.hotkey = v }
         .onChange(of: language) { _, v in settings.outputLanguage = v }
         .onChange(of: baseURL) { _, v in settings.llmBaseURLString = v }
         .onChange(of: model) { _, v in settings.llmModel = v }
         .onChange(of: apiKey) { _, v in settings.llmAPIKey = v.isEmpty ? nil : v }
+        .onChange(of: providerKind) { _, v in settings.providerKind = v }
+        .onChange(of: cliModel) { _, v in settings.claudeCLIModel = v }
+        .onChange(of: cliPathOverride) { _, v in settings.claudeCLIPathOverride = v.isEmpty ? nil : v }
+        .onChange(of: oaiPolish) { _, v in settings.oaiPolishTimeout = v }
+        .onChange(of: oaiEdit) { _, v in settings.oaiEditTimeout = v }
+        .onChange(of: cliPolish) { _, v in settings.cliPolishTimeout = v }
+        .onChange(of: cliEdit) { _, v in settings.cliEditTimeout = v }
+    }
+
+    /// 偵測狀態列（spec §7）：綠勾＋路徑／紅字原因。此為靜態偵測，非 #4 的連通性測試。
+    @ViewBuilder private var detectionStatusRow: some View {
+        switch detection {
+        case .found(let path, let version):
+            Label("已偵測：\(path)（v\(version)）", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green).font(.caption)
+        case .incompatible(_, let reason):
+            Label(reason, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red).font(.caption)
+        case .notFound:
+            Label("未偵測到 claude CLI，請安裝或手動指定路徑", systemImage: "xmark.circle.fill")
+                .foregroundStyle(.red).font(.caption)
+        case nil:
+            Label("偵測中…", systemImage: "hourglass").font(.caption)
+        }
+    }
+
+    /// timeout 控制（spec §5/§7）：Stepper 天然限制在 [1,120]（UI 防線）＋恢復預設。
+    @ViewBuilder private func timeoutControls(polish: Binding<Double>, edit: Binding<Double>,
+                                              defaults: (Double, Double)) -> some View {
+        Stepper(value: polish, in: AppSettings.timeoutRange, step: 1) {
+            Text("逾時・潤飾：\(Int(polish.wrappedValue)) 秒")
+        }
+        Stepper(value: edit, in: AppSettings.timeoutRange, step: 1) {
+            Text("逾時・修正：\(Int(edit.wrappedValue)) 秒")
+        }
+        Button("恢復預設逾時") {
+            polish.wrappedValue = defaults.0
+            edit.wrappedValue = defaults.1
+        }
     }
 }

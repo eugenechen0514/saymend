@@ -13,7 +13,8 @@ struct SaymendApp: App {
         }
         Settings {
             SettingsView(settings: delegate.settings, vocab: delegate.vocabStore,
-                        history: delegate.historyStore, coreModes: delegate.coreModeStore)
+                        history: delegate.historyStore, coreModes: delegate.coreModeStore,
+                        detector: delegate.claudeCLIDetector)
         }
     }
 }
