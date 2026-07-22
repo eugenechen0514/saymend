@@ -115,7 +115,7 @@ import Testing
     c.tick(at: 12.6)
     await c.lastIntentTask?.value
     #expect(key.ops == [.insert("原文")])          // 原文保留，無退格
-    #expect(hud.states.contains(.notice("未潤飾")))
+    #expect(hud.states.contains(.notice("未潤飾（測試）")))
 }
 
 @MainActor
@@ -140,7 +140,7 @@ import Testing
     // 4. tail 不碰剪貼簿
     #expect(clip.texts.isEmpty)
     // 5. HUD 提示
-    #expect(hud.states.contains(.notice("未潤飾")))
+    #expect(hud.states.contains(.notice("未潤飾（測試降級）")))
 }
 
 @MainActor
@@ -1292,4 +1292,17 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     c.tick(at: 12.1)
     await c.lastIntentTask?.value
     #expect(intent.calls.last?.context.frontAppName == "Slack")
+}
+
+@MainActor
+@Test func degradedNoticeCarriesReason() async {
+    let polisher = GatedIntentService()
+    polisher.outcome = .degraded(reason: "逾時 3 秒")
+    let (c, _, _, _, _, hud) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("原文"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    #expect(hud.states.contains(.notice("未潤飾（逾時 3 秒）")))   // M5 誤診教訓：真因必須上 HUD
 }

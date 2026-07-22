@@ -565,11 +565,12 @@ public final class DictationController {
         case .undo:
             // undo 不需要文字基準——回退目標在「套用時」由帳本現值決定，串行化已保證順序
             performUndo(commandSnapshot: snapshot)
-        case .degraded:
+        case .degraded(let reason):
+            // M7 §3.4：reason 是真因（逾時 N 秒／HTTP N／無法連線…），不可再吞掉
             if ledger.frozen {
-                hud.present(.notice("未潤飾"))
+                hud.present(.notice("未潤飾（\(reason)）"))
             } else {
-                keepRawWithoutVersion(snapshot, notice: "未潤飾")   // A4：mirror 但不建版本
+                keepRawWithoutVersion(snapshot, notice: "未潤飾（\(reason)）")   // A4：mirror 但不建版本
             }
         }
     }
