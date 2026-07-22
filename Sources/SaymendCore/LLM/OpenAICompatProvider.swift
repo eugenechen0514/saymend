@@ -52,7 +52,12 @@ public final class OpenAICompatProvider: LLMProvider {
             messages: [.init(role: "system", content: system), .init(role: "user", content: user)],
             temperature: 0.2
         ))
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp): (Data, URLResponse)
+        do {
+            (data, resp) = try await session.data(for: req)
+        } catch let e as URLError where e.code == .timedOut {
+            throw LLMError.timedOut   // 逾時在 provider 邊界翻譯（M7 §3.2）；其他 URLError 原樣穿透
+        }
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw LLMError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? -1)
         }

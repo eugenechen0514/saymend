@@ -18,6 +18,34 @@ final class MockURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+/// URLProtocol stub：攔下 provider 的網路呼叫，腳本化「拋錯」路徑（MockURLProtocol 只能回狀態碼）
+final class StubURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        do {
+            guard let handler = Self.handler else { throw URLError(.unknown) }
+            let (resp, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+    override func stopLoading() {}
+}
+
+private func makeOAIProvider() -> OpenAICompatProvider {
+    let cfg = URLSessionConfiguration.ephemeral
+    cfg.protocolClasses = [StubURLProtocol.self]
+    return OpenAICompatProvider(
+        configProvider: { OpenAICompatConfig(baseURL: URL(string: "https://stub.test/v1")!,
+                                             apiKey: nil, model: "m") },
+        session: URLSession(configuration: cfg))
+}
+
 private func makeProvider(apiKey: String? = "sk-test") -> OpenAICompatProvider {
     let cfg = URLSessionConfiguration.ephemeral
     cfg.protocolClasses = [MockURLProtocol.self]
@@ -54,5 +82,25 @@ struct OpenAICompatProviderTests {
             return (200, Data(#"{"choices":[{"message":{"content":"x"}}]}"#.utf8))
         }
         _ = try await makeProvider(apiKey: nil).complete(system: "s", user: "u", timeout: 5)
+    }
+
+    @Test func urlTimeoutMapsToLLMErrorTimedOut() async {
+        StubURLProtocol.handler = { _ in throw URLError(.timedOut) }
+        do {
+            _ = try await makeOAIProvider().complete(system: "s", user: "u", timeout: 3)
+            Issue.record("應拋錯")
+        } catch {
+            #expect(error as? LLMError == .timedOut)   // 逾時在邊界翻譯（spec §3.2）
+        }
+    }
+
+    @Test func otherURLErrorsPassThroughUnchanged() async {
+        StubURLProtocol.handler = { _ in throw URLError(.notConnectedToInternet) }
+        do {
+            _ = try await makeOAIProvider().complete(system: "s", user: "u", timeout: 3)
+            Issue.record("應拋錯")
+        } catch {
+            #expect((error as? URLError)?.code == .notConnectedToInternet)   // 斷網類原樣穿透→上層歸「無法連線」
+        }
     }
 }

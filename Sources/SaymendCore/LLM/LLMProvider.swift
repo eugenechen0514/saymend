@@ -8,4 +8,5 @@ public protocol LLMProvider {
 public enum LLMError: Error, Equatable {
     case badStatus(Int)
     case emptyResponse
+    case timedOut          // M7 §3：兩個 provider 的內部逾時統一映射到此
 }
