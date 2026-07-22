@@ -82,7 +82,8 @@ private func makeProvider(_ runner: FakeRunner,
 @Test func tempResourcesCleanedOnRunnerThrow() async throws {
     let r = FakeRunner()
     await r.setResult(.failure(ProcessRunnerError.nonZeroExit(code: 1, stderrSummary: "x")))
-    await #expect(throws: ProcessRunnerError.nonZeroExit(code: 1, stderrSummary: "x")) {
+    // 邊界收斂後 ProcessRunnerError 不再穿透（M7 spec §9 明定的行為變更、非回歸）
+    await #expect(throws: ClaudeCLIError.processFailed(code: 1)) {
         _ = try await makeProvider(r).complete(system: "s", user: "u", timeout: 10)
     }
     let call = await r.calls[0]
@@ -149,7 +150,8 @@ private func makeProvider(_ runner: FakeRunner,
     try await Task.sleep(for: .milliseconds(300))                    // 遠超 t3 deadline
     await r.setBlocking(false)
     await r.open()                                                    // slot 釋出
-    await #expect(throws: ProcessRunnerError.timedOut) { _ = try await t3.value }
+    // 排隊逾期同走 mapped()，對上層一律是 LLMError.timedOut（M7 spec §9）
+    await #expect(throws: LLMError.timedOut) { _ = try await t3.value }
     _ = try? await t1.value; _ = try? await t2.value
     #expect(await r.calls.count == 2)                                // t3 永不 spawn（無幽靈呼叫）
 }
@@ -159,4 +161,37 @@ private func makeProvider(_ runner: FakeRunner,
     _ = try await makeProvider(r).complete(system: "s", user: "u", timeout: 10)
     let got = await r.calls[0].timeout
     #expect(got > 9 && got <= 10)                                    // 無排隊：剩餘 ≈ 全額（不是 [1,120] clamp 後的值）
+}
+
+@Test func runnerTimeoutMapsToLLMErrorTimedOut() async {
+    let r = FakeRunner()
+    await r.setResult(.failure(ProcessRunnerError.timedOut))
+    do {
+        _ = try await makeProvider(r).complete(system: "s", user: "u", timeout: 5)
+        Issue.record("應拋錯")
+    } catch {
+        #expect(error as? LLMError == .timedOut)
+    }
+}
+
+@Test func nonZeroExitMapsToProcessFailed() async {
+    let r = FakeRunner()
+    await r.setResult(.failure(ProcessRunnerError.nonZeroExit(code: 7, stderrSummary: "boom")))
+    do {
+        _ = try await makeProvider(r).complete(system: "s", user: "u", timeout: 5)
+        Issue.record("應拋錯")
+    } catch {
+        #expect(error as? ClaudeCLIError == .processFailed(code: 7))   // stderr 不進 error（走 logger）
+    }
+}
+
+@Test func spawnFailureMapsToSpawnFailed() async {
+    let r = FakeRunner()
+    await r.setResult(.failure(ProcessRunnerError.spawnFailed("no such file")))
+    do {
+        _ = try await makeProvider(r).complete(system: "s", user: "u", timeout: 5)
+        Issue.record("應拋錯")
+    } catch {
+        #expect(error as? ClaudeCLIError == .spawnFailed)
+    }
 }

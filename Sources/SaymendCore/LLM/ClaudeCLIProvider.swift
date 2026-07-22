@@ -1,7 +1,10 @@
 import Foundation
+import os.log
 
 public enum ClaudeCLIError: Error, Equatable, Sendable {
     case cliNotFound
+    case processFailed(code: Int32)   // M7 §3.2：CLI 非零結束碼（stderr 走 logger 不進 error）
+    case spawnFailed                  // M7 §3.2：CLI 進程啟動失敗
 }
 
 /// FIFO slot queue（spec §4.5 併發上限）。release 時 slot 直接轉移給隊首。
@@ -80,7 +83,25 @@ public final class ClaudeCLIProvider: LLMProvider, @unchecked Sendable {
             return stdout                                          // 原樣交下游 EnvelopeParser.strict
         } catch {
             await slots.release()                                  // 所有失敗/逾時路徑
-            throw error
+            throw Self.mapped(error)
+        }
+    }
+
+    /// transport 錯誤在 provider 邊界翻譯（M7 §3.2）：ProcessRunnerError 不洩漏到上層。
+    /// stderrSummary 可能含路徑等雜訊，不進 error——以 logger 記錄（M7 spec 明定新增，SaymendCore 首個 logger）。
+    private static let logger = Logger(subsystem: "io.saymend.app", category: "claudecli")
+    private static func mapped(_ error: any Error) -> any Error {
+        switch error {
+        case ProcessRunnerError.timedOut:
+            return LLMError.timedOut
+        case ProcessRunnerError.nonZeroExit(let code, let stderr):
+            logger.error("claude CLI 非零結束碼 \(code)：\(stderr, privacy: .private)")
+            return ClaudeCLIError.processFailed(code: code)
+        case ProcessRunnerError.spawnFailed(let msg):
+            logger.error("claude CLI 啟動失敗：\(msg, privacy: .private)")
+            return ClaudeCLIError.spawnFailed
+        default:
+            return error
         }
     }
 
