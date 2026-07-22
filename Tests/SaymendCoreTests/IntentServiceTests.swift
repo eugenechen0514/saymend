@@ -4,7 +4,7 @@ import Testing
 
 /// 本檔專用的腳本化 provider（PolishServiceTests 的 ScriptedProvider 將於 Task 8 隨檔刪除，名稱錯開避免重複宣告）
 final class ScriptedIntentProvider: RoutedLLMProvider, @unchecked Sendable {
-    enum Script { case reply(String), fail }
+    enum Script { case reply(String), fail, failWith(any Error) }
     var script: Script
     var lastKind: ProviderKind?
     var lastSystem: String?
@@ -21,6 +21,7 @@ final class ScriptedIntentProvider: RoutedLLMProvider, @unchecked Sendable {
         switch script {
         case .reply(let s): return s
         case .fail: throw LLMError.badStatus(500)
+        case .failWith(let e): throw e
         }
     }
 }
@@ -214,4 +215,46 @@ private func makeService(_ provider: ScriptedIntentProvider,
     _ = await makeService(p, kind: .claudeCLI, polishTimeout: 11, editTimeout: 22)
         .process(utteranceRaw: "改一下", context: .session("既有全文"))
     #expect(p.lastTimeout == 22)                                    // 有目標 → edit
+}
+
+@Test func timeoutErrorYieldsTimeoutReasonWithSeconds() async {
+    let p = ScriptedIntentProvider(.failWith(LLMError.timedOut))
+    let out = await makeService(p).process(utteranceRaw: "x", context: .session(""))
+    #expect(out == .degraded(reason: "逾時 3 秒"))          // polish=3（%g 無小數尾）
+}
+
+@Test func timeoutReasonUsesEditTimeoutWhenSessionNonEmpty() async {
+    let p = ScriptedIntentProvider(.failWith(LLMError.timedOut))
+    let out = await makeService(p).process(utteranceRaw: "x", context: .session("有內容"))
+    #expect(out == .degraded(reason: "逾時 6 秒"))          // edit=6：用當次實際生效的 timeout
+}
+
+@Test func badStatusYieldsHTTPReason() async {
+    let p = ScriptedIntentProvider(.fail)                    // badStatus(500)
+    let out = await makeService(p).process(utteranceRaw: "x", context: .session(""))
+    #expect(out == .degraded(reason: "HTTP 500"))
+}
+
+@Test func emptyResponseYieldsEmptyReason() async {
+    let p = ScriptedIntentProvider(.failWith(LLMError.emptyResponse))
+    let out = await makeService(p).process(utteranceRaw: "x", context: .session(""))
+    #expect(out == .degraded(reason: "回應內容為空"))
+}
+
+@Test func cliErrorsYieldCLIReasons() async {
+    let notFound = await makeService(ScriptedIntentProvider(.failWith(ClaudeCLIError.cliNotFound)))
+        .process(utteranceRaw: "x", context: .session(""))
+    #expect(notFound == .degraded(reason: "找不到 claude CLI"))
+    let exit = await makeService(ScriptedIntentProvider(.failWith(ClaudeCLIError.processFailed(code: 9))))
+        .process(utteranceRaw: "x", context: .session(""))
+    #expect(exit == .degraded(reason: "CLI 結束碼 9"))
+    let spawn = await makeService(ScriptedIntentProvider(.failWith(ClaudeCLIError.spawnFailed)))
+        .process(utteranceRaw: "x", context: .session(""))
+    #expect(spawn == .degraded(reason: "CLI 啟動失敗"))
+}
+
+@Test func unknownErrorsYieldConnectivityReason() async {
+    let p = ScriptedIntentProvider(.failWith(URLError(.notConnectedToInternet)))
+    let out = await makeService(p).process(utteranceRaw: "x", context: .session(""))
+    #expect(out == .degraded(reason: "無法連線"))
 }

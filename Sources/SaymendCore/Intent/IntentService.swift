@@ -142,7 +142,7 @@ public final class IntentService: IntentServing {
                                               user: prompt.user,
                                               timeout: timeout)
         } catch {
-            return .degraded(reason: "LLM 呼叫失敗或逾時")
+            return .degraded(reason: degradedReason(for: error, timeout: timeout))
         }
 
         // strict parser（不得自動 lenient fallback）
