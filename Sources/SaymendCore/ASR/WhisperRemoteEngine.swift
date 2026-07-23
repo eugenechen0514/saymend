@@ -4,7 +4,7 @@ import Foundation
 /// Whisper 遠端引擎（spec §4）：批次辨識——累積整段音訊，audio 串流結束後單次
 /// multipart POST 到 OpenAI `audio/transcriptions` 相容端點。
 /// 無 .volatile 事件（批次語意）；失敗一律以 .failed 明示原因，不靜默結束。
-public final class WhisperRemoteEngine: ASREngine, @unchecked Sendable {   // ContextBiasable 於 Task 6 加上
+public final class WhisperRemoteEngine: ASREngine, ContextBiasable, @unchecked Sendable {
     /// 錄音時長硬上限（spec §4.3）。16kHz mono PCM16 ≈ 32KB/s，10 分鐘 ≈ 19MB。
     public static let defaultMaxDuration: TimeInterval = 600
     private static let promptCharacterLimit = 500

@@ -6,7 +6,7 @@ import SaymendCore
 /// 全專案唯一碰 Speech framework 的檔案；SDK 簽名若有出入照官方文件改這裡，介面不動。
 /// 共享狀態（analyzer/inputContinuation/pumpTask）由 stateLock 序列化：
 /// 背景 pump Task 寫入、cancel() 可能從 MainActor 進來，.v5 模式編譯器不會擋這個競爭。
-final class SpeechAnalyzerEngine: ASREngine {
+final class SpeechAnalyzerEngine: ASREngine, ContextBiasable {
     private let stateLock = NSLock()
     private var analyzer: SpeechAnalyzer?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
