@@ -1412,6 +1412,33 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 }
 
 @MainActor
+@Test func insertEventsStopWhenHistoryDisabledMidSession() async {
+    // 釘住 recordInsertEvent 的 settings.historyEnabled 檢查本身。
+    // insertEventsRespectHistoryGate 是「開場前就關」，那條路徑 historySessionID 根本不會建立
+    // （DictationController.swift:350），單靠 `let hid = historySessionID` 就擋住了——
+    // 唯有「session 已有 ID、聽寫中途 toggle off」才真正依賴 historyEnabled 這個條件。
+    let polisher = GatedIntentService()
+    polisher.gated = true
+    polisher.outcome = .newContent("第一段。")
+    let history = FakeHistory()
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)                           // historyEnabled 預設 true → session ID 建立
+    #expect(c.settings.historyEnabled)
+    #expect(history.sessions.count == 1)                 // 前提：session 列已寫（ID 存在）
+    c.handleTranscript(.finalized("第一段"), at: 11.0)
+    c.tick(at: 12.6)                                     // 潤飾發出（被 gate 卡住）
+    c.handleTranscript(.finalized("第二段"), at: 13.0)    // 尾端前進 → 待會會走 counterMismatch
+    c.settings.historyEnabled = false                    // 聽寫中途關閉歷史
+    polisher.release()
+    await c.lastIntentTask?.value
+    let inserts = history.exchanges.filter {
+        $0.outcomeKind == "insertSkipped" || $0.outcomeKind == "insertFailed"
+    }
+    #expect(inserts.isEmpty)                             // 中途關閉後不得再補列（beginSession 列不在 exchanges）
+}
+
+@MainActor
 @Test func correctionTailAdvancedRecordsCounterMismatch() async {
     let polisher = GatedIntentService()
     polisher.outcomeByRaw = ["首句": .newContent("首句。"),
