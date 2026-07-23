@@ -1590,3 +1590,72 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     c.handleTranscript(.finalized("原文"), at: 11.0)
     #expect(key.ops == [.insert("原文")])
 }
+
+@MainActor
+@Test func failedEventStopsAudioArchivesAndNotifiesInOrder() async {
+    let polisher = GatedIntentService()
+    let (c, audio, _, key, _, hud) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)                        // 仍按著熱鍵（mid-press）
+    c.handleTranscript(.transcribing, at: 11.0)
+    c.handleTranscript(.failed(reason: "無法連線"), at: 11.5)
+
+    // 坑 2：麥克風必須停（archiveSession 自己不會 stop）
+    #expect(audio.stopCount == 1)
+    // 坑 1：封存而非 lingering
+    #expect(c.phase == .idle)
+    #expect(!hud.states.contains(.lingering))
+    // 坑 3：notice 必須在 archiveSession 發出的 .hidden 之後，否則被蓋掉
+    let hiddenIdx = hud.states.lastIndex(of: .hidden)
+    let noticeIdx = hud.states.lastIndex(of: .notice("辨識失敗（無法連線）"))
+    #expect(hiddenIdx != nil && noticeIdx != nil)
+    #expect(noticeIdx! > hiddenIdx!)
+    // 不上屏
+    #expect(key.ops.isEmpty)
+}
+
+@MainActor
+@Test func failedEventLeavesNoLedgerVersion() async {
+    let polisher = GatedIntentService()
+    let (c, _, _, _, _, _) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.failed(reason: "HTTP 500"), at: 11.0)
+    #expect(c.ledger.sessionText == "")
+    #expect(c.ledger.canUndo == false)
+}
+
+@MainActor
+@Test func hotkeyReleaseAfterFailedDoesNotDoubleStopAudio() async {
+    // 坑 2 的延伸：failed 已封存並 stop，之後放開熱鍵不得重複 stop
+    let polisher = GatedIntentService()
+    let (c, audio, _, _, _, _) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.failed(reason: "無法連線"), at: 11.0)
+    #expect(audio.stopCount == 1)
+    c.hotkeyReleased(at: 12.0)
+    #expect(audio.stopCount == 1)                    // phase 已 idle → hotkeyReleased 不再 endListening
+}
+
+@MainActor
+@Test func transcribingEventPresentsTranscribingHUD() async {
+    let polisher = GatedIntentService()
+    let (c, _, _, _, _, hud) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.transcribing, at: 11.0)
+    #expect(hud.states.last == .transcribing)
+    #expect(c.phase != .idle)                        // 只是顯示狀態，不動 session
+}
+
+@MainActor
+@Test func streamEndAfterFailedIsIgnored() async {
+    // failed 已封存 → phase idle → 隨後的 asrStreamEnded 被相位守衛冪等忽略、不進 lingering
+    let polisher = GatedIntentService()
+    let (c, _, _, _, _, hud) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.failed(reason: "逾時 120 秒"), at: 11.0)
+    c.asrStreamEnded(at: 11.1)
+    #expect(!hud.states.contains(.lingering))
+    #expect(c.phase == .idle)
+}

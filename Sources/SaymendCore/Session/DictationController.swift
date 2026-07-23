@@ -274,8 +274,10 @@ public final class DictationController {
                     hud.present(.notice("插入失敗"))
                 }
             }
-        case .transcribing, .failed:
-            break   // Task 4 實作；本階段僅維持窮舉完整、行為不變
+        case .transcribing:
+            hud.present(.transcribing)          // 批次引擎等待結果中；不動 ledger、不動欄位
+        case .failed(let reason):
+            handleASRFailure(reason: reason)
         }
     }
 
@@ -433,6 +435,20 @@ public final class DictationController {
         audio.stop()
         archiveSession()
         hud.present(.notice("密碼欄位不聽寫"))
+    }
+
+    /// ASR 辨識失敗（M8 spec §5.3）：不上屏、不入帳本，且必須停錄音＋封存＋最後才通知。
+    /// 順序逐字比照 abortForSecureField，三個坑缺一不可：
+    /// ① 不封存 → asrStreamEnded 會進 lingering，跳出空的「可修正／復原」窗；
+    /// ② 不 audio.stop() → archiveSession 把 phase 設 idle 後，hotkeyReleased 會落入
+    ///    `case .idle, .finishing, .lingering: break`，endListening 的 stop 永不執行＝麥克風漏開；
+    /// ③ notice 早於 archiveSession → 被其發出的 .hidden 蓋掉（HUDWindowController 開頭 hideTask.cancel）。
+    private func handleASRFailure(reason: String) {
+        segmenter.hardReset()
+        asr.cancel()
+        audio.stop()
+        archiveSession()
+        hud.present(.notice("辨識失敗（\(reason)）"))
     }
 
     private func process(actions: [UtteranceSegmenter.Action]) {
