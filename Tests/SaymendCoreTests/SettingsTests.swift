@@ -203,3 +203,19 @@ func keychainStoreRoundTrip() throws {
     s.whisperBaseURLString = "http://localhost:8000/v1"
     #expect(s.whisperConfig()?.model == "whisper-1")
 }
+
+/// scheme 防線是載重而非形式檢查：URL(string:) 對這些輸入照樣回傳「合法」URL，
+/// scheme 分別是 "localhost"／"file"／"ftp"。少打 http:// 是常見手誤，
+/// 沒有這道檢查就會被當成有效設定，接著送出一個毫無意義的請求。
+@Test func whisperConfigRejectsNonHTTPSchemes() {
+    let s = AppSettings(defaults: UserDefaults(suiteName: "t-\(UUID().uuidString)")!,
+                        secrets: InMemorySecretStore())
+    for raw in ["localhost:8000/v1", "file:///etc/passwd", "ftp://x/y"] {
+        s.whisperBaseURLString = raw
+        #expect(s.whisperConfig() == nil, "非 http(s) scheme 必須拒絕：\(raw)")
+    }
+    for raw in ["http://localhost:8000/v1", "https://api.example.com/v1"] {
+        s.whisperBaseURLString = raw
+        #expect(s.whisperConfig() != nil, "http(s) 不得被誤殺：\(raw)")   // 反向誤殺防線
+    }
+}
