@@ -9,22 +9,25 @@ struct SettingsView: View {
     let history: (any HistoryRecording)?
     let coreModes: (any CoreModeStore)?
     let detector: ClaudeCLIDetector?
+    let tester: ProviderTester?
 
     init(settings: AppSettings,
          vocab: (any VocabStore)? = nil,
          history: (any HistoryRecording)? = nil,
          coreModes: (any CoreModeStore)? = nil,
-         detector: ClaudeCLIDetector? = nil) {
+         detector: ClaudeCLIDetector? = nil,
+         tester: ProviderTester? = nil) {
         self.settings = settings
         self.vocab = vocab
         self.history = history
         self.coreModes = coreModes
         self.detector = detector
+        self.tester = tester
     }
 
     var body: some View {
         TabView {
-            GeneralSettingsTab(settings: settings, detector: detector)
+            GeneralSettingsTab(settings: settings, detector: detector, tester: tester)
                 .tabItem { Label("一般", systemImage: "gearshape") }
             CoreModeSettingsTab(store: coreModes)
                 .tabItem { Label("核心模式", systemImage: "square.stack.3d.up") }
@@ -47,6 +50,7 @@ struct SettingsView: View {
 struct GeneralSettingsTab: View {
     let settings: AppSettings
     let detector: ClaudeCLIDetector?
+    let tester: ProviderTester?
 
     @State private var hotkey: HotkeyChoice
     @State private var language: OutputLanguage
@@ -62,10 +66,15 @@ struct GeneralSettingsTab: View {
     @State private var cliPolish: Double
     @State private var cliEdit: Double
     @State private var detection: ClaudeCLIDetection?
+    // Provider 連通性測試（M7 §5）
+    @State private var testTask: Task<Void, Never>?
+    @State private var testReport: ProviderTestReport?
+    @State private var testCancelled = false
 
-    init(settings: AppSettings, detector: ClaudeCLIDetector? = nil) {
+    init(settings: AppSettings, detector: ClaudeCLIDetector? = nil, tester: ProviderTester? = nil) {
         self.settings = settings
         self.detector = detector
+        self.tester = tester
         _hotkey = State(initialValue: settings.hotkey)
         _language = State(initialValue: settings.outputLanguage)
         _baseURL = State(initialValue: settings.llmBaseURLString)
@@ -107,6 +116,7 @@ struct GeneralSettingsTab: View {
                         .foregroundStyle(.secondary)
                     timeoutControls(polish: $oaiPolish, edit: $oaiEdit,
                                     defaults: (3, 6))
+                    providerTestControls
                 }
             } else {
                 Section("Claude CLI") {
@@ -118,6 +128,7 @@ struct GeneralSettingsTab: View {
                         .foregroundStyle(.secondary)
                     timeoutControls(polish: $cliPolish, edit: $cliEdit,
                                     defaults: (20, 20))
+                    providerTestControls
                 }
             }
         }
@@ -133,7 +144,13 @@ struct GeneralSettingsTab: View {
         .onChange(of: baseURL) { _, v in settings.llmBaseURLString = v }
         .onChange(of: model) { _, v in settings.llmModel = v }
         .onChange(of: apiKey) { _, v in settings.llmAPIKey = v.isEmpty ? nil : v }
-        .onChange(of: providerKind) { _, v in settings.providerKind = v }
+        .onChange(of: providerKind) { _, v in
+            settings.providerKind = v
+            testTask?.cancel()
+            testTask = nil
+            testReport = nil
+            testCancelled = false
+        }
         .onChange(of: cliModel) { _, v in settings.claudeCLIModel = v }
         .onChange(of: cliPathOverride) { _, v in settings.claudeCLIPathOverride = v.isEmpty ? nil : v }
         .onChange(of: oaiPolish) { _, v in settings.oaiPolishTimeout = v }
@@ -156,6 +173,80 @@ struct GeneralSettingsTab: View {
                 .foregroundStyle(.red).font(.caption)
         case nil:
             Label("偵測中…", systemImage: "hourglass").font(.caption)
+        }
+    }
+
+    /// Provider 測試（M7 §5.3）：執行中按鈕變「取消」（120s 上限配慢 provider 需脫困出口）。
+    /// 取消＝放棄等待（fire-and-forget）：在途呼叫自然結束後結果被 isCancelled 守衛丟棄。
+    @ViewBuilder private var providerTestControls: some View {
+        HStack {
+            Button(testTask == nil ? "測試連線" : "取消") {
+                if let task = testTask {
+                    task.cancel()
+                    testTask = nil
+                    testReport = nil
+                    testCancelled = true
+                } else {
+                    runProviderTest()
+                }
+            }
+            .disabled(tester == nil)
+            if testTask != nil { ProgressView().controlSize(.small) }
+            if testCancelled { Text("已取消").font(.caption).foregroundStyle(.secondary) }
+        }
+        if let r = testReport {
+            testResultRows(r)
+        }
+    }
+
+    private func runProviderTest() {
+        guard let tester else { return }
+        testReport = nil
+        testCancelled = false
+        let kind = providerKind
+        let polish = kind == .openAICompat ? oaiPolish : cliPolish   // 比對基準＝該 provider 自己的 polishTimeout
+        testTask = Task {
+            let report = await tester.run(kind: kind, polishTimeout: polish)
+            if Task.isCancelled { return }                            // 已放棄：結果丟棄
+            await MainActor.run {
+                testReport = report
+                testTask = nil
+            }
+        }
+    }
+
+    /// 三判定逐行顯示（M7 §5.2）
+    @ViewBuilder private func testResultRows(_ r: ProviderTestReport) -> some View {
+        switch r.verdict {
+        case .failed(let reason):
+            Label("連通 ✗（\(reason)）", systemImage: "xmark.circle.fill")
+                .foregroundStyle(.red).font(.caption)
+        case .badEnvelope(let reason):
+            Label("連通 ✓", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green).font(.caption)
+            latencyRow(r)
+            Label("信封 ✗（\(reason)）——此 provider 的回應無法被解析，實際聽寫會全數降級",
+                  systemImage: "xmark.circle.fill")
+                .foregroundStyle(.red).font(.caption)
+        case .ok:
+            Label("連通 ✓", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green).font(.caption)
+            latencyRow(r)
+            Label("信封 ✓", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green).font(.caption)
+        }
+    }
+
+    @ViewBuilder private func latencyRow(_ r: ProviderTestReport) -> some View {
+        if let latency = r.latency {
+            let text = String(format: "延遲 %.1f 秒", latency)
+            if r.exceedsPolishTimeout {
+                Label("\(text)——超過潤飾逾時，實際聽寫會每次逾時降級",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange).font(.caption)
+            } else {
+                Label(text, systemImage: "timer").font(.caption)
+            }
         }
     }
 

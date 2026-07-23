@@ -14,7 +14,8 @@ struct SaymendApp: App {
         Settings {
             SettingsView(settings: delegate.settings, vocab: delegate.vocabStore,
                         history: delegate.historyStore, coreModes: delegate.coreModeStore,
-                        detector: delegate.claudeCLIDetector)
+                        detector: delegate.claudeCLIDetector,
+                        tester: delegate.providerTester)
         }
     }
 }
@@ -60,6 +61,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let ocrReader = OCRContextReader()
     /// ClaudeCLI 偵測器：設定 UI（Task 8）與 provider 共用同一實例＝共享 (path, mtime) 快取（spec §4.1）。
     let claudeCLIDetector = ClaudeCLIDetector.live()
+    /// 測試按鈕用 tester（M7 §5）：與聽寫 provider 分實例（不搶 CLI slot），detector 共用（快取共享）
+    lazy var providerTester: ProviderTester = {
+        let oai = OpenAICompatProvider(configProvider: { [settings] in settings.openAIConfig() })
+        let cli = ClaudeCLIProvider(
+            configProvider: { [settings] in settings.claudeCLIConfig() },
+            detect: { [claudeCLIDetector] override in await claudeCLIDetector.detect(override: override) })
+        return ProviderTester(provider: ProviderRouter(openAICompat: oai, claudeCLI: cli))
+    }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 輔助功能權限：沒有就跳系統提示（熱鍵與鍵入都靠它）
