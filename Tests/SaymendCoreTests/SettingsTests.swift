@@ -154,3 +154,52 @@ func keychainStoreRoundTrip() throws {
     s.oaiEditTimeout = -5
     #expect(s.oaiEditTimeout == 6.0)
 }
+
+// MARK: - ASR 引擎選擇與 Whisper 遠端設定（M8 spec §3.4）
+
+@Test func asrEngineKindDefaultsToSpeechAnalyzer() {
+    let s = AppSettings(defaults: UserDefaults(suiteName: "t-\(UUID().uuidString)")!,
+                        secrets: InMemorySecretStore())
+    #expect(s.asrEngineKind == .speechAnalyzer)   // 既有使用者零行為變化
+}
+
+@Test func whisperSettingsRoundTripWithDefaults() {
+    let s = AppSettings(defaults: UserDefaults(suiteName: "t-\(UUID().uuidString)")!,
+                        secrets: InMemorySecretStore())
+    #expect(s.whisperBaseURLString == "")
+    #expect(s.whisperModel == "whisper-1")
+    #expect(s.whisperTimeout == 120)
+    s.asrEngineKind = .whisperRemote
+    s.whisperBaseURLString = "http://localhost:8000/v1"
+    s.whisperModel = "large-v3"
+    s.whisperTimeout = 90
+    #expect(s.asrEngineKind == .whisperRemote)
+    #expect(s.whisperModel == "large-v3")
+    #expect(s.whisperTimeout == 90)
+}
+
+@Test func whisperTimeoutRejectsOutOfRangeStoredValues() {
+    let d = UserDefaults(suiteName: "t-\(UUID().uuidString)")!
+    let s = AppSettings(defaults: d, secrets: InMemorySecretStore())
+    d.set(9999.0, forKey: "whisperTimeout")
+    #expect(s.whisperTimeout == 120)             // 超出 [1,120] → 回預設
+    d.set(Double.nan, forKey: "whisperTimeout")
+    #expect(s.whisperTimeout == 120)             // NaN → 回預設
+}
+
+@Test func whisperAPIKeyUsesSeparateSecretFromLLMKey() {
+    let s = AppSettings(defaults: UserDefaults(suiteName: "t-\(UUID().uuidString)")!,
+                        secrets: InMemorySecretStore())
+    s.llmAPIKey = "llm-key"
+    s.whisperAPIKey = "whisper-key"
+    #expect(s.llmAPIKey == "llm-key")            // 兩者互不覆蓋（可能是不同服務）
+    #expect(s.whisperAPIKey == "whisper-key")
+}
+
+@Test func whisperConfigReturnsNilWhenBaseURLEmpty() {
+    let s = AppSettings(defaults: UserDefaults(suiteName: "t-\(UUID().uuidString)")!,
+                        secrets: InMemorySecretStore())
+    #expect(s.whisperConfig() == nil)            // 空字串＝未設定
+    s.whisperBaseURLString = "http://localhost:8000/v1"
+    #expect(s.whisperConfig()?.model == "whisper-1")
+}

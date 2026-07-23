@@ -42,6 +42,7 @@ public enum HotkeyChoice: String, CaseIterable, Codable, Sendable {
 ///    呼叫 `configProvider()`（即 defaults/secrets-backed 存取早已跨執行緒），非新開風險。
 public final class AppSettings: @unchecked Sendable {
     public static let apiKeyKey = "openaiCompatAPIKey"
+    public static let whisperAPIKeyKey = "whisperAPIKey"   // 與 LLM key 分離：可能是不同服務
 
     private enum K {
         static let hotkey = "hotkey"
@@ -62,6 +63,10 @@ public final class AppSettings: @unchecked Sendable {
         static let oaiEditTimeout = "oaiEditTimeout"
         static let cliPolishTimeout = "cliPolishTimeout"
         static let cliEditTimeout = "cliEditTimeout"
+        static let asrEngineKind = "asrEngineKind"
+        static let whisperBaseURL = "whisperBaseURLString"
+        static let whisperModel = "whisperModel"
+        static let whisperTimeout = "whisperTimeout"
     }
 
     private let defaults: UserDefaults
@@ -95,6 +100,51 @@ public final class AppSettings: @unchecked Sendable {
     public var asrLocaleIdentifier: String {
         get { defaults.string(forKey: K.asrLocale) ?? "zh-TW" }
         set { defaults.set(newValue, forKey: K.asrLocale) }
+    }
+
+    // MARK: - ASR 引擎（M8 spec §3.4）
+
+    public var asrEngineKind: ASREngineKind {
+        get { defaults.string(forKey: K.asrEngineKind).flatMap(ASREngineKind.init(rawValue:)) ?? .speechAnalyzer }
+        set { defaults.set(newValue.rawValue, forKey: K.asrEngineKind) }
+    }
+
+    public var whisperBaseURLString: String {
+        get { defaults.string(forKey: K.whisperBaseURL) ?? "" }
+        set { defaults.set(newValue, forKey: K.whisperBaseURL) }
+    }
+
+    public var whisperModel: String {
+        get { defaults.string(forKey: K.whisperModel) ?? "whisper-1" }
+        set { defaults.set(newValue, forKey: K.whisperModel) }
+    }
+
+    public var whisperAPIKey: String? {
+        get { try? secrets.get(forKey: Self.whisperAPIKeyKey) }
+        set {
+            if let v = newValue, !v.isEmpty {
+                try? secrets.set(v, forKey: Self.whisperAPIKeyKey)
+            } else {
+                try? secrets.delete(forKey: Self.whisperAPIKeyKey)
+            }
+        }
+    }
+
+    /// 預設取 timeoutRange 上限：滿 10 分鐘錄音約 19MB，60s 內完成上傳＋辨識並不保險（spec §6.2）
+    public var whisperTimeout: TimeInterval {
+        get { readTimeout(K.whisperTimeout, default: 120) }
+        set { defaults.set(newValue, forKey: K.whisperTimeout) }
+    }
+
+    /// base URL 未設定或非法時回 nil——呼叫端據此 fail-closed（spec §4.7）
+    public func whisperConfig() -> WhisperRemoteConfig? {
+        let raw = whisperBaseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty,
+              let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return nil }
+        return WhisperRemoteConfig(baseURL: url, apiKey: whisperAPIKey,
+                                   model: whisperModel, timeout: whisperTimeout)
     }
 
     /// prompt 第 4 層：使用者全域自訂 system prompt（規格 §4.4；空字串＝未設定）
