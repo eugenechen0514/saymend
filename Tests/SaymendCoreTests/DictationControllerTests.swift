@@ -1575,3 +1575,18 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(failed.count == 1)
     #expect(failed[0].outcomeText == "replaceFailedRestored")
 }
+
+// MARK: - M8：批次 ASR 引擎的兩個新事件
+
+@MainActor
+@Test func unknownTranscriptEventsDoNotDisturbSession() async {
+    // Task 3 階段：新 case 存在但尚未處理——既有行為（原文照常上屏）必須完全不受影響
+    let polisher = GatedIntentService()
+    polisher.gated = true
+    let (c, _, _, key, _, _) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.transcribing, at: 10.5)
+    c.handleTranscript(.finalized("原文"), at: 11.0)
+    #expect(key.ops == [.insert("原文")])
+}

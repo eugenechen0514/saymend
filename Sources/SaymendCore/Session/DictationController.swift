@@ -274,6 +274,8 @@ public final class DictationController {
                     hud.present(.notice("插入失敗"))
                 }
             }
+        case .transcribing, .failed:
+            break   // Task 4 實作；本階段僅維持窮舉完整、行為不變
         }
     }
 

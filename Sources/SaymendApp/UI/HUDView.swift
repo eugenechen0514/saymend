@@ -54,6 +54,8 @@ struct HUDView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 UndoPill(action: model.onUndoTap)
+            case .transcribing:
+                EmptyView()   // Task 7 做正式呈現
             case .notice(let message):
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)

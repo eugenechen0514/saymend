@@ -4,6 +4,10 @@ import AVFoundation
 public enum TranscriptEvent: Equatable, Sendable {
     case volatile(String)
     case finalized(String)
+    /// M8：批次引擎已收完音訊、等待辨識結果（僅 WhisperRemoteEngine 會吐）
+    case transcribing
+    /// M8：辨識失敗，不上屏、不入帳本（僅 WhisperRemoteEngine 會吐）
+    case failed(reason: String)
 }
 
 /// AVAudioPCMBuffer 的 Sendable 包裝（單一生產者、單一消費者，不共享可變狀態）
