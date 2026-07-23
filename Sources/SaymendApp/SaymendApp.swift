@@ -98,7 +98,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         // ASR 引擎帶詞彙偏置（規格 §4.8）。與 prompt 第 6 層同受 profile.vocabEnabled 節制
         // （規格 §4.4：特定 App 停用詞彙表以 profile 功能開關實現——兩路注入都要管，終審 finding）。
-        let asrEngine = SpeechAnalyzerEngine()
+        let speechAnalyzerEngine = SpeechAnalyzerEngine()
+        let whisperEngine = WhisperRemoteEngine(
+            configProvider: { [settings] in settings.whisperConfig() })   // 每次呼叫讀取＝設定即時生效
+        let asrEngine = ASREngineRouter(
+            speechAnalyzer: speechAnalyzerEngine,
+            whisperRemote: whisperEngine,
+            kindProvider: { [settings] in settings.asrEngineKind })       // start 時單一快照
+        // 偏置設在 router 上，由它轉發給當下選定的引擎（兩個引擎吃同一個詞彙表來源）
         asrEngine.contextualStrings = { [vocabStore, profileStore] in
             if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
                profileStore.profile(for: bundle).vocabEnabled == false {
