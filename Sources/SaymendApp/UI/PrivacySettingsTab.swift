@@ -6,16 +6,27 @@ import SaymendCore
 struct PrivacySettingsTab: View {
     let settings: AppSettings
     @State private var ocrEnabled: Bool
+    /// 引擎在「一般」分頁切換，故本分頁的快照須於出現時重讀（spec §6.1）
+    @State private var asrEngineKind: ASREngineKind
 
     init(settings: AppSettings) {
         self.settings = settings
         _ocrEnabled = State(initialValue: settings.ocrContextEnabled)
+        _asrEngineKind = State(initialValue: settings.asrEngineKind)
     }
 
     var body: some View {
         Form {
             Section("資料流向") {
-                LabeledContent("語音辨識", value: "本機（Apple SpeechAnalyzer），不出機器")
+                switch asrEngineKind {
+                case .speechAnalyzer:
+                    LabeledContent("語音辨識", value: "本機（Apple SpeechAnalyzer），不出機器")
+                case .whisperRemote:
+                    LabeledContent("語音辨識",
+                                   value: "遠端（Whisper 端點 \(settings.whisperBaseURLString)）——聽寫音訊會上傳")
+                    Text("音訊含聲紋與環境聲，敏感度高於文字。請確認端點可信（自架端點的音訊不出區網）。")
+                        .font(.caption).foregroundStyle(.orange)
+                }
                 LabeledContent("LLM 端點", value: settings.llmBaseURLString)
                 LabeledContent("送出的內容", value: "轉錄文字、session 全文／選取文字、游標前後文、OCR 螢幕參考、詞彙表、前景 App 名稱、你的自訂規則與 per-app 追加規則")
                 Text("使用本地端點（Ollama／LM Studio／MLX）時，以上內容皆不出機器。")
@@ -51,5 +62,6 @@ struct PrivacySettingsTab: View {
         .formStyle(.grouped)
         .padding()
         .onChange(of: ocrEnabled) { _, v in settings.ocrContextEnabled = v }
+        .onAppear { asrEngineKind = settings.asrEngineKind }
     }
 }
