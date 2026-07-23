@@ -66,6 +66,12 @@ struct GeneralSettingsTab: View {
     @State private var cliPolish: Double
     @State private var cliEdit: Double
     @State private var detection: ClaudeCLIDetection?
+    // ASR 引擎（M8 spec §6.2）
+    @State private var asrEngineKind: ASREngineKind
+    @State private var whisperBaseURL: String
+    @State private var whisperModel: String
+    @State private var whisperAPIKey: String
+    @State private var whisperTimeout: Double
     // Provider 連通性測試（M7 §5）
     @State private var testTask: Task<Void, Never>?
     @State private var testReport: ProviderTestReport?
@@ -87,9 +93,25 @@ struct GeneralSettingsTab: View {
         _oaiEdit = State(initialValue: settings.oaiEditTimeout)
         _cliPolish = State(initialValue: settings.cliPolishTimeout)
         _cliEdit = State(initialValue: settings.cliEditTimeout)
+        _asrEngineKind = State(initialValue: settings.asrEngineKind)
+        _whisperBaseURL = State(initialValue: settings.whisperBaseURLString)
+        _whisperModel = State(initialValue: settings.whisperModel)
+        _whisperAPIKey = State(initialValue: settings.whisperAPIKey ?? "")
+        _whisperTimeout = State(initialValue: settings.whisperTimeout)
     }
 
+    /// M8 新增的 5 條設定寫回單獨掛在 body：全部串在同一條 modifier 鏈上會讓
+    /// SwiftUI 型別檢查器超時（錯誤指向鏈中任一子運算式，非新程式碼本身有問題）。
     var body: some View {
+        generalForm
+            .onChange(of: asrEngineKind) { _, v in settings.asrEngineKind = v }
+            .onChange(of: whisperBaseURL) { _, v in settings.whisperBaseURLString = v }
+            .onChange(of: whisperModel) { _, v in settings.whisperModel = v }
+            .onChange(of: whisperAPIKey) { _, v in settings.whisperAPIKey = v.isEmpty ? nil : v }
+            .onChange(of: whisperTimeout) { _, v in settings.whisperTimeout = v }
+    }
+
+    private var generalForm: some View {
         Form {
             Section("聽寫") {
                 Picker("聽寫熱鍵", selection: $hotkey) {
@@ -99,6 +121,7 @@ struct GeneralSettingsTab: View {
                     ForEach(OutputLanguage.allCases, id: \.self) { Text($0.displayName).tag($0) }
                 }
             }
+            asrEngineSection
             Section("LLM Provider") {
                 Picker("Provider", selection: $providerKind) {
                     Text("OpenAI 相容").tag(ProviderKind.openAICompat)
@@ -157,6 +180,38 @@ struct GeneralSettingsTab: View {
         .onChange(of: oaiEdit) { _, v in settings.oaiEditTimeout = v }
         .onChange(of: cliPolish) { _, v in settings.cliPolishTimeout = v }
         .onChange(of: cliEdit) { _, v in settings.cliEditTimeout = v }
+    }
+
+    /// 語音辨識引擎單選與 Whisper 遠端設定（M8 spec §6.2）。
+    /// 抽成獨立屬性而非直接寫在 Form 內：全部展開會讓 SwiftUI 型別檢查器超時
+    /// （「unable to type-check this expression in reasonable time」），
+    /// 比照本檔既有的 detectionStatusRow／providerTestControls 作法。
+    @ViewBuilder private var asrEngineSection: some View {
+        Section("語音辨識引擎") {
+            Picker("引擎", selection: $asrEngineKind) {
+                ForEach(ASREngineKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
+            }
+            .pickerStyle(.segmented)
+        }
+        if asrEngineKind == .whisperRemote {
+            Section("Whisper 遠端") {
+                TextField("Base URL", text: $whisperBaseURL,
+                          prompt: Text("http://localhost:8000/v1"))
+                if whisperBaseURL.trimmingCharacters(in: .whitespaces).isEmpty {
+                    Label("未設定端點，聽寫將無法辨識", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange).font(.caption)
+                }
+                TextField("模型", text: $whisperModel, prompt: Text("whisper-1"))
+                SecureField("API Key（存於 Keychain；本地端點可留空）", text: $whisperAPIKey)
+                Stepper(value: $whisperTimeout, in: AppSettings.timeoutRange, step: 5) {
+                    Text("逾時：\(Int(whisperTimeout)) 秒")
+                }
+                Text("整段錄音在放開熱鍵後一次上傳辨識，講話中不會即時出字。長錄音需要較長逾時；10 分鐘錄音約 19MB，上限亦為 10 分鐘。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("聽寫音訊會上傳至此端點——詳見「隱私」分頁。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 
     /// 偵測狀態列（spec §7）：綠勾＋路徑／紅字原因。此為靜態偵測，非 #4 的連通性測試。
