@@ -610,7 +610,11 @@ public final class DictationController {
     }
 
     private func applyCorrection(_ corrected: String, commandSnapshot: InsertionCoordinator.UtteranceSnapshot) {
-        guard !ledger.frozen else { hud.present(.notice("已凍結，未修正")); return }
+        guard !ledger.frozen else {
+            recordInsertEvent(kind: "insertSkipped", classification: "frozen",
+                              utteranceText: commandSnapshot.text)
+            hud.present(.notice("已凍結，未修正")); return
+        }
         let old = ledger.sessionText + commandSnapshot.text   // 修正前全文＋指令話語（皆已上屏）
         do {
             switch try coordinator.replaceSession(commandSnapshot: commandSnapshot,
@@ -622,20 +626,30 @@ public final class DictationController {
                 hud.present(.notice("已修正"))
                 emitFeedback(oldText: old)             // 修正異動高亮
             case .tailAdvanced:
+                recordInsertEvent(kind: "insertSkipped", classification: "counterMismatch",
+                                  utteranceText: commandSnapshot.text)
                 keepRaw(commandSnapshot, notice: "未修正（新內容已接續）")   // 指令話語留在欄位，視為內容鏡像
             case .fieldMismatch:
+                recordInsertEvent(kind: "insertSkipped", classification: "fieldMismatch",
+                                  utteranceText: commandSnapshot.text)
                 ledger.freeze()
                 feedback?.sessionFrozen()
                 hud.present(.notice("欄位已被外部改動，本段停止修正"))
             }
         } catch InserterError.replaceFailedRestored {
+            recordInsertEvent(kind: "insertFailed", classification: "replaceFailedRestored",
+                              utteranceText: commandSnapshot.text)
             hud.present(.notice("修正失敗，原文已回復"))
         } catch InserterError.lostText(let original) {
+            recordInsertEvent(kind: "insertFailed", classification: "lostText",
+                              utteranceText: commandSnapshot.text)
             clipboardRescue?(original)
             ledger.freeze()
             feedback?.sessionFrozen()
             hud.present(.notice("修正失敗，原文已複製到剪貼簿"))
         } catch {
+            recordInsertEvent(kind: "insertFailed", classification: "unknown",
+                              utteranceText: commandSnapshot.text, detail: "\(error)")
             ledger.freeze()   // 欄位狀態不明：凍結保平安
             feedback?.sessionFrozen()
             hud.present(.notice("修正失敗"))
@@ -700,7 +714,11 @@ public final class DictationController {
 
     /// 復原上一步（口頭 undo 與 Task 9 的 HUD 按鈕共用）。
     private func performUndo(commandSnapshot: InsertionCoordinator.UtteranceSnapshot) {
-        guard !ledger.frozen else { hud.present(.notice("已凍結，無法復原")); return }
+        guard !ledger.frozen else {
+            recordInsertEvent(kind: "insertSkipped", classification: "frozen",
+                              utteranceText: commandSnapshot.text)
+            hud.present(.notice("已凍結，無法復原")); return
+        }
         guard let step = ledger.undo() else {
             // 沒步驟可回：把指令話語從欄位退掉（它不是內容）
             _ = try? coordinator.replaceTail(commandSnapshot, with: "")
@@ -716,23 +734,33 @@ public final class DictationController {
                 hud.present(.notice("已復原"))
                 emitFeedback(oldText: step.from)      // 復原後底線罩回舊版
             case .tailAdvanced:
+                recordInsertEvent(kind: "insertSkipped", classification: "counterMismatch",
+                                  utteranceText: commandSnapshot.text)
                 ledger.commit(step.from)      // 帳本回滾成欄位實況
                 keepRaw(commandSnapshot, notice: "未復原（新內容已接續）")
             case .fieldMismatch:
+                recordInsertEvent(kind: "insertSkipped", classification: "fieldMismatch",
+                                  utteranceText: commandSnapshot.text)
                 ledger.commit(step.from)
                 ledger.freeze()
                 feedback?.sessionFrozen()
                 hud.present(.notice("欄位已被外部改動，本段停止修正"))
             }
         } catch InserterError.replaceFailedRestored {
+            recordInsertEvent(kind: "insertFailed", classification: "replaceFailedRestored",
+                              utteranceText: commandSnapshot.text)
             ledger.commit(step.from)
             hud.present(.notice("復原失敗，原文已回復"))
         } catch InserterError.lostText(let original) {
+            recordInsertEvent(kind: "insertFailed", classification: "lostText",
+                              utteranceText: commandSnapshot.text)
             clipboardRescue?(original)
             ledger.freeze()
             feedback?.sessionFrozen()
             hud.present(.notice("復原失敗，原文已複製到剪貼簿"))
         } catch {
+            recordInsertEvent(kind: "insertFailed", classification: "unknown",
+                              utteranceText: commandSnapshot.text, detail: "\(error)")
             ledger.commit(step.from)
             ledger.freeze()
             feedback?.sessionFrozen()

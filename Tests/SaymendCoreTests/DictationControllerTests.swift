@@ -1410,3 +1410,98 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     #expect(history.exchanges.isEmpty)                   // gate 關閉：連 insert 事件也不記
 }
+
+@MainActor
+@Test func correctionTailAdvancedRecordsCounterMismatch() async {
+    let polisher = GatedIntentService()
+    polisher.outcomeByRaw = ["首句": .newContent("首句。"),
+                             "改一下": .editedSession("首句改。")]
+    polisher.gatedRaws = ["改一下"]
+    let history = FakeHistory()
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("首句"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value                       // 首句落定
+    c.handleTranscript(.finalized("改一下"), at: 13.0)
+    c.tick(at: 14.6)                                    // edit 卡 gate；指令話語已上屏
+    c.handleTranscript(.finalized("再來一句"), at: 15.0)  // counter 前進
+    polisher.release()
+    await c.lastIntentTask?.value
+    let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+    #expect(skipped.contains { $0.outcomeText == "counterMismatch" })
+}
+
+@MainActor
+@Test func correctionInsertFailureRecordsReplaceFailedRestored() async {
+    let polisher = GatedIntentService()
+    polisher.outcomeByRaw = ["首句": .newContent("首句。"),
+                             "改一下": .editedSession("首句改。")]
+    let history = FakeHistory()
+    let paste = RecordingInserter()
+    let (c, _, _, key, _, _) = makeController(polisher: polisher, pasteInserter: paste, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("首句"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value                       // 首句落定
+    c.handleTranscript(.finalized("改一下"), at: 13.0)
+    key.failInsertsRemaining = 1                        // 修正文 primary 失敗
+    paste.failInsertsRemaining = 1                      // 修正文 secondary 失敗 → 還原成功
+    c.tick(at: 14.6)
+    await c.lastIntentTask?.value
+    let failed = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
+    #expect(failed.count == 1)
+    #expect(failed[0].outcomeText == "replaceFailedRestored")
+}
+
+@MainActor
+@Test func correctionFieldMismatchRecordsAndFreezes() async {
+    let polisher = GatedIntentService()
+    polisher.outcomeByRaw = ["首句": .newContent("首句。"),
+                             "改一下": .editedSession("首句改。")]
+    let ax = FakeRangeReplacer()
+    let history = FakeHistory()
+    // .fieldMismatch 只在 AX 路徑成立（InsertionCoordinator.swift:127 需 axAnchor 非 nil），
+    // 故必須給有 caretLocation 的 fieldReader——比照 axMismatchFreezesSession 的構造。
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 0)
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, rangeReplacer: ax,
+                                            fieldReader: reader, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("首句"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value                       // 首句落定
+    ax.verifyResult = .mismatch                         // 欄位被外部改動
+    c.handleTranscript(.finalized("改一下"), at: 13.0)
+    c.tick(at: 14.6)
+    await c.lastIntentTask?.value
+    let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+    #expect(skipped.contains { $0.outcomeText == "fieldMismatch" })
+    #expect(c.ledger.frozen)                            // 既有行為不變：mismatch 即凍結
+}
+
+@MainActor
+@Test func undoInsertFailureRecordsReplaceFailedRestored() async {
+    let polisher = GatedIntentService()
+    polisher.outcomeByRaw = ["首句": .newContent("首句。"),
+                             "復原": .undo]
+    let history = FakeHistory()
+    let paste = RecordingInserter()
+    let (c, _, _, key, _, _) = makeController(polisher: polisher, pasteInserter: paste, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("首句"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value                       // 首句落定（建立 undo 版本）
+    c.handleTranscript(.finalized("復原"), at: 13.0)
+    key.failInsertsRemaining = 1
+    paste.failInsertsRemaining = 1
+    c.tick(at: 14.6)
+    await c.lastIntentTask?.value
+    let failed = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
+    #expect(failed.count == 1)
+    #expect(failed[0].outcomeText == "replaceFailedRestored")
+}
