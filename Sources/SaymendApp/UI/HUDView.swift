@@ -55,7 +55,11 @@ struct HUDView: View {
                     .foregroundStyle(.secondary)
                 UndoPill(action: model.onUndoTap)
             case .transcribing:
-                EmptyView()   // Task 7 做正式呈現
+                Image(systemName: "hourglass")
+                    .foregroundStyle(.secondary)
+                Text("辨識中…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             case .notice(let message):
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
