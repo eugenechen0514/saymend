@@ -677,6 +677,7 @@ public final class DictationController {
     /// unsupported＝打字蓋選取＋立即凍結（無 AX 不可續改）。
     private func applySelectionReplacement(_ text: String, range: FieldContext.SelectedRange, original: String) {
         guard !ledger.frozen else {                 // 聽寫中手動活動已凍結：選取完整性不明，放棄
+            recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: text)
             lastRescueGeneration = ledger.generation
             clipboardRescue?(text)
             archiveSession()
@@ -690,6 +691,7 @@ public final class DictationController {
             hud.present(.notice("已替換選取"))
             emitFeedback(oldText: original)           // 選取替換全 span 高亮
         case .selectionChanged:
+            recordInsertEvent(kind: "insertSkipped", classification: "selectionChanged", utteranceText: text)
             lastRescueGeneration = ledger.generation
             clipboardRescue?(text)
             archiveSession()
@@ -704,6 +706,8 @@ public final class DictationController {
                 sessionTarget = .tail
                 hud.present(.notice("已取代選取（此 App 不支援後續語音修正）"))
             } catch {
+                recordInsertEvent(kind: "insertFailed", classification: "detachedInsertFailed",
+                                  utteranceText: text, detail: "\(error)")
                 lastRescueGeneration = ledger.generation
                 clipboardRescue?(text)
                 archiveSession()

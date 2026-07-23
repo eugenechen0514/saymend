@@ -30,7 +30,7 @@ public struct HistoryExchangeRecord: Codable, Equatable, Sendable, FetchableReco
     public var sessionID: String
     public var at: Date
     public var utteranceRaw: String
-    public var outcomeKind: String       // "newContent" | "editedSession" | "undo" | "degraded"
+    public var outcomeKind: String       // "newContent" | "editedSession" | "undo" | "degraded" | "insertFailed" | "insertSkipped"
     public var outcomeText: String?
 
     public init(id: Int64? = nil, sessionID: String, at: Date, utteranceRaw: String,

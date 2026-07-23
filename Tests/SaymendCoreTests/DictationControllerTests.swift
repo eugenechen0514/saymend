@@ -1457,6 +1457,49 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 }
 
 @MainActor
+@Test func selectionChangedRecordsInsertSkipped() async {
+    let intent = GatedIntentService()
+    intent.outcome = .editedSession("正式問候語")
+    let ax = FakeRangeReplacer()
+    ax.verifyResult = .mismatch                          // 選取已變動
+    let history = FakeHistory()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("既有選取", location: 0)
+    let (c, _, _, _, _, _) = makeController(polisher: intent, rangeReplacer: ax,
+                                            fieldReader: reader, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+    #expect(skipped.contains { $0.outcomeText == "selectionChanged" })
+}
+
+@MainActor
+@Test func detachedInsertFailureRecordsInsertFailed() async {
+    let intent = GatedIntentService()
+    intent.outcome = .editedSession("正式問候語")
+    let history = FakeHistory()
+    let clip = ClipboardSpy()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("既有選取", location: 0)
+    let paste = RecordingInserter()
+    // rangeReplacer 為 nil → .unsupported → insertDetached；讓兩個 inserter 都失敗
+    let (c, _, _, key, _, _) = makeController(polisher: intent, pasteInserter: paste,
+                                              clipboard: clip, fieldReader: reader, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    key.failInsertsRemaining = 2
+    paste.failInsertsRemaining = 2
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    let failed = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
+    #expect(failed.contains { $0.outcomeText?.hasPrefix("detachedInsertFailed") == true })
+}
+
+@MainActor
 @Test func correctionFieldMismatchRecordsAndFreezes() async {
     let polisher = GatedIntentService()
     polisher.outcomeByRaw = ["首句": .newContent("首句。"),
