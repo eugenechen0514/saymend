@@ -1306,3 +1306,107 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     #expect(hud.states.contains(.notice("未潤飾（逾時 3 秒）")))   // M5 誤診教訓：真因必須上 HUD
 }
+
+// MARK: - M7 §4 插入層事件補列
+
+@MainActor
+@Test func counterMismatchRecordsInsertSkipped() async {
+    let polisher = GatedIntentService()
+    polisher.gated = true
+    polisher.outcome = .newContent("第一段。")
+    let history = FakeHistory()
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("第一段"), at: 11.0)
+    c.tick(at: 12.6)                                   // 潤飾發出（被 gate 卡住）
+    c.handleTranscript(.finalized("第二段"), at: 13.0)  // 尾端前進 → counter mismatch
+    polisher.release()
+    await c.lastIntentTask?.value
+    let events = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+    #expect(events.count == 1)
+    #expect(events[0].outcomeText == "counterMismatch")
+    #expect(events[0].utteranceRaw == "第一段")
+}
+
+@MainActor
+@Test func replaceFailedRestoredRecordsInsertFailed() async {
+    let polisher = GatedIntentService()
+    polisher.outcome = .newContent("潤飾後。")
+    let history = FakeHistory()
+    let paste = RecordingInserter()
+    let (c, _, _, key, _, _) = makeController(polisher: polisher, pasteInserter: paste, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("原文"), at: 11.0)
+    key.failInsertsRemaining = 1                        // 新文 primary 失敗
+    paste.failInsertsRemaining = 1                      // 新文 secondary 失敗 → 還原（還原插入會成功）
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    let events = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
+    #expect(events.count == 1)
+    #expect(events[0].outcomeText == "replaceFailedRestored")
+}
+
+@MainActor
+@Test func lostTextRecordsInsertFailed() async {
+    let polisher = GatedIntentService()
+    polisher.outcome = .newContent("潤飾後。")
+    let history = FakeHistory()
+    let clip = ClipboardSpy()
+    let paste = RecordingInserter()
+    let (c, _, _, key, _, _) = makeController(polisher: polisher, pasteInserter: paste,
+                                              clipboard: clip, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("原文"), at: 11.0)
+    key.failInsertsRemaining = 2                        // 新文＋還原全失敗
+    paste.failInsertsRemaining = 2
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    let events = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
+    #expect(events.count == 1)
+    #expect(events[0].outcomeText == "lostText")
+}
+
+@MainActor
+@Test func basisExpiredRecordsInsertSkipped() async {
+    // basisExpired 防的是「前句在途時 edit 捕捉過期基準」；後句插隊被串行化排除
+    // （DictationController.swift:472 `_ = await previous?.value`——apply 一律依句序）。
+    // 故時序是：首句 newContent 卡 gate → edit 在此刻捕捉 sessionBefore（此時仍為空）
+    // → 放行首句先落地改變 sessionText → edit dispatch 時基準已過期。
+    let polisher = GatedIntentService()
+    polisher.outcomeByRaw = ["首句": .newContent("首句。"),
+                             "改一下": .editedSession("首句改。")]
+    polisher.gatedRaws = ["首句"]
+    let history = FakeHistory()
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("首句"), at: 11.0)
+    c.tick(at: 12.6)                                    // 首句 newContent 發出、卡 gate
+    c.handleTranscript(.finalized("改一下"), at: 13.0)
+    c.tick(at: 14.6)                                    // edit 捕捉 sessionBefore == ""（首句尚未落地）
+    polisher.release()                                  // 首句落地 → sessionText 變 "首句。"
+    await c.lastIntentTask?.value                       // edit dispatch → 基準過期
+    let events = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+    #expect(events.contains { $0.outcomeText == "basisExpired" })
+}
+
+@MainActor
+@Test func insertEventsRespectHistoryGate() async {
+    let polisher = GatedIntentService()
+    polisher.gated = true
+    polisher.outcome = .newContent("第一段。")
+    let history = FakeHistory()
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, history: history)
+    c.settings.historyEnabled = false
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("第一段"), at: 11.0)
+    c.tick(at: 12.6)
+    c.handleTranscript(.finalized("第二段"), at: 13.0)
+    polisher.release()
+    await c.lastIntentTask?.value
+    #expect(history.exchanges.isEmpty)                   // gate 關閉：連 insert 事件也不記
+}

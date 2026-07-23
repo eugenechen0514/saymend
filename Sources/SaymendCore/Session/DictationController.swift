@@ -558,6 +558,8 @@ public final class DictationController {
             // 基準檢查：corrected 以「呼叫當下」的全文為基礎；期間若有新內容落定＝基準過期，
             // 直接套用會無聲抹掉後來的話（終審 finding）。降級保留指令話語並提示重說。
             guard sessionBefore == ledger.sessionText else {
+                recordInsertEvent(kind: "insertSkipped", classification: "basisExpired",
+                                  utteranceText: snapshot.text)
                 keepRaw(snapshot, notice: "未修正（內容已變動，請再說一次）")
                 return
             }
@@ -576,21 +578,33 @@ public final class DictationController {
     }
 
     private func applyNewContent(_ text: String, snapshot: InsertionCoordinator.UtteranceSnapshot) {
-        guard !ledger.frozen else { hud.present(.notice("未潤飾")); return }
+        guard !ledger.frozen else {
+            recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: snapshot.text)
+            hud.present(.notice("未潤飾"))
+            return
+        }
         let old = ledger.sessionText + snapshot.text   // 替換前的欄位鏡像（raw 已上屏）
         do {
             if try coordinator.replaceTail(snapshot, with: text) {
                 ledger.commit(ledger.sessionText + text)
                 emitFeedback(oldText: old)             // 潤飾異動高亮
             } else {
+                recordInsertEvent(kind: "insertSkipped", classification: "counterMismatch",
+                                  utteranceText: snapshot.text)
                 keepRaw(snapshot, notice: "未潤飾")
             }
         } catch InserterError.replaceFailedRestored {
+            recordInsertEvent(kind: "insertFailed", classification: "replaceFailedRestored",
+                              utteranceText: snapshot.text)
             keepRaw(snapshot, notice: "未潤飾")
         } catch InserterError.lostText(let original) {
+            recordInsertEvent(kind: "insertFailed", classification: "lostText",
+                              utteranceText: snapshot.text)
             clipboardRescue?(original)
             hud.present(.notice("插入失敗，原文已複製到剪貼簿"))
         } catch {
+            recordInsertEvent(kind: "insertFailed", classification: "unknown",
+                              utteranceText: snapshot.text, detail: "\(error)")
             keepRaw(snapshot, notice: "未潤飾")
         }
     }
@@ -724,6 +738,18 @@ public final class DictationController {
             feedback?.sessionFrozen()
             hud.present(.notice("復原失敗"))
         }
+    }
+
+    /// 插入層事件補列（M7 §4）：kind 二分——insertFailed＝coordinator 拋錯（真 I/O 失敗）、
+    /// insertSkipped＝守衛拒絕（原文正確保留，非失敗）。與正常 outcome 列共用 gate 與 session，
+    /// 時序天然在 outcome 列之後（dispatch 先記、apply 後跑），回查時兩列相鄰。
+    private func recordInsertEvent(kind: String, classification: String,
+                                   utteranceText: String, detail: String? = nil) {
+        guard settings.historyEnabled, let hid = historySessionID else { return }
+        history?.recordExchange(.init(sessionID: hid, at: now(),
+                                      utteranceRaw: utteranceText,
+                                      outcomeKind: kind,
+                                      outcomeText: detail.map { "\(classification)：\($0)" } ?? classification))
     }
 
     /// 原文照留：帳本入帳（欄位鏡像）＋提示
