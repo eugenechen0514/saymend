@@ -15,7 +15,8 @@ struct SaymendApp: App {
             SettingsView(settings: delegate.settings, vocab: delegate.vocabStore,
                         history: delegate.historyStore, coreModes: delegate.coreModeStore,
                         detector: delegate.claudeCLIDetector,
-                        tester: delegate.providerTester)
+                        tester: delegate.providerTester,
+                        whisperLocalPreload: delegate.preloadWhisperLocal)
         }
     }
 }

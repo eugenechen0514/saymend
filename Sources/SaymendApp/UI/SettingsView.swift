@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import SaymendCore
 
@@ -10,24 +11,29 @@ struct SettingsView: View {
     let coreModes: (any CoreModeStore)?
     let detector: ClaudeCLIDetector?
     let tester: ProviderTester?
+    /// 本機模型預載（M9 §6）：由 App 注入 AppDelegate.preloadWhisperLocal；預設 no-op 供預覽態。
+    let whisperLocalPreload: () -> Void
 
     init(settings: AppSettings,
          vocab: (any VocabStore)? = nil,
          history: (any HistoryRecording)? = nil,
          coreModes: (any CoreModeStore)? = nil,
          detector: ClaudeCLIDetector? = nil,
-         tester: ProviderTester? = nil) {
+         tester: ProviderTester? = nil,
+         whisperLocalPreload: @escaping () -> Void = {}) {
         self.settings = settings
         self.vocab = vocab
         self.history = history
         self.coreModes = coreModes
         self.detector = detector
         self.tester = tester
+        self.whisperLocalPreload = whisperLocalPreload
     }
 
     var body: some View {
         TabView {
-            GeneralSettingsTab(settings: settings, detector: detector, tester: tester)
+            GeneralSettingsTab(settings: settings, detector: detector, tester: tester,
+                               whisperLocalPreload: whisperLocalPreload)
                 .tabItem { Label("一般", systemImage: "gearshape") }
             CoreModeSettingsTab(store: coreModes)
                 .tabItem { Label("核心模式", systemImage: "square.stack.3d.up") }
@@ -51,6 +57,7 @@ struct GeneralSettingsTab: View {
     let settings: AppSettings
     let detector: ClaudeCLIDetector?
     let tester: ProviderTester?
+    let whisperLocalPreload: () -> Void
 
     @State private var hotkey: HotkeyChoice
     @State private var language: OutputLanguage
@@ -72,15 +79,20 @@ struct GeneralSettingsTab: View {
     @State private var whisperModel: String
     @State private var whisperAPIKey: String
     @State private var whisperTimeout: Double
+    // 本機 WhisperKit（M9 §5）
+    @State private var whisperLocalModelPath: URL?
+    @State private var discoveredModels: [DiscoveredModel] = []
     // Provider 連通性測試（M7 §5）
     @State private var testTask: Task<Void, Never>?
     @State private var testReport: ProviderTestReport?
     @State private var testCancelled = false
 
-    init(settings: AppSettings, detector: ClaudeCLIDetector? = nil, tester: ProviderTester? = nil) {
+    init(settings: AppSettings, detector: ClaudeCLIDetector? = nil, tester: ProviderTester? = nil,
+         whisperLocalPreload: @escaping () -> Void = {}) {
         self.settings = settings
         self.detector = detector
         self.tester = tester
+        self.whisperLocalPreload = whisperLocalPreload
         _hotkey = State(initialValue: settings.hotkey)
         _language = State(initialValue: settings.outputLanguage)
         _baseURL = State(initialValue: settings.llmBaseURLString)
@@ -98,17 +110,25 @@ struct GeneralSettingsTab: View {
         _whisperModel = State(initialValue: settings.whisperModel)
         _whisperAPIKey = State(initialValue: settings.whisperAPIKey ?? "")
         _whisperTimeout = State(initialValue: settings.whisperTimeout)
+        _whisperLocalModelPath = State(initialValue: settings.whisperLocalModelPath)
     }
 
     /// M8 新增的 5 條設定寫回單獨掛在 body：全部串在同一條 modifier 鏈上會讓
     /// SwiftUI 型別檢查器超時（錯誤指向鏈中任一子運算式，非新程式碼本身有問題）。
     var body: some View {
         generalForm
-            .onChange(of: asrEngineKind) { _, v in settings.asrEngineKind = v }
+            .onChange(of: asrEngineKind) { _, v in
+                settings.asrEngineKind = v
+                if v == .whisperLocal { whisperLocalPreload() }   // 切到本機即預載選定模型
+            }
             .onChange(of: whisperBaseURL) { _, v in settings.whisperBaseURLString = v }
             .onChange(of: whisperModel) { _, v in settings.whisperModel = v }
             .onChange(of: whisperAPIKey) { _, v in settings.whisperAPIKey = v.isEmpty ? nil : v }
             .onChange(of: whisperTimeout) { _, v in settings.whisperTimeout = v }
+            .onChange(of: whisperLocalModelPath) { _, v in
+                settings.whisperLocalModelPath = v                // 先寫 settings 再預載，預載才讀得到新模型
+                whisperLocalPreload()
+            }
     }
 
     private var generalForm: some View {
@@ -122,6 +142,7 @@ struct GeneralSettingsTab: View {
                 }
             }
             asrEngineSection
+            whisperLocalSection
             Section("LLM Provider") {
                 Picker("Provider", selection: $providerKind) {
                     Text("OpenAI 相容").tag(ProviderKind.openAICompat)
@@ -211,6 +232,87 @@ struct GeneralSettingsTab: View {
                 Text("聽寫音訊會上傳至此端點——詳見「隱私」分頁。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// 本機 WhisperKit 模型選擇（M9 §4/§5）。抽獨立 @ViewBuilder 的理由同 asrEngineSection。
+    @ViewBuilder private var whisperLocalSection: some View {
+        if asrEngineKind == .whisperLocal {
+            Section("本機 WhisperKit") {
+                whisperLocalModelPicker
+                Button("選擇資料夾…") { chooseScanRoot() }
+                Text("模型與音訊皆不出機器，離線可用。掃描 WhisperKit 預設路徑與你加入的資料夾。")
+                    .font(.caption).foregroundStyle(.secondary)
+                whisperLocalIncompatibleRows
+            }
+            .task { if asrEngineKind == .whisperLocal { rescanLocalModels() } }
+        }
+    }
+
+    /// 可用模型下拉；掃不到只給文字引導（不做下載按鈕，M9 §2）
+    @ViewBuilder private var whisperLocalModelPicker: some View {
+        if usableModels.isEmpty {
+            Label("找不到可用的 WhisperKit 模型", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange).font(.caption)
+            Text("請把 WhisperKit CoreML 模型（例如 openai_whisper-large-v3_turbo）放到 ~/Documents/huggingface/models/argmaxinc/whisperkit-coreml/，或用下方「選擇資料夾…」指定既有模型所在的目錄。")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            Picker("模型", selection: $whisperLocalModelPath) {
+                Text("未選擇").tag(URL?.none)
+                ForEach(usableModels, id: \.id) { m in
+                    Text("\(m.displayName)（\(Self.sizeText(m.sizeBytes))）").tag(URL?.some(m.path))
+                }
+            }
+        }
+    }
+
+    /// 掃到但不可用者：灰字列出並附原因（MLX safetensors、Parakeet/CTC、檔案不齊等）
+    @ViewBuilder private var whisperLocalIncompatibleRows: some View {
+        if !incompatibleModels.isEmpty {
+            Text("以下項目不可用：").font(.caption).foregroundStyle(.secondary)
+            ForEach(incompatibleModels, id: \.id) { m in
+                Text("\(m.displayName)——\(Self.incompatibleReason(m.kind))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var usableModels: [DiscoveredModel] {
+        discoveredModels.filter { $0.kind == .whisperKitUsable }
+    }
+    private var incompatibleModels: [DiscoveredModel] {
+        discoveredModels.filter { $0.kind != .whisperKitUsable }
+    }
+
+    private func rescanLocalModels() {
+        discoveredModels = WhisperKitModelScanner()
+            .scan(roots: WhisperKitModelScanner.defaultRoots + settings.whisperLocalScanRoots)
+    }
+
+    /// 「選擇資料夾…」：選到的目錄加入掃描根後重掃（選到模型目錄本身或其父目錄都可，M9 §4）
+    private func chooseScanRoot() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "加入"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        var roots = settings.whisperLocalScanRoots
+        if !roots.contains(url) { roots.append(url) }
+        settings.whisperLocalScanRoots = roots
+        rescanLocalModels()
+    }
+
+    private static func sizeText(_ bytes: Int64) -> String {
+        bytes.formatted(.byteCount(style: .file))
+    }
+
+    private static func incompatibleReason(_ kind: DiscoveredModelKind) -> String {
+        switch kind {
+        case .whisperKitUsable: return ""
+        case .coreMLNonWhisper(let reason): return reason
+        case .mlxSafetensors: return "MLX safetensors 格式，WhisperKit 不支援"
+        case .unknown: return "無法辨識（模型檔不齊或格式不明）"
         }
     }
 
