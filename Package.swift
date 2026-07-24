@@ -7,6 +7,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/ddddxxx/SwiftyOpenCC", from: "2.0.0-beta"),
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
+        .package(url: "https://github.com/argmaxinc/WhisperKit", exact: "1.0.0"),
     ],
     targets: [
         .target(
@@ -14,6 +15,7 @@ let package = Package(
             dependencies: [
                 .product(name: "OpenCC", package: "SwiftyOpenCC"),
                 .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "WhisperKit", package: "WhisperKit"),
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
