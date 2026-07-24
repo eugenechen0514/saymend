@@ -26,6 +26,8 @@ struct PrivacySettingsTab: View {
                                    value: "遠端（Whisper 端點 \(settings.whisperBaseURLString)）——聽寫音訊會上傳")
                     Text("音訊含聲紋與環境聲，敏感度高於文字。請確認端點可信（自架端點的音訊不出區網）。")
                         .font(.caption).foregroundStyle(.orange)
+                    Text("詞彙表也會以偏置提示（bias prompt）明文送到此 Whisper 端點協助辨識，不僅送往下方的 LLM 端點。")
+                        .font(.caption).foregroundStyle(.orange)
                 }
                 LabeledContent("LLM 端點", value: settings.llmBaseURLString)
                 LabeledContent("送出的內容", value: "轉錄文字、session 全文／選取文字、游標前後文、OCR 螢幕參考、詞彙表、前景 App 名稱、你的自訂規則與 per-app 追加規則")
