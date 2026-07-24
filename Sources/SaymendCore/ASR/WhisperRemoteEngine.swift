@@ -140,9 +140,13 @@ public final class WhisperRemoteEngine: ASREngine, ContextBiasable, @unchecked S
     private struct TranscriptionResponse: Decodable { let text: String }
 
     /// 詞彙表 → prompt 偏置字串。空詞彙表回 nil（不送空欄位）；超長截斷（偏置是加分項非必要條件）。
+    ///
+    /// 屬性讀取＋closure 呼叫**都**在 MainActor 上，比照姊妹檔 SpeechAnalyzerEngine.swift:47。
+    /// contextualStrings 由 router 在 MainActor 上寫入（ASREngineRouter.start），本 pump 跑在並行
+    /// executor；若在背景 thread 先 `let p = contextualStrings` 讀屬性、再只把呼叫搬進 MainActor.run，
+    /// 重疊 session 窗口的背景讀會與 MainActor 寫並發＝Optional closure 的 ARC refcount race。
     private func biasPrompt() async -> String? {
-        guard let provider = contextualStrings else { return nil }
-        let phrases = await MainActor.run { provider() }
+        let phrases = await MainActor.run { [weak self] in self?.contextualStrings?() ?? [] }
         guard !phrases.isEmpty else { return nil }
         let joined = phrases.joined(separator: "、")
         return joined.count <= Self.promptCharacterLimit
