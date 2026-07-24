@@ -267,6 +267,22 @@ public final class DictationController {
             if case .selectionPending = sessionTarget {
                 coordinator.accumulateFinalized(text)      // 緩衝：不上屏（M3 設計裁決 1）
             } else {
+                // 凍結守衛（合併阻擋級 finding）：raw 插入路徑先前缺這道守衛，其他每條落地路徑都有
+                // （applyNewContent:599／wasBuffered:545／applyCorrection 等）。freeze() 只設 frozen 旗標、
+                // 不動 internalPhase，而本函式開頭的相位守衛放 .finishing 通過。Whisper 遠端是批次上傳：
+                // 放開熱鍵後 phase 為 .finishing、上傳最長達 timeout（120s），期間使用者切 App／點別欄位
+                // 會觸發 freeze——稍後到達的 .finalized 若照樣 insertFinalized，整段辨識會被合成鍵入／貼上
+                // 打進「目前聚焦的別 App」。SpeechAnalyzer 的 <1s 窗口可忽略，Whisper 讓它常態化。
+                // raw 尚未上屏（不同於 applyNewContent 的 raw 已在螢幕上），故比照 wasBuffered(:545) 走剪貼簿
+                // 急救＋記診斷事件（applyNewContent 的 insertSkipped/frozen）。segmenter 殘留不在此清除——
+                // 與其他每條路徑一致，交由下游 polish 的凍結守衛（applyNewContent:599／applyCorrection:647）
+                // 統一處理，不特別短路。別讓使用者白說話、也別打進錯 App。
+                guard !ledger.frozen else {
+                    recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: text)
+                    clipboardRescue?(text)
+                    hud.present(.notice("已凍結，內容已入剪貼簿"))
+                    return
+                }
                 do {
                     try coordinator.insertFinalized(text)
                     emitFeedback()                             // 底線延伸至新上屏文字

@@ -1659,3 +1659,33 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(!hud.states.contains(.lingering))
     #expect(c.phase == .idle)
 }
+
+@MainActor
+@Test func frozenFinalizedRescuesToClipboardWithoutInsertingIntoFocusedApp() async {
+    // 合併阻擋級回歸（獨立 code review HIGH finding）：Whisper 遠端批次上傳的 .finishing 窗口長達 timeout，
+    // 期間切 App 觸發 freeze（freeze 不改 internalPhase），稍後到達的 .finalized 先前會 insertFinalized
+    // 把整段辨識打進「目前聚焦的別 App」。raw 插入路徑須守 !ledger.frozen，比照其他每條落地路徑。
+    let polisher = GatedIntentService()
+    let spy = ClipboardSpy()
+    let (c, audio, _, key, _, hud) = makeController(polisher: polisher, clipboard: spy)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.5)                          // 非 tap（>0.3s）→ endListening → phase .finishing
+    #expect(c.phase == .idle)                           // .finishing 對外等同 idle
+    #expect(audio.stopCount == 1)
+    c.userActivityDetected(at: 11.0)                    // 上傳中切 App／點別欄位 → freeze()
+    #expect(c.ledger.frozen)
+    c.handleTranscript(.finalized("整段遠端辨識結果"), at: 11.5)   // 遲到的批次結果
+
+    #expect(key.ops.isEmpty)                            // 核心：不得合成鍵入／貼上到聚焦的別 App
+    #expect(spy.texts == ["整段遠端辨識結果"])           // 不讓使用者白說話：改走剪貼簿急救
+    #expect(hud.states.last == .notice("已凍結，內容已入剪貼簿"))
+
+    // 不特別 hardReset：segmenter 殘留交由下游守衛統一處理——隨後的 asrStreamEnded 先 flush 出這句
+    // 進 LLM，但 frozen 使 asrStreamEnded 立即封存（isActive→false），dispatch 被相位守衛丟棄。
+    // 結果一致：不重複上屏、不重複急救。
+    c.asrStreamEnded(at: 11.6)
+    await c.lastIntentTask?.value
+    #expect(key.ops.isEmpty)                            // 仍未上屏
+    #expect(spy.texts == ["整段遠端辨識結果"])           // 未重複急救
+    #expect(c.phase == .idle)                           // frozen → asrStreamEnded 封存
+}
