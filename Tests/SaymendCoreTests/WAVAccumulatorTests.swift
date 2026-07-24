@@ -93,3 +93,16 @@ private func u16(_ d: Data, _ offset: Int) -> UInt16 {
     #expect(acc.duration == 0)
     #expect(acc.wavData().count == 44)            // 只剩 header
 }
+
+@Test func floatSamplesExactCountAfterDrain() throws {
+    let acc = WAVAccumulator()
+    let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: 1, interleaved: false)!
+    let n = AVAudioFrameCount(24000)   // 0.5 秒 @48k
+    let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: n)!; buf.frameLength = n
+    for i in 0..<Int(n) { buf.floatChannelData![0][i] = 0.5 }
+    try acc.append(AudioChunk(buffer: buf))
+    let s = acc.floatSamples()
+    #expect(s.count == 8000)                       // 精確；漏排空必紅
+    #expect(s.allSatisfy { $0 >= -1.0 && $0 < 1.0 })
+    #expect((s.dropFirst(100).first ?? 0) > 0.45)
+}

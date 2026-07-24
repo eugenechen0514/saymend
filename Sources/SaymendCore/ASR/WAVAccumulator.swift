@@ -135,4 +135,20 @@ public final class WAVAccumulator {
         d.append(pcm)
         return d
     }
+
+    /// 排空後把 16k mono PCM16 轉為 `[Float]`（`Int16(littleEndian:)/32768`），供本機 WhisperKit 批次辨識。
+    /// **收尾語意同 `wavData()`**：呼叫前先排空轉換器殘留，故本函式即「定稿」——之後再 append 會重開一段轉換。
+    public func floatSamples() -> [Float] {
+        drain()
+        let count = pcm.count / Self.bytesPerSample
+        guard count > 0 else { return [] }
+        var out = [Float](repeating: 0, count: count)
+        pcm.withUnsafeBytes { raw in
+            for i in 0..<count {
+                let v = raw.loadUnaligned(fromByteOffset: i * Self.bytesPerSample, as: Int16.self)
+                out[i] = Float(Int16(littleEndian: v)) / 32768.0
+            }
+        }
+        return out
+    }
 }
