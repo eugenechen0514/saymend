@@ -67,6 +67,8 @@ public final class AppSettings: @unchecked Sendable {
         static let whisperBaseURL = "whisperBaseURLString"
         static let whisperModel = "whisperModel"
         static let whisperTimeout = "whisperTimeout"
+        static let whisperLocalModelPath = "whisperLocalModelPath"
+        static let whisperLocalScanRoots = "whisperLocalScanRoots"
     }
 
     private let defaults: UserDefaults
@@ -145,6 +147,23 @@ public final class AppSettings: @unchecked Sendable {
               scheme == "http" || scheme == "https" else { return nil }
         return WhisperRemoteConfig(baseURL: url, apiKey: whisperAPIKey,
                                    model: whisperModel, timeout: whisperTimeout)
+    }
+
+    // MARK: - 本機 WhisperKit（M9 spec §5）
+
+    public var whisperLocalModelPath: URL? {
+        get { defaults.string(forKey: K.whisperLocalModelPath).map { URL(filePath: $0) } }
+        set { defaults.set(newValue?.path, forKey: K.whisperLocalModelPath) }
+    }
+
+    public var whisperLocalScanRoots: [URL] {
+        get { (defaults.array(forKey: K.whisperLocalScanRoots) as? [String] ?? []).map { URL(filePath: $0) } }
+        set { defaults.set(newValue.map(\.path), forKey: K.whisperLocalScanRoots) }
+    }
+
+    /// 永回非 optional：selectedModelPath 為 nil 時交引擎映射「未選擇本機模型」（契約單一）
+    public func whisperLocalConfig() -> WhisperLocalConfig {
+        WhisperLocalConfig(selectedModelPath: whisperLocalModelPath, extraScanRoots: whisperLocalScanRoots)
     }
 
     /// prompt 第 4 層：使用者全域自訂 system prompt（規格 §4.4；空字串＝未設定）

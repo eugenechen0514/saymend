@@ -29,3 +29,13 @@ public struct WhisperRemoteConfig: Equatable, Sendable {
         self.timeout = timeout
     }
 }
+
+/// 本機 WhisperKit 設定（spec §5）。無 API key（本機）。
+public struct WhisperLocalConfig: Equatable, Sendable {
+    public var selectedModelPath: URL?
+    public var extraScanRoots: [URL]
+    public init(selectedModelPath: URL?, extraScanRoots: [URL]) {
+        self.selectedModelPath = selectedModelPath
+        self.extraScanRoots = extraScanRoots
+    }
+}
