@@ -28,6 +28,8 @@ struct PrivacySettingsTab: View {
                         .font(.caption).foregroundStyle(.orange)
                     Text("詞彙表也會以偏置提示（bias prompt）明文送到此 Whisper 端點協助辨識，不僅送往下方的 LLM 端點。")
                         .font(.caption).foregroundStyle(.orange)
+                case .whisperLocal:
+                    LabeledContent("語音辨識", value: "本機（WhisperKit），不出機器")
                 }
                 LabeledContent("LLM 端點", value: settings.llmBaseURLString)
                 LabeledContent("送出的內容", value: "轉錄文字、session 全文／選取文字、游標前後文、OCR 螢幕參考、詞彙表、前景 App 名稱、你的自訂規則與 per-app 追加規則")

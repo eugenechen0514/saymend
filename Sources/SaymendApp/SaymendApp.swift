@@ -69,6 +69,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             detect: { [claudeCLIDetector] override in await claudeCLIDetector.detect(override: override) })
         return ProviderTester(provider: ProviderRouter(openAICompat: oai, claudeCLI: cli))
     }()
+    /// 本機 WhisperKit 引擎（M9 §6）：**必須是 AppDelegate 屬性**（非 didFinishLaunching 區域變數），
+    /// SwiftUI 的 Settings scene body 才捕捉得到同一實例來預載。用 lazy var 讓它能捕捉 settings
+    /// （屬性初始化器不可 reference 其他屬性）。
+    lazy var whisperLocalEngine = WhisperKitEngine(
+        transcriber: WhisperKitTranscriber(),
+        configProvider: { [settings] in settings.whisperLocalConfig() })
+
+    /// 背景預載目前選定的本機模型（切到本機引擎／換模型時呼叫），讓第一句不必等 3GB 載入。
+    func preloadWhisperLocal() {
+        Task { await whisperLocalEngine.preload() }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 輔助功能權限：沒有就跳系統提示（熱鍵與鍵入都靠它）
@@ -104,7 +115,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let asrEngine = ASREngineRouter(
             speechAnalyzer: speechAnalyzerEngine,
             whisperRemote: whisperEngine,
+            whisperLocal: whisperLocalEngine,                             // AppDelegate lazy 屬性
             kindProvider: { [settings] in settings.asrEngineKind })       // start 時單一快照
+        // 啟動即預載：本次啟動就選在本機引擎時，先把模型載進來
+        if settings.asrEngineKind == .whisperLocal { preloadWhisperLocal() }
         // 偏置設在 router 上，由它轉發給當下選定的引擎（兩個引擎吃同一個詞彙表來源）
         asrEngine.contextualStrings = { [vocabStore, profileStore] in
             if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,

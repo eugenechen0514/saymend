@@ -8,10 +8,11 @@ public protocol ContextBiasable: AnyObject {
 
 /// ASR 引擎路由（spec §3.3）：start() 時讀一次 kind＝每 session 單一快照，
 /// session 中途改設定不影響進行中那句；cancel() 只轉發給 start 當下選定的引擎。
-/// 兩個子引擎皆實例持有——設定由各自的 configProvider 每次呼叫時讀取，無需重建。
+/// 三個子引擎皆實例持有——設定由各自的 configProvider 每次呼叫時讀取，無需重建。
 public final class ASREngineRouter: ASREngine, ContextBiasable, @unchecked Sendable {
     private let speechAnalyzer: any ASREngine & ContextBiasable
     private let whisperRemote: any ASREngine & ContextBiasable
+    private let whisperLocal: any ASREngine & ContextBiasable
     private let kindProvider: () -> ASREngineKind
 
     /// 由 App 設在 router 上，start() 時轉發給選定引擎（唯一對外接點）
@@ -22,9 +23,11 @@ public final class ASREngineRouter: ASREngine, ContextBiasable, @unchecked Senda
 
     public init(speechAnalyzer: any ASREngine & ContextBiasable,
                 whisperRemote: any ASREngine & ContextBiasable,
+                whisperLocal: any ASREngine & ContextBiasable,
                 kindProvider: @escaping () -> ASREngineKind) {
         self.speechAnalyzer = speechAnalyzer
         self.whisperRemote = whisperRemote
+        self.whisperLocal = whisperLocal
         self.kindProvider = kindProvider
     }
 
@@ -33,6 +36,7 @@ public final class ASREngineRouter: ASREngine, ContextBiasable, @unchecked Senda
         switch kindProvider() {                       // 單一快照：本次 session 認定的引擎
         case .speechAnalyzer: engine = speechAnalyzer
         case .whisperRemote:  engine = whisperRemote
+        case .whisperLocal:   engine = whisperLocal
         }
         engine.contextualStrings = contextualStrings  // 偏置轉發給選定引擎
         stateLock.lock(); active = engine; stateLock.unlock()

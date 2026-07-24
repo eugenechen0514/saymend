@@ -27,8 +27,10 @@ private func drain(_ stream: AsyncStream<TranscriptEvent>) async -> [TranscriptE
 @Test func routerDispatchesToSelectedEngine() async {
     let sa = SpyASREngine(name: "speechAnalyzer")
     let wr = SpyASREngine(name: "whisperRemote")
+    let wl = SpyASREngine(name: "whisperLocal")
     var kind = ASREngineKind.speechAnalyzer
-    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr, kindProvider: { kind })
+    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr, whisperLocal: wl,
+                                kindProvider: { kind })
 
     let (a1, c1) = AsyncStream.makeStream(of: AudioChunk.self); c1.finish()
     #expect(await drain(router.start(audio: a1, localeIdentifier: "zh-TW")) == [.finalized("speechAnalyzer")])
@@ -43,7 +45,8 @@ private func drain(_ stream: AsyncStream<TranscriptEvent>) async -> [TranscriptE
 @Test func routerCancelOnlyHitsActiveEngine() async {
     let sa = SpyASREngine(name: "sa")
     let wr = SpyASREngine(name: "wr")
-    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr,
+    let wl = SpyASREngine(name: "wl")
+    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr, whisperLocal: wl,
                                 kindProvider: { .whisperRemote })
     let (a, c) = AsyncStream.makeStream(of: AudioChunk.self); c.finish()
     _ = await drain(router.start(audio: a, localeIdentifier: "zh-TW"))
@@ -55,7 +58,8 @@ private func drain(_ stream: AsyncStream<TranscriptEvent>) async -> [TranscriptE
 @Test func routerCancelBeforeAnyStartIsNoOp() {
     let sa = SpyASREngine(name: "sa")
     let wr = SpyASREngine(name: "wr")
-    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr,
+    let wl = SpyASREngine(name: "wl")
+    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr, whisperLocal: wl,
                                 kindProvider: { .speechAnalyzer })
     router.cancel()                        // 尚未 start：不得 crash、不得誤打任一引擎
     #expect(sa.cancelCount == 0 && wr.cancelCount == 0)
@@ -64,8 +68,10 @@ private func drain(_ stream: AsyncStream<TranscriptEvent>) async -> [TranscriptE
 @Test func routerSnapshotsKindAtStartNotAtCancel() async {
     let sa = SpyASREngine(name: "sa")
     let wr = SpyASREngine(name: "wr")
+    let wl = SpyASREngine(name: "wl")
     var kind = ASREngineKind.whisperRemote
-    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr, kindProvider: { kind })
+    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr, whisperLocal: wl,
+                                kindProvider: { kind })
     let (a, c) = AsyncStream.makeStream(of: AudioChunk.self); c.finish()
     _ = await drain(router.start(audio: a, localeIdentifier: "zh-TW"))
     kind = .speechAnalyzer                 // session 進行中改設定
@@ -78,7 +84,8 @@ private func drain(_ stream: AsyncStream<TranscriptEvent>) async -> [TranscriptE
 @Test func routerForwardsContextualStringsToActiveEngine() async {
     let sa = SpyASREngine(name: "sa")
     let wr = SpyASREngine(name: "wr")
-    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr,
+    let wl = SpyASREngine(name: "wl")
+    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr, whisperLocal: wl,
                                 kindProvider: { .whisperRemote })
     router.contextualStrings = { ["術語"] }
     let (a, c) = AsyncStream.makeStream(of: AudioChunk.self); c.finish()
@@ -90,9 +97,22 @@ private func drain(_ stream: AsyncStream<TranscriptEvent>) async -> [TranscriptE
 @Test func routerPassesLocaleThrough() async {
     let sa = SpyASREngine(name: "sa")
     let wr = SpyASREngine(name: "wr")
-    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr,
+    let wl = SpyASREngine(name: "wl")
+    let router = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr, whisperLocal: wl,
                                 kindProvider: { .speechAnalyzer })
     let (a, c) = AsyncStream.makeStream(of: AudioChunk.self); c.finish()
     _ = await drain(router.start(audio: a, localeIdentifier: "en-US"))
     #expect(sa.lastLocale == "en-US")
+}
+
+@Test func routesWhisperLocal() async {
+    let sa = SpyASREngine(name: "speechAnalyzer")
+    let wr = SpyASREngine(name: "whisperRemote")
+    let wl = SpyASREngine(name: "whisperLocal")
+    let r = ASREngineRouter(speechAnalyzer: sa, whisperRemote: wr, whisperLocal: wl,
+                            kindProvider: { .whisperLocal })
+    let (st, c) = AsyncStream.makeStream(of: AudioChunk.self); c.finish()
+    _ = await drain(r.start(audio: st, localeIdentifier: "zh-TW"))
+    #expect(wl.startCount == 1)
+    #expect(sa.startCount == 0 && wr.startCount == 0)
 }

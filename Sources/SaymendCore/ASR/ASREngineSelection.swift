@@ -4,6 +4,7 @@ import Foundation
 public enum ASREngineKind: String, Codable, CaseIterable, Sendable {
     case speechAnalyzer
     case whisperRemote
+    case whisperLocal
 
     /// 設定頁顯示字串。文案歸屬 Core，比照 HotkeyChoice.displayName 與
     /// OutputLanguage.displayName 的既有慣例，UI 端一律 ForEach(allCases) + tag。
@@ -11,6 +12,7 @@ public enum ASREngineKind: String, Codable, CaseIterable, Sendable {
         switch self {
         case .speechAnalyzer: return "系統內建（Apple SpeechAnalyzer）"
         case .whisperRemote:  return "Whisper 遠端"
+        case .whisperLocal:   return "本機 WhisperKit（離線）"
         }
     }
 }
