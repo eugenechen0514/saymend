@@ -820,6 +820,13 @@ public final class DictationController {
                                       outcomeText: detail.map { "\(classification)：\($0)" } ?? classification))
     }
 
+    /// 插入層備援診斷（issue #1 被動蒐證）：主 inserter 失敗、備援成功。
+    /// 不是失敗也不是跳過——文字有落地，故不進 insertFailed／insertSkipped 二分，另立一類。
+    /// utteranceRaw 留空：這是插入機制的事件，不是某句話的 outcome。
+    public func noteInserterFallback(_ kind: InsertionCoordinator.InserterFallback) {
+        recordInsertEvent(kind: "insertFallback", classification: kind.rawValue, utteranceText: "")
+    }
+
     /// 原文照留：帳本入帳（欄位鏡像）＋提示
     private func keepRaw(_ snapshot: InsertionCoordinator.UtteranceSnapshot, notice: String) {
         if !snapshot.text.isEmpty {

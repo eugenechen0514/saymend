@@ -212,6 +212,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 return await ocrReader.captureText()
             }
         )
+        // 插入層備援診斷（issue #1）：主 inserter 失敗、備援救回時補一筆歷史事件。
+        // 插入一律發生在 controller 的 MainActor 上，故直接轉呼叫。
+        coordinator.onInserterFallback = { [weak self] kind in
+            self?.controller.noteInserterFallback(kind)
+        }
+
         audio.levelHandler = { [weak self] level in self?.hud.updateLevel(level) }
 
         hud.onUndoTap = { [weak self] in

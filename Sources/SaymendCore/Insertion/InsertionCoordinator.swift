@@ -22,6 +22,19 @@ public final class InsertionCoordinator {
         case unsupported        // 無 AX 範圍能力：呼叫端改走「打字蓋選取」＋立即凍結
     }
 
+    /// 主 inserter 失敗、備援救回時的分類（issue #1 蒐證）。控制流上是「成功」，
+    /// 但 replaceTail 偶發落地失敗的兩個候選 trigger 之一正是 paste 偶發失敗——
+    /// 過去這條路徑什麼都不留，帳面與一次乾淨插入完全無法區分。
+    /// 另一個候選 trigger（counter-mismatch）已由 M7 的 insertSkipped/counterMismatch 覆蓋。
+    public enum InserterFallback: String, Sendable {
+        case pasteToKeystroke     // 長文優先 paste，失敗退 keystroke
+        case keystrokeToPaste     // 短文優先 keystroke，失敗退 paste
+    }
+
+    /// 純觀察，不影響控制流；nil＝完全不觀察（預設）。
+    /// 只在「主失敗、備援成功」時觸發：兩邊都倒是真失敗，走既有 insertFailed 路徑，不由這裡報。
+    public var onInserterFallback: ((InserterFallback) -> Void)?
+
     private let keystroke: any TextInserter
     private let paste: any TextInserter
     private let rangeReplacer: (any SessionRangeReplacing)?
@@ -181,12 +194,14 @@ public final class InsertionCoordinator {
     }
 
     private func insertWithFallback(_ text: String) throws {
-        let primary: any TextInserter = text.count >= pasteThreshold ? paste : keystroke
-        let secondary: any TextInserter = text.count >= pasteThreshold ? keystroke : paste
+        let pasteFirst = text.count >= pasteThreshold
+        let primary: any TextInserter = pasteFirst ? paste : keystroke
+        let secondary: any TextInserter = pasteFirst ? keystroke : paste
         do {
             try primary.insert(text)
         } catch {
-            try secondary.insert(text)
+            try secondary.insert(text)   // 這裡再拋＝真失敗，交給呼叫端的 insertFailed 路徑
+            onInserterFallback?(pasteFirst ? .pasteToKeystroke : .keystrokeToPaste)
         }
     }
 }

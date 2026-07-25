@@ -312,3 +312,61 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     #expect(outcome == .fieldMismatch)
     #expect(key.ops == [.insert("指令")])              // 除最初插入外，零 keystroke 收尾
 }
+
+// MARK: - 備援診斷（issue #1 蒐證）
+// 主 inserter 失敗、備援救回＝控制流無異狀、帳面成功，過去什麼都不留。
+// 這正是 issue #1「replaceTail 偶發落地失敗」兩個候選 trigger 之一（另一個 counter-mismatch
+// 已由 M7 的 insertSkipped/counterMismatch 覆蓋）。
+
+@Test func fallbackToSecondaryInserterIsObservable() throws {
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, pasteThreshold: 6)
+    var seen: [InsertionCoordinator.InserterFallback] = []
+    c.onInserterFallback = { seen.append($0) }
+
+    paste.failInsertsRemaining = 1
+    try c.insertFinalized("這是一段很長的文字啊")        // ≥6 → 主 paste 失敗、退 keystroke
+    #expect(seen == [.pasteToKeystroke])
+
+    key.failInsertsRemaining = 1
+    try c.insertFinalized("嗨")                        // <6 → 主 keystroke 失敗、退 paste
+    #expect(seen == [.pasteToKeystroke, .keystrokeToPaste])
+}
+
+@Test func noFallbackEventWhenPrimarySucceeds() throws {
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, pasteThreshold: 6)
+    var seen: [InsertionCoordinator.InserterFallback] = []
+    c.onInserterFallback = { seen.append($0) }
+
+    try c.insertFinalized("嗨")
+    try c.insertFinalized("這是一段很長的文字啊")
+    #expect(seen.isEmpty)
+}
+
+@Test func noFallbackEventWhenBothInsertersFail() throws {
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, pasteThreshold: 6)
+    var seen: [InsertionCoordinator.InserterFallback] = []
+    c.onInserterFallback = { seen.append($0) }
+
+    paste.failInsertsRemaining = 1
+    key.failInsertsRemaining = 1
+    #expect(throws: InserterError.self) { try c.insertFinalized("這是一段很長的文字啊") }
+    // 兩邊都倒＝真失敗，走既有 insertFailed 路徑；不得再報「已用備援救回」
+    #expect(seen.isEmpty)
+}
+
+@Test func fallbackDuringReplaceTailIsObservable() throws {
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, pasteThreshold: 6)
+    var seen: [InsertionCoordinator.InserterFallback] = []
+    try c.insertFinalized("呃你好")
+    let snap = c.snapshotAndBeginNext()
+    c.onInserterFallback = { seen.append($0) }        // 只觀察替換階段
+
+    paste.failInsertsRemaining = 1
+    let ok = try c.replaceTail(snap, with: "這是潤飾後的長句子")   // ≥6 → paste 先試
+    #expect(ok)
+    #expect(seen == [.pasteToKeystroke])              // 落地成功，但走的是備援
+}
