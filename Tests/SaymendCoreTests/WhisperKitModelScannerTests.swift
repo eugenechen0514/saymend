@@ -99,6 +99,65 @@ private enum FX {
         #expect(r.count == 1)
     }
 
+    // MARK: - tokenizer 快取判定（REV #2）
+    //
+    // 位置以 WhisperKit 1.0.0 實際搜尋順序為準（ModelUtilities.loadTokenizer:17-54）：
+    // A. <hubDownloadBase>/models/openai/whisper-<variant>/tokenizer.json（預設 ~/Documents/huggingface）
+    // B. <模型目錄>/tokenizer.json
+    // C. <模型目錄>/models/openai/whisper-<variant>/tokenizer.json
+    // Python 的 ~/.cache/huggingface/hub 佈局 Swift 端不讀，故不認。
+
+    @Test func tokenizerCachedWhenBundledInModelFolder() throws {          // B
+        let m = try FX.whisperModel(try FX.temp(), "openai_whisper-tiny")
+        try FX.file(m.appending(path: "tokenizer.json"), "{}")
+        #expect(WhisperKitModelScanner.tokenizerCached(directory: m,
+                                                       hubDownloadBase: try FX.temp(),
+                                                       fileManager: .default))
+    }
+    @Test func tokenizerCachedFromHubDownloadBase() throws {               // A（含 _turbo/_632MB 後綴映射）
+        let m = try FX.whisperModel(try FX.temp(), "openai_whisper-large-v3_turbo_632MB")
+        let hub = try FX.temp()
+        let repo = hub.appending(path: "models/openai/whisper-large-v3")
+        try FX.dir(repo); try FX.file(repo.appending(path: "tokenizer.json"), "{}")
+        #expect(WhisperKitModelScanner.tokenizerCached(directory: m, hubDownloadBase: hub, fileManager: .default))
+    }
+    @Test func tokenizerCachedFromModelFolderHubLayout() throws {          // C
+        let m = try FX.whisperModel(try FX.temp(), "openai_whisper-base.en")
+        let repo = m.appending(path: "models/openai/whisper-base.en")
+        try FX.dir(repo); try FX.file(repo.appending(path: "tokenizer.json"), "{}")
+        #expect(WhisperKitModelScanner.tokenizerCached(directory: m, hubDownloadBase: try FX.temp(), fileManager: .default))
+    }
+    @Test func tokenizerNotCachedWhenAbsent() throws {
+        let m = try FX.whisperModel(try FX.temp(), "openai_whisper-large-v3")
+        #expect(!WhisperKitModelScanner.tokenizerCached(directory: m, hubDownloadBase: try FX.temp(), fileManager: .default))
+    }
+    @Test func datedVariantMapsToBaseTokenizerRepo() throws {              // large-v3-v20240930_turbo → large-v3
+        let m = try FX.whisperModel(try FX.temp(), "openai_whisper-large-v3-v20240930_turbo_632MB")
+        let hub = try FX.temp()
+        let repo = hub.appending(path: "models/openai/whisper-large-v3")
+        try FX.dir(repo); try FX.file(repo.appending(path: "tokenizer.json"), "{}")
+        #expect(WhisperKitModelScanner.tokenizerCached(directory: m, hubDownloadBase: hub, fileManager: .default))
+    }
+    @Test func unmappableNameIsConservativelyUncached() throws {           // 對不到表＝保守標未快取
+        let m = try FX.whisperModel(try FX.temp(), "some_custom_model")
+        let hub = try FX.temp()
+        let repo = hub.appending(path: "models/openai/whisper-large-v3")
+        try FX.dir(repo); try FX.file(repo.appending(path: "tokenizer.json"), "{}")
+        #expect(!WhisperKitModelScanner.tokenizerCached(directory: m, hubDownloadBase: hub, fileManager: .default))
+    }
+    @Test func scanReportsTokenizerCached() throws {
+        let base = try FX.temp()
+        let m = try FX.whisperModel(base, "openai_whisper-small")
+        try FX.file(m.appending(path: "tokenizer.json"), "{}")
+        let r = WhisperKitModelScanner(fileManager: .default, hubDownloadBase: try FX.temp()).scan(roots: [m])
+        #expect(r.first?.tokenizerCached == true)
+    }
+    @Test func scanReportsTokenizerMissing() throws {
+        let m = try FX.whisperModel(try FX.temp(), "openai_whisper-small")
+        let r = WhisperKitModelScanner(fileManager: .default, hubDownloadBase: try FX.temp()).scan(roots: [m])
+        #expect(r.first?.tokenizerCached == false)
+    }
+
     @Test func scanClassifiesModelRootItself() throws {
         let m = try FX.whisperModel(try FX.temp(), "openai_whisper-tiny")
         let r = WhisperKitModelScanner().scan(roots: [m])

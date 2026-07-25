@@ -13,18 +13,75 @@ public struct DiscoveredModel: Equatable, Sendable, Identifiable {
     public var path: URL
     public var kind: DiscoveredModelKind
     public var sizeBytes: Int64
-    public init(displayName: String, path: URL, kind: DiscoveredModelKind, sizeBytes: Int64) {
+    /// 本機是否已有此模型的 tokenizer（false＝首次使用會向 HF 取一次 tokenizer，非全程離線）
+    public var tokenizerCached: Bool
+    public init(displayName: String, path: URL, kind: DiscoveredModelKind, sizeBytes: Int64,
+                tokenizerCached: Bool) {
         self.displayName = displayName; self.path = path; self.kind = kind; self.sizeBytes = sizeBytes
+        self.tokenizerCached = tokenizerCached
     }
 }
 
 public struct WhisperKitModelScanner {
     private let fm: FileManager
-    public init(fileManager: FileManager = .default) { self.fm = fileManager }
+    private let hubDownloadBase: URL
+    public init(fileManager: FileManager = .default,
+                hubDownloadBase: URL = WhisperKitModelScanner.defaultHubDownloadBase) {
+        self.fm = fileManager
+        self.hubDownloadBase = hubDownloadBase
+    }
 
     public static var defaultRoots: [URL] {
         [FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "Documents/huggingface/models/argmaxinc/whisperkit-coreml")]
+    }
+
+    /// swift-transformers HubApi 的預設 downloadBase（HubApi.swift:105-110 逐字對照：
+    /// documentDirectory ＋ "huggingface"）。tokenizer 快取即落在其 `models/<repo>` 之下。
+    public static var defaultHubDownloadBase: URL {
+        (FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: "Documents"))
+            .appending(path: "huggingface")
+    }
+
+    /// 模型目錄名 → WhisperKit 會去要的 tokenizer repo id。
+    ///
+    /// WhisperKit 由模型維度 detectVariant 出 11 個 ModelVariant 之一，再經
+    /// `tokenizerNameForVariant`（ModelUtilities.swift:175-202）換成 `openai/whisper-*`；
+    /// large-v3 的 turbo／日期版本全部歸到 `openai/whisper-large-v3`。此處由目錄名反推同一組
+    /// 對照：去掉 `_NNNmb` 容量、`_turbo`、`-vYYYYMMDD` 日期後綴後查表，**對不到就回 nil**
+    /// （保守標「首次需連網」，寧可少承諾也不給假的離線保證）。
+    static func tokenizerRepoID(forModelDirectoryNamed name: String) -> String? {
+        let known: Set<String> = ["tiny", "tiny.en", "base", "base.en", "small", "small.en",
+                                  "medium", "medium.en", "large", "large-v2", "large-v3"]
+        let lower = name.lowercased()
+        let prefix = "openai_whisper-"
+        guard lower.hasPrefix(prefix) else { return nil }
+        var rest = String(lower.dropFirst(prefix.count))
+        rest = rest.replacingOccurrences(of: "_[0-9]+mb$", with: "", options: .regularExpression)
+        rest = rest.replacingOccurrences(of: "_turbo$", with: "", options: .regularExpression)
+        rest = rest.replacingOccurrences(of: "-v[0-9]{8}$", with: "", options: .regularExpression)
+        return known.contains(rest) ? "openai/whisper-\(rest)" : nil
+    }
+
+    /// 本機是否已有此模型的 tokenizer（REV #2）。位置與順序照 WhisperKit 1.0.0 實際會搜的三處：
+    /// A `<hubDownloadBase>/models/<repo>`、B 模型目錄自帶、C `<模型目錄>/models/<repo>`
+    /// （ModelUtilities.loadTokenizer:17-54 ＋ WhisperKit.swift:462-470）。
+    /// Python huggingface_hub 的 `~/.cache/huggingface/hub` 佈局 Swift 端不讀，故不認。
+    public static func tokenizerCached(directory dir: URL, hubDownloadBase: URL,
+                                       fileManager fm: FileManager) -> Bool {
+        func hasTokenizer(_ folder: URL) -> Bool {
+            fm.fileExists(atPath: folder.appending(path: "tokenizer.json").path)
+        }
+        func repoFolder(under base: URL, _ repo: String) -> URL {
+            var out = base.appending(path: "models")
+            for component in repo.split(separator: "/") { out = out.appending(path: String(component)) }
+            return out
+        }
+        if hasTokenizer(dir) { return true }                                     // B
+        guard let repo = tokenizerRepoID(forModelDirectoryNamed: dir.lastPathComponent) else { return false }
+        return hasTokenizer(repoFolder(under: hubDownloadBase, repo))            // A
+            || hasTokenizer(repoFolder(under: dir, repo))                        // C
     }
 
     private static func entries(_ dir: URL, _ fm: FileManager) -> [String] {
@@ -94,9 +151,13 @@ public struct WhisperKitModelScanner {
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { return }
             seen.insert(std)
-            out.append(DiscoveredModel(displayName: dir.lastPathComponent, path: std,
-                                       kind: Self.classify(directory: dir, fileManager: fm),
-                                       sizeBytes: Self.dirSize(dir, fm)))
+            out.append(DiscoveredModel(
+                displayName: dir.lastPathComponent, path: std,
+                kind: Self.classify(directory: dir, fileManager: fm),
+                sizeBytes: Self.dirSize(dir, fm),
+                tokenizerCached: Self.tokenizerCached(directory: dir,
+                                                      hubDownloadBase: hubDownloadBase,
+                                                      fileManager: fm)))
         }
         for root in roots {
             if Self.isModelDirectory(root, fm) { consider(root); continue }   // root 本身即模型
