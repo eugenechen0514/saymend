@@ -170,7 +170,12 @@ struct GeneralSettingsTab: View {
                 Section("OpenAI 相容") {
                     TextField("Base URL", text: $baseURL, prompt: Text("https://api.openai.com/v1"))
                     TextField("模型", text: $model, prompt: Text("gpt-4o-mini"))
-                    SecureField("API Key（存於 Keychain）", text: $apiKey)
+                    SecureField("API Key（存於 Keychain；本地端點可留空）", text: $apiKey)
+                    if apiKey.isEmpty, EndpointKeyRequirement.requiresAPIKey(baseURL: baseURL) {
+                        // 沒有這條，使用者只會看到 2.5 秒即消的「未潤飾（HTTP 401）」，看不出是自己沒填 Key
+                        Label("未設定 API Key，潤飾將被端點拒絕（HTTP 401）", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange).font(.caption)
+                    }
                     Text("本地模型（Ollama／LM Studio）也走這裡：填 http://localhost:11434/v1 之類的端點即可。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
