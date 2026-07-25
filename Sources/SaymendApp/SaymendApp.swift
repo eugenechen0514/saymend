@@ -16,7 +16,9 @@ struct SaymendApp: App {
                         history: delegate.historyStore, coreModes: delegate.coreModeStore,
                         detector: delegate.claudeCLIDetector,
                         tester: delegate.providerTester,
-                        whisperLocalPreload: delegate.preloadWhisperLocal)
+                        whisperLocalPreload: delegate.preloadWhisperLocal,
+                        whisperLocalUnload: delegate.unloadWhisperLocal,
+                        whisperLocalState: { await delegate.whisperLocalState() })
         }
     }
 }
@@ -84,6 +86,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func preloadWhisperLocal() {
         whisperLocalPreloadTask?.cancel()
         whisperLocalPreloadTask = Task { [whisperLocalEngine] in await whisperLocalEngine.preload() }
+    }
+
+    /// 卸載本機模型，釋放記憶體（設定頁「卸載」）。先停掉在途預載，免得剛卸載又被載回來。
+    func unloadWhisperLocal() {
+        whisperLocalPreloadTask?.cancel()
+        whisperLocalPreloadTask = nil
+        Task { [whisperLocalEngine] in await whisperLocalEngine.unload() }
+    }
+
+    /// 設定頁輪詢用：目前選定模型的載入狀態。
+    func whisperLocalState() async -> ModelLoadState {
+        await whisperLocalEngine.state()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

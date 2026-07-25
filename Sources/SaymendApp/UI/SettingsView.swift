@@ -11,8 +11,10 @@ struct SettingsView: View {
     let coreModes: (any CoreModeStore)?
     let detector: ClaudeCLIDetector?
     let tester: ProviderTester?
-    /// 本機模型預載（M9 §6）：由 App 注入 AppDelegate.preloadWhisperLocal；預設 no-op 供預覽態。
+    /// 本機模型預載／卸載／狀態查詢（M9 §6）：由 App 注入 AppDelegate 對應方法；預設 no-op 供預覽態。
     let whisperLocalPreload: () -> Void
+    let whisperLocalUnload: () -> Void
+    let whisperLocalState: @MainActor () async -> ModelLoadState
 
     init(settings: AppSettings,
          vocab: (any VocabStore)? = nil,
@@ -20,7 +22,9 @@ struct SettingsView: View {
          coreModes: (any CoreModeStore)? = nil,
          detector: ClaudeCLIDetector? = nil,
          tester: ProviderTester? = nil,
-         whisperLocalPreload: @escaping () -> Void = {}) {
+         whisperLocalPreload: @escaping () -> Void = {},
+         whisperLocalUnload: @escaping () -> Void = {},
+         whisperLocalState: @escaping @MainActor () async -> ModelLoadState = { .idle }) {
         self.settings = settings
         self.vocab = vocab
         self.history = history
@@ -28,12 +32,16 @@ struct SettingsView: View {
         self.detector = detector
         self.tester = tester
         self.whisperLocalPreload = whisperLocalPreload
+        self.whisperLocalUnload = whisperLocalUnload
+        self.whisperLocalState = whisperLocalState
     }
 
     var body: some View {
         TabView {
             GeneralSettingsTab(settings: settings, detector: detector, tester: tester,
-                               whisperLocalPreload: whisperLocalPreload)
+                               whisperLocalPreload: whisperLocalPreload,
+                               whisperLocalUnload: whisperLocalUnload,
+                               whisperLocalState: whisperLocalState)
                 .tabItem { Label("一般", systemImage: "gearshape") }
             CoreModeSettingsTab(store: coreModes)
                 .tabItem { Label("核心模式", systemImage: "square.stack.3d.up") }
@@ -58,6 +66,8 @@ struct GeneralSettingsTab: View {
     let detector: ClaudeCLIDetector?
     let tester: ProviderTester?
     let whisperLocalPreload: () -> Void
+    let whisperLocalUnload: () -> Void
+    let whisperLocalState: @MainActor () async -> ModelLoadState
 
     @State private var hotkey: HotkeyChoice
     @State private var language: OutputLanguage
@@ -83,17 +93,22 @@ struct GeneralSettingsTab: View {
     @State private var whisperLocalModelPath: URL?
     @State private var discoveredModels: [DiscoveredModel] = []
     @State private var scanTask: Task<Void, Never>?
+    @State private var localModelState: ModelLoadState = .idle
     // Provider 連通性測試（M7 §5）
     @State private var testTask: Task<Void, Never>?
     @State private var testReport: ProviderTestReport?
     @State private var testCancelled = false
 
     init(settings: AppSettings, detector: ClaudeCLIDetector? = nil, tester: ProviderTester? = nil,
-         whisperLocalPreload: @escaping () -> Void = {}) {
+         whisperLocalPreload: @escaping () -> Void = {},
+         whisperLocalUnload: @escaping () -> Void = {},
+         whisperLocalState: @escaping @MainActor () async -> ModelLoadState = { .idle }) {
         self.settings = settings
         self.detector = detector
         self.tester = tester
         self.whisperLocalPreload = whisperLocalPreload
+        self.whisperLocalUnload = whisperLocalUnload
+        self.whisperLocalState = whisperLocalState
         _hotkey = State(initialValue: settings.hotkey)
         _language = State(initialValue: settings.outputLanguage)
         _baseURL = State(initialValue: settings.llmBaseURLString)
@@ -242,6 +257,7 @@ struct GeneralSettingsTab: View {
             Section("本機 WhisperKit") {
                 whisperLocalModelPicker
                 whisperLocalSelectionControls
+                whisperLocalLoadControls
                 Button("選擇資料夾…") { chooseScanRoot() }
                 // 誠實化（REV #2）：音訊與模型確實留在本機，但 tokenizer 由 WhisperKit 向 HF 取，
                 // 冷快取的機器首次仍會連一次網——不能一句「離線可用」帶過。
@@ -249,8 +265,43 @@ struct GeneralSettingsTab: View {
                     .font(.caption).foregroundStyle(.secondary)
                 whisperLocalIncompatibleRows
             }
-            .task { if asrEngineKind == .whisperLocal { rescanLocalModels() } }
+            .task { await enterWhisperLocalSection() }
         }
+    }
+
+    /// 模型載入狀態列＋手動載入／卸載（M9：首次 ANE 編譯可達數分鐘，讓使用者能事先載好、也能放掉記憶體）
+    @ViewBuilder private var whisperLocalLoadControls: some View {
+        LabeledContent("模型狀態", value: Self.stateText(localModelState))
+        HStack {
+            Button("載入") { whisperLocalPreload(); refreshLocalModelState() }
+                .disabled(whisperLocalModelPath == nil || localModelState != .idle)
+            Button("卸載") { whisperLocalUnload(); refreshLocalModelState() }
+                .disabled(localModelState != .loaded)
+            if localModelState == .loading { ProgressView().controlSize(.small) }
+        }
+    }
+
+    private static func stateText(_ s: ModelLoadState) -> String {
+        switch s {
+        case .idle:    return "未載入"
+        case .loading: return "載入中…（首次較久）"
+        case .loaded:  return "已載入"
+        }
+    }
+
+    /// 進入區塊：掃一次模型，之後每秒回報載入狀態。
+    /// 標 @MainActor：`.task` 的 closure 是 @Sendable、不繼承 MainActor，寫 @State 必須自己標（記取 NEW-1）。
+    @MainActor private func enterWhisperLocalSection() async {
+        if asrEngineKind == .whisperLocal { rescanLocalModels() }
+        while !Task.isCancelled {
+            localModelState = await whisperLocalState()
+            try? await Task.sleep(for: .seconds(1))
+        }
+    }
+
+    /// 按下載入／卸載後立刻反映一次，不必等下一輪輪詢
+    private func refreshLocalModelState() {
+        Task { @MainActor in localModelState = await whisperLocalState() }
     }
 
     /// 可用模型下拉；掃不到只給文字引導（不做下載按鈕，M9 §2）
