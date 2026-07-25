@@ -38,18 +38,43 @@ public struct WhisperKitModelScanner {
         let arch = (obj["architectures"] as? [String])?.joined(separator: ",") ?? ""
         return (mt + "," + arch).lowercased()
     }
-    static func hasModelMarker(_ dir: URL, _ fm: FileManager) -> Bool {
-        entries(dir, fm).contains { $0.hasSuffix(".mlmodelc") || $0 == "model.safetensors" }
+    /// CoreML bundle 內部的內容標記：`.mlmodelc` 為 coremldata.bin／model.mil，
+    /// `.mlpackage` 為 Manifest.json／Data。只有目錄名存在不足以認定可用——
+    /// 下載中斷會留下空的 bundle 目錄，載入時才炸（REV #6）。
+    private static let bundleContentMarkers: Set<String> = ["coremldata.bin", "model.mil", "Manifest.json", "Data"]
+
+    private static func isValidBundle(_ parent: URL, _ name: String, _ fm: FileManager) -> Bool {
+        let inner = entries(parent.appending(path: name), fm)
+        return inner.contains { bundleContentMarkers.contains($0) }
+    }
+
+    /// trio 元件：`.mlmodelc` 或 `.mlpackage` 皆可（REV #5），且該 bundle 須有內容（REV #6）
+    private static func hasValidComponent(_ dir: URL, _ base: String, _ fm: FileManager) -> Bool {
+        isValidBundle(dir, "\(base).mlmodelc", fm) || isValidBundle(dir, "\(base).mlpackage", fm)
+    }
+
+    static func hasValidTrio(_ dir: URL, _ fm: FileManager) -> Bool {
+        hasValidComponent(dir, "AudioEncoder", fm)
+            && hasValidComponent(dir, "TextDecoder", fm)
+            && hasValidComponent(dir, "MelSpectrogram", fm)
+    }
+
+    /// root-marker 收斂（REV #7）：只有「完整有效 trio」或「明確 safetensors」才把該目錄
+    /// 當成模型本身而不再往下掃；零星／不齊的 bundle 仍須列舉子目錄，否則父目錄裡有雜物
+    /// （半個下載殘骸）就會讓底下的真模型全被漏掉。
+    static func isModelDirectory(_ dir: URL, _ fm: FileManager) -> Bool {
+        hasValidTrio(dir, fm) || entries(dir, fm).contains("model.safetensors")
     }
 
     public static func classify(directory dir: URL, fileManager fm: FileManager) -> DiscoveredModelKind {
         let list = entries(dir, fm)
         func has(_ n: String) -> Bool { list.contains(n) }
-        let trio = has("AudioEncoder.mlmodelc") && has("TextDecoder.mlmodelc") && has("MelSpectrogram.mlmodelc")
-        let anyMLModelC = list.contains { $0.hasSuffix(".mlmodelc") }
+        let trio = hasValidTrio(dir, fm)
+        let anyMLModelC = list.contains { $0.hasSuffix(".mlmodelc") || $0.hasSuffix(".mlpackage") }
         if trio {
             let tags = configTags(dir)
-            if has("MultimodalLogits.mlmodelc") || tags.contains("parakeet") || tags.contains("ctc") {
+            if has("MultimodalLogits.mlmodelc") || has("MultimodalLogits.mlpackage")
+                || tags.contains("parakeet") || tags.contains("ctc") {
                 return .coreMLNonWhisper(reason: "非 whisper（Parakeet/CTC）")
             }
             let isWhisper = dir.lastPathComponent.lowercased().contains("openai_whisper") || tags.contains("whisper")
@@ -63,7 +88,8 @@ public struct WhisperKitModelScanner {
         var out: [DiscoveredModel] = []
         var seen = Set<URL>()
         func consider(_ dir: URL) {
-            let std = dir.standardizedFileURL
+            // symlink 一併解析後才當去重 key（REV #8）：同一實體目錄經 symlink 掃到不得重複列出
+            let std = dir.resolvingSymlinksInPath().standardizedFileURL
             guard !seen.contains(std) else { return }
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { return }
@@ -73,7 +99,7 @@ public struct WhisperKitModelScanner {
                                        sizeBytes: Self.dirSize(dir, fm)))
         }
         for root in roots {
-            if Self.hasModelMarker(root, fm) { consider(root); continue }   // root 即模型（含損毀）
+            if Self.isModelDirectory(root, fm) { consider(root); continue }   // root 本身即模型
             let children = (try? fm.contentsOfDirectory(at: root,
                 includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
             for c in children { consider(c) }
