@@ -151,10 +151,13 @@ public struct WhisperKitModelScanner {
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { return }
             seen.insert(std)
+            let kind = Self.classify(directory: dir, fileManager: fm)
             out.append(DiscoveredModel(
                 displayName: dir.lastPathComponent, path: std,
-                kind: Self.classify(directory: dir, fileManager: fm),
-                sizeBytes: Self.dirSize(dir, fm),
+                kind: kind,
+                // 只有模型候選才遞迴算大小（REV #4）：使用者指到的資料夾底下可能有海量無關檔案，
+                // 對非候選遞迴 enumerate 會把掃描拖到數秒起跳。
+                sizeBytes: kind == .unknown ? 0 : Self.dirSize(dir, fm),
                 tokenizerCached: Self.tokenizerCached(directory: dir,
                                                       hubDownloadBase: hubDownloadBase,
                                                       fileManager: fm)))

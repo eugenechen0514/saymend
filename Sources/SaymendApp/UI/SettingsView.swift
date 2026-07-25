@@ -82,6 +82,7 @@ struct GeneralSettingsTab: View {
     // 本機 WhisperKit（M9 §5）
     @State private var whisperLocalModelPath: URL?
     @State private var discoveredModels: [DiscoveredModel] = []
+    @State private var scanTask: Task<Void, Never>?
     // Provider 連通性測試（M7 §5）
     @State private var testTask: Task<Void, Never>?
     @State private var testReport: ProviderTestReport?
@@ -240,8 +241,11 @@ struct GeneralSettingsTab: View {
         if asrEngineKind == .whisperLocal {
             Section("本機 WhisperKit") {
                 whisperLocalModelPicker
+                whisperLocalSelectionControls
                 Button("選擇資料夾…") { chooseScanRoot() }
-                Text("模型與音訊皆不出機器，離線可用。掃描 WhisperKit 預設路徑與你加入的資料夾。")
+                // 誠實化（REV #2）：音訊與模型確實留在本機，但 tokenizer 由 WhisperKit 向 HF 取，
+                // 冷快取的機器首次仍會連一次網——不能一句「離線可用」帶過。
+                Text("音訊不出機器、模型在本機。若本機尚無此模型的 tokenizer 快取，首次使用會向 Hugging Face 取一次 tokenizer，之後即可離線。")
                     .font(.caption).foregroundStyle(.secondary)
                 whisperLocalIncompatibleRows
             }
@@ -260,9 +264,22 @@ struct GeneralSettingsTab: View {
             Picker("模型", selection: $whisperLocalModelPath) {
                 Text("未選擇").tag(URL?.none)
                 ForEach(usableModels, id: \.id) { m in
-                    Text("\(m.displayName)（\(Self.sizeText(m.sizeBytes))）").tag(URL?.some(m.path))
+                    Text(Self.modelLabel(m)).tag(URL?.some(m.path))
                 }
             }
+        }
+    }
+
+    /// 清除選擇（REV #9）：不論掃描結果是否為空都給得出口；選定模型已不在掃描結果時明說，
+    /// 但**不自動清除**——使用者的外接碟可能只是暫時沒插。
+    @ViewBuilder private var whisperLocalSelectionControls: some View {
+        if let selected = whisperLocalModelPath {
+            if !usableModels.contains(where: { $0.path == selected }) {
+                Label("先前選定的模型目前不在掃描結果中：\(selected.lastPathComponent)",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange).font(.caption)
+            }
+            Button("清除選擇") { whisperLocalModelPath = nil }
         }
     }
 
@@ -284,9 +301,24 @@ struct GeneralSettingsTab: View {
         discoveredModels.filter { $0.kind != .whisperKitUsable }
     }
 
+    /// 掃描搬到背景（REV #4）：dirSize 會遞迴走完整個模型目錄，留在 MainActor 上會凍住設定視窗。
+    /// 重掃時取消前一次，避免慢掃描的舊結果蓋掉新結果。
     private func rescanLocalModels() {
-        discoveredModels = WhisperKitModelScanner()
-            .scan(roots: WhisperKitModelScanner.defaultRoots + settings.whisperLocalScanRoots)
+        scanTask?.cancel()
+        let roots = WhisperKitModelScanner.defaultRoots + settings.whisperLocalScanRoots
+        scanTask = Task {
+            let found = await Task.detached(priority: .utility) {
+                WhisperKitModelScanner().scan(roots: roots)
+            }.value
+            guard !Task.isCancelled else { return }
+            discoveredModels = found
+        }
+    }
+
+    /// 模型列標籤：本機已有 tokenizer＝真離線；沒有則明示首次需連網（REV #2）
+    private static func modelLabel(_ m: DiscoveredModel) -> String {
+        let base = "\(m.displayName)（\(sizeText(m.sizeBytes))）"
+        return m.tokenizerCached ? base : base + "（首次需連網取 tokenizer）"
     }
 
     /// 「選擇資料夾…」：選到的目錄加入掃描根後重掃（選到模型目錄本身或其父目錄都可，M9 §4）

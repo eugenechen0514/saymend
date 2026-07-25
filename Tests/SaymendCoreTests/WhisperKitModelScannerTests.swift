@@ -158,6 +158,24 @@ private enum FX {
         #expect(r.first?.tokenizerCached == false)
     }
 
+    // MARK: - 大小只對模型候選計算（REV #4：非模型目錄遞迴 enumerate 會拖慢掃描）
+
+    @Test func sizeSkippedForNonModelDirectory() throws {
+        let root = try FX.temp()
+        let junk = root.appending(path: "not-a-model")
+        try FX.dir(junk)
+        try FX.file(junk.appending(path: "big.bin"), String(repeating: "x", count: 4096))
+        let r = WhisperKitModelScanner(fileManager: .default, hubDownloadBase: try FX.temp()).scan(roots: [root])
+        let entry = r.first { $0.displayName == "not-a-model" }
+        #expect(entry?.kind == .unknown)
+        #expect(entry?.sizeBytes == 0)
+    }
+    @Test func sizeComputedForModelCandidate() throws {
+        let m = try FX.whisperModel(try FX.temp(), "openai_whisper-tiny")
+        let r = WhisperKitModelScanner(fileManager: .default, hubDownloadBase: try FX.temp()).scan(roots: [m])
+        #expect((r.first?.sizeBytes ?? 0) > 0)
+    }
+
     @Test func scanClassifiesModelRootItself() throws {
         let m = try FX.whisperModel(try FX.temp(), "openai_whisper-tiny")
         let r = WhisperKitModelScanner().scan(roots: [m])
