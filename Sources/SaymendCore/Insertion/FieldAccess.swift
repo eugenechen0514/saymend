@@ -67,5 +67,12 @@ public enum RangeReplaceResult: Equatable, Sendable {
 public protocol SessionRangeReplacing: AnyObject {
     /// 只驗證不動手：.replaced＝驗證通過。
     func verifyRange(location: Int, expected: String) -> RangeReplaceResult
+    /// 替換後把游標收到新文字尾端（維持「session 即尾端、游標相對」的前提）。
+    /// 被替換的那段就是尾端時用這個。
     func replaceVerifiedRange(location: Int, expected: String, with newText: String) -> RangeReplaceResult
+    /// 同上，但替換後把游標放回「同一個相對位置」（見 `caretAfterReplacement`）。
+    /// session **中段**回溯改寫專用：後面還接著別的文字，游標若被收到被替換段落的尾端，
+    /// 後續串流插入會落在句子中間、直接毀文。
+    func replaceVerifiedRangePreservingCaret(location: Int, expected: String,
+                                             with newText: String) -> RangeReplaceResult
 }

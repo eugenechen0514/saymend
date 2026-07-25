@@ -17,12 +17,19 @@ final class FakeRangeReplacer: SessionRangeReplacing {
     var replaceResult: RangeReplaceResult = .replaced
     private(set) var verifyCalls: [(location: Int, expected: String)] = []
     private(set) var calls: [(location: Int, expected: String, new: String)] = []
+    /// 保留游標的替換單獨記帳——與 calls 混在一起就無法斷言「走的是新路徑而非舊路徑」
+    private(set) var preservingCaretCalls: [(location: Int, expected: String, new: String)] = []
     func verifyRange(location: Int, expected: String) -> RangeReplaceResult {
         verifyCalls.append((location, expected))
         return verifyResult
     }
     func replaceVerifiedRange(location: Int, expected: String, with newText: String) -> RangeReplaceResult {
         calls.append((location, expected, newText))
+        return replaceResult
+    }
+    func replaceVerifiedRangePreservingCaret(location: Int, expected: String,
+                                             with newText: String) -> RangeReplaceResult {
+        preservingCaretCalls.append((location, expected, newText))
         return replaceResult
     }
 }

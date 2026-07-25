@@ -201,12 +201,32 @@ final class AXInserter: SessionRangeReplacing {
     }
 
     func replaceVerifiedRange(location: Int, expected: String, with newText: String) -> RangeReplaceResult {
+        replace(location: location, expected: expected, with: newText, caret: .collapseToNewEnd)
+    }
+
+    func replaceVerifiedRangePreservingCaret(location: Int, expected: String,
+                                             with newText: String) -> RangeReplaceResult {
+        replace(location: location, expected: expected, with: newText, caret: .preserve)
+    }
+
+    /// 替換後游標怎麼放。兩種模式共用同一套「讀值校驗→設範圍→設文字」，
+    /// 差別只在最後一步——分開寫兩份實作遲早會漂移。
+    private enum CaretPolicy {
+        case collapseToNewEnd   // 被替換的就是尾端：收到新文字尾端
+        case preserve           // 中段改寫：把原游標放回同一個相對位置
+    }
+
+    private func replace(location: Int, expected: String, with newText: String,
+                         caret policy: CaretPolicy) -> RangeReplaceResult {
         guard let element = AXFieldAccess.focusedElement(),
               let value = AXFieldAccess.stringValue(of: element) else {
             return .unsupported
         }
         let check = Self.rangeMatches(value: value, location: location, expected: expected)
         guard check == .replaced else { return check }
+
+        // 必須在設 AXSelectedTextRange 之前讀——那個設值本身就會覆蓋掉游標位置
+        let caretBefore: Int? = policy == .preserve ? Self.caretLocation(of: element) : nil
 
         var range = CFRange(location: location, length: expected.utf16.count)
         guard let rangeValue = AXValueCreate(.cfRange, &range),
@@ -215,20 +235,41 @@ final class AXInserter: SessionRangeReplacing {
         }
         guard AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, newText as CFTypeRef) == .success else {
             // 選取已設但替換失敗：把游標收回範圍尾端，避免使用者下一鍵蓋掉選取
-            var caret = CFRange(location: location + expected.utf16.count, length: 0)
-            if let caretValue = AXValueCreate(.cfRange, &caret) {
-                _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, caretValue)
-            }
+            Self.setCaret(element, to: location + expected.utf16.count)
             return .unsupported
         }
         // 游標釘定（M3 設計裁決 2）：部分 App 替換後把整段新文字留成選取狀態，
-        // 後續串流鍵入會把剛替換的字吃掉；顯式 collapse 到新文字尾端，
-        // 讓「session 即尾端（游標相對）」恢復成立，M2 修正機械得以重用。失敗不影響替換結果。
-        var caret = CFRange(location: location + newText.utf16.count, length: 0)
+        // 後續串流鍵入會把剛替換的字吃掉，故一律顯式 collapse。失敗不影響替換結果。
+        // collapseToNewEnd＝新文字尾端，讓「session 即尾端（游標相對）」恢復成立，M2 修正機械得以重用。
+        // preserve＝依 caretAfterReplacement 平移；讀不到原游標就退回 collapse，不因此讓替換失敗。
+        let target: Int
+        switch policy {
+        case .collapseToNewEnd:
+            target = location + newText.utf16.count
+        case .preserve:
+            target = caretBefore.map {
+                caretAfterReplacement(current: $0, location: location,
+                                      oldLength: expected.utf16.count, newLength: newText.utf16.count)
+            } ?? (location + newText.utf16.count)
+        }
+        Self.setCaret(element, to: target)
+        return .replaced
+    }
+
+    private static func caretLocation(of element: AXUIElement) -> Int? {
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let rangeValue = rangeRef, CFGetTypeID(rangeValue) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) else { return nil }
+        return range.location
+    }
+
+    private static func setCaret(_ element: AXUIElement, to location: Int) {
+        var caret = CFRange(location: location, length: 0)
         if let caretValue = AXValueCreate(.cfRange, &caret) {
             _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, caretValue)
         }
-        return .replaced
     }
 
     /// value 的 [location, location+expected.utf16.count) 是否等於 expected
