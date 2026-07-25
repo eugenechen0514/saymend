@@ -152,6 +152,23 @@ private enum FX {
         let r = WhisperKitModelScanner(fileManager: .default, hubDownloadBase: try FX.temp()).scan(roots: [m])
         #expect(r.first?.tokenizerCached == true)
     }
+    /// 使用者把模型 symlink 成自己的別名時，tokenizer 判定要看解析後的真實目錄名，
+    /// 否則會對已快取的模型誤標「首次需連網」——正好違背誠實化的目的。
+    @Test func tokenizerCachedThroughSymlinkAlias() throws {
+        let base = try FX.temp()
+        let real = try FX.whisperModel(base, "openai_whisper-large-v3")
+        let hub = try FX.temp()
+        let repo = hub.appending(path: "models/openai/whisper-large-v3")
+        try FX.dir(repo); try FX.file(repo.appending(path: "tokenizer.json"), "{}")
+        let alias = base.appending(path: "whisperLocal")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: real)
+
+        let r = WhisperKitModelScanner(fileManager: .default, hubDownloadBase: hub).scan(roots: [alias])
+        #expect(r.count == 1)
+        #expect(r.first?.displayName == "whisperLocal")     // 顯示使用者自己取的名字
+        #expect(r.first?.tokenizerCached == true)           // 判定卻用解析後的真實名稱
+    }
+
     @Test func scanReportsTokenizerMissing() throws {
         let m = try FX.whisperModel(try FX.temp(), "openai_whisper-small")
         let r = WhisperKitModelScanner(fileManager: .default, hubDownloadBase: try FX.temp()).scan(roots: [m])

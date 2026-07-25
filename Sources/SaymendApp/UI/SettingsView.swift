@@ -306,7 +306,8 @@ struct GeneralSettingsTab: View {
     private func rescanLocalModels() {
         scanTask?.cancel()
         let roots = WhisperKitModelScanner.defaultRoots + settings.whisperLocalScanRoots
-        scanTask = Task {
+        // 外層標 @MainActor：Swift 6 的 Task 不繼承 MainActor，少了它就是在背景執行緒寫 @State。
+        scanTask = Task { @MainActor in
             let found = await Task.detached(priority: .utility) {
                 WhisperKitModelScanner().scan(roots: roots)
             }.value
@@ -329,8 +330,12 @@ struct GeneralSettingsTab: View {
         panel.allowsMultipleSelection = false
         panel.prompt = "加入"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        // 正規化後才比對與存檔：尾斜線／`.`／symlink 變體都是同一個根，不該重複累積
+        let root = url.resolvingSymlinksInPath().standardizedFileURL
         var roots = settings.whisperLocalScanRoots
-        if !roots.contains(url) { roots.append(url) }
+        if !roots.contains(where: { $0.resolvingSymlinksInPath().standardizedFileURL == root }) {
+            roots.append(root)
+        }
         settings.whisperLocalScanRoots = roots
         rescanLocalModels()
     }

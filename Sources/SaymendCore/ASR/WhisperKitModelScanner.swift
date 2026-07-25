@@ -158,7 +158,10 @@ public struct WhisperKitModelScanner {
                 // 只有模型候選才遞迴算大小（REV #4）：使用者指到的資料夾底下可能有海量無關檔案，
                 // 對非候選遞迴 enumerate 會把掃描拖到數秒起跳。
                 sizeBytes: kind == .unknown ? 0 : Self.dirSize(dir, fm),
-                tokenizerCached: Self.tokenizerCached(directory: dir,
+                // 用解析後的 std 而非 dir：使用者把模型 symlink 成別名時，variant 要從真實
+                // 目錄名反推，否則已快取的 tokenizer 會被誤標成「首次需連網」。
+                // displayName 仍用 dir.lastPathComponent，讓使用者看到自己取的名字。
+                tokenizerCached: Self.tokenizerCached(directory: std,
                                                       hubDownloadBase: hubDownloadBase,
                                                       fileManager: fm)))
         }
