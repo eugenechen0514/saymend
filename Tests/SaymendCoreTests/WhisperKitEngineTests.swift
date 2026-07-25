@@ -14,22 +14,39 @@ private final class FakeTranscriber: WhisperTranscribing, @unchecked Sendable {
     private(set) var seenLanguage: String?
     private(set) var preloadCount = 0
     private(set) var transcribeCount = 0
+    private(set) var unloadCount = 0
+    /// 回報給引擎的載入狀態（預設未載入）
+    var stateToReport: ModelLoadState = .idle
+
+    /// 同步的上鎖區。async 方法內直接 lock()/unlock() 在 Swift 6 語言模式是 error
+    /// （「unavailable from asynchronous contexts」），包成同步函式才乾淨。
+    private func sync<T>(_ body: () -> T) -> T {
+        lock.lock(); defer { lock.unlock() }
+        return body()
+    }
 
     func preload(modelPath: URL) async {
-        lock.lock(); preloadCount += 1; lock.unlock()
+        sync { preloadCount += 1; stateToReport = .loaded }
+    }
+    func state(modelPath: URL) async -> ModelLoadState {
+        sync { stateToReport }
+    }
+    func unload() async {
+        sync { unloadCount += 1; stateToReport = .idle }
     }
 
     func transcribe(modelPath: URL, samples: [Float], language: String,
                     promptPhrases: [String]) async throws -> String {
-        lock.lock()
-        seenPhrases = promptPhrases
-        seenModelPath = modelPath
-        seenLanguage = language
-        transcribeCount += 1
-        lock.unlock()
-        if let loadError { throw loadError }
-        if let transcribeError { throw transcribeError }
-        return result
+        let (load, fail, text) = sync { () -> (WhisperLoadError?, Error?, String) in
+            seenPhrases = promptPhrases
+            seenModelPath = modelPath
+            seenLanguage = language
+            transcribeCount += 1
+            return (loadError, transcribeError, result)
+        }
+        if let load { throw load }
+        if let fail { throw fail }
+        return text
     }
 }
 
@@ -42,15 +59,21 @@ private final class GatedFake: WhisperTranscribing, @unchecked Sendable {
     var errorAfterRelease: Error?
 
     func preload(modelPath: URL) async {}
+    func state(modelPath: URL) async -> ModelLoadState { .loaded }
+    func unload() async {}
 
     func transcribe(modelPath: URL, samples: [Float], language: String,
                     promptPhrases: [String]) async throws -> String {
         await withCheckedContinuation { c in
-            lock.lock(); cont = c; lock.unlock()
+            store(c)
             onEntered?()
         }
         if let errorAfterRelease { throw errorAfterRelease }
         return "遲到結果"
+    }
+
+    private func store(_ c: CheckedContinuation<Void, Never>) {
+        lock.lock(); cont = c; lock.unlock()
     }
 
     func release() {
@@ -121,6 +144,46 @@ private func engine(_ f: any WhisperTranscribing,
         e.contextualStrings = { ["術語A", "術語B"] }
         _ = await drive(e)
         #expect(f.seenPhrases == ["術語A", "術語B"])
+    }
+
+    // MARK: - 模型載入狀態（首次 ANE 編譯很久，不能折進「辨識中…」裝沒事）
+
+    @Test func reportsLoadingModelBeforeTranscribing() async {
+        let f = FakeTranscriber()                    // 預設 .idle＝未載入
+        let evs = await drive(engine(f))
+        guard let i = evs.firstIndex(of: .loadingModel), let j = evs.firstIndex(of: .transcribing) else {
+            Issue.record("預期先 .loadingModel 再 .transcribing，實得 \(evs)"); return
+        }
+        #expect(i < j)
+        #expect(f.preloadCount == 1)                 // 有先把模型載起來
+        #expect(evs.last == .finalized("整段本機辨識結果"))
+    }
+
+    @Test func skipsLoadingModelWhenAlreadyLoaded() async {
+        let f = FakeTranscriber()
+        f.stateToReport = .loaded
+        let evs = await drive(engine(f))
+        #expect(!evs.contains(.loadingModel))
+        #expect(evs.contains(.transcribing))
+        #expect(f.preloadCount == 0)                 // 已載入就不必再 preload
+    }
+
+    @Test func engineStateFollowsTranscriber() async {
+        let f = FakeTranscriber()
+        f.stateToReport = .loaded
+        #expect(await engine(f).state() == .loaded)
+    }
+
+    @Test func engineStateIsIdleWithoutSelectedModel() async {
+        let f = FakeTranscriber()
+        f.stateToReport = .loaded
+        #expect(await engine(f, path: nil).state() == .idle)
+    }
+
+    @Test func engineUnloadForwards() async {
+        let f = FakeTranscriber()
+        await engine(f).unload()
+        #expect(f.unloadCount == 1)
     }
 
     @Test func preloadForwards() async {

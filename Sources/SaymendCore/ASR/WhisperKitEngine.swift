@@ -12,6 +12,10 @@ public struct WhisperLoadError: Error, Equatable {
 public protocol WhisperTranscribing: Sendable {
     /// 背景預載指定模型（best-effort，錯誤吞掉）。
     func preload(modelPath: URL) async
+    /// 指定模型目前的載入狀態（供 UI 顯示與引擎決定要不要先報「載入模型中…」）。
+    func state(modelPath: URL) async -> ModelLoadState
+    /// 卸載目前模型，釋放記憶體。
+    func unload() async
     /// 確保指定模型已載入後，對 16k mono Float 批次辨識。promptPhrases 由實作 tokenize。
     /// 載入失敗擲 `WhisperLoadError`；辨識失敗擲其他 error。
     func transcribe(modelPath: URL, samples: [Float], language: String,
@@ -49,6 +53,17 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
     public func preload() async {
         guard let path = configProvider().selectedModelPath else { return }
         await transcriber.preload(modelPath: path)
+    }
+
+    /// 目前選定模型的載入狀態；未選模型＝`.idle`。
+    public func state() async -> ModelLoadState {
+        guard let path = configProvider().selectedModelPath else { return .idle }
+        return await transcriber.state(modelPath: path)
+    }
+
+    /// 卸載已載入的模型，釋放記憶體。
+    public func unload() async {
+        await transcriber.unload()
     }
 
     public func start(audio: AsyncStream<AudioChunk>, localeIdentifier: String) -> AsyncStream<TranscriptEvent> {
@@ -104,7 +119,15 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
             return
         }
 
-        // 音訊收完、開始辨識；模型載入折進 .transcribing（不新增事件型別，HUD 零改動）
+        // 模型尚未載入就先報「載入模型中…」再載：首次載入含 ANE 編譯，實測 large-v3-turbo
+        // 可達數分鐘，全折進「辨識中…」會讓使用者以為當掉（實機回報）。
+        if await transcriber.state(modelPath: modelPath) != .loaded {
+            continuation.yield(.loadingModel)
+            await transcriber.preload(modelPath: modelPath)
+            if Task.isCancelled { continuation.finish(); return }
+        }
+
+        // 音訊收完、模型就緒，開始辨識
         continuation.yield(.transcribing)
 
         // 屬性讀取＋closure 呼叫都在 MainActor 上，理由同 WhisperRemoteEngine.biasPrompt() :148-155

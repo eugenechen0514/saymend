@@ -1648,6 +1648,17 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 }
 
 @MainActor
+@Test func loadingModelEventPresentsLoadingModelHUD() async {
+    let polisher = GatedIntentService()
+    let (c, _, _, _, _, hud) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.loadingModel, at: 11.0)
+    #expect(hud.states.last == .loadingModel)        // 首次載入很久，要與「辨識中…」分得開
+    #expect(c.phase != .idle)                        // 同樣只是顯示狀態，不動 session
+}
+
+@MainActor
 @Test func streamEndAfterFailedIsIgnored() async {
     // failed 已封存 → phase idle → 隨後的 asrStreamEnded 被相位守衛冪等忽略、不進 lingering
     let polisher = GatedIntentService()

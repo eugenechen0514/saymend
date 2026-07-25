@@ -13,6 +13,8 @@ public enum HUDState: Equatable, Sendable {
     case lingering
     /// M8：批次 ASR 引擎等待辨識結果中（spec §5.2）
     case transcribing
+    /// M9：本機引擎載入模型中（首次含 ANE 編譯，可能數分鐘）
+    case loadingModel
     case notice(String)
     /// 最近異動的 inline diff（規格 §3.5 降級）：overlay 不可用時在 HUD 呈現
     case diff([DiffWindow])

@@ -50,6 +50,14 @@ public final class WhisperKitTranscriber: WhisperTranscribing {
         await coordinator.preload(modelPath)
     }
 
+    public func state(modelPath: URL) async -> ModelLoadState {
+        await coordinator.state(for: modelPath)
+    }
+
+    public func unload() async {
+        await coordinator.unload()
+    }
+
     public func transcribe(modelPath: URL, samples: [Float], language: String,
                            promptPhrases: [String]) async throws -> String {
         // 載入與辨識為單一原子呼叫：擲 WhisperLoadError＝載入失敗，其他 error＝辨識失敗

@@ -60,6 +60,12 @@ struct HUDView: View {
                 Text("辨識中…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            case .loadingModel:
+                Image(systemName: "hourglass")
+                    .foregroundStyle(.secondary)
+                Text("載入模型中…（首次較久）")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             case .notice(let message):
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)

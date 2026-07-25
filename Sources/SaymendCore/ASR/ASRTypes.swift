@@ -6,6 +6,9 @@ public enum TranscriptEvent: Equatable, Sendable {
     case finalized(String)
     /// M8：批次引擎已收完音訊、等待辨識結果（僅 WhisperRemoteEngine 會吐）
     case transcribing
+    /// M9：本機引擎正在載入模型（首次含 ANE 編譯，實測 large-v3-turbo 可達數分鐘）。
+    /// 不折進 .transcribing——折了會讓使用者以為「辨識中…」卡死。
+    case loadingModel
     /// M8：辨識失敗，不上屏、不入帳本（僅 WhisperRemoteEngine 會吐）
     case failed(reason: String)
 }

@@ -292,6 +292,8 @@ public final class DictationController {
             }
         case .transcribing:
             hud.present(.transcribing)          // 批次引擎等待結果中；不動 ledger、不動欄位
+        case .loadingModel:
+            hud.present(.loadingModel)          // 本機模型載入中（首次較久）；同樣不動 ledger、不動欄位
         case .failed(let reason):
             handleASRFailure(reason: reason)
         }
