@@ -17,6 +17,8 @@ private final class FakeTranscriber: WhisperTranscribing, @unchecked Sendable {
     private(set) var unloadCount = 0
     /// 回報給引擎的載入狀態（預設未載入）
     var stateToReport: ModelLoadState = .idle
+    /// preload 是否真的把模型載起來（false＝模擬 coordinator 內 try? 吞掉的載入失敗）
+    var preloadSucceeds = true
 
     /// 同步的上鎖區。async 方法內直接 lock()/unlock() 在 Swift 6 語言模式是 error
     /// （「unavailable from asynchronous contexts」），包成同步函式才乾淨。
@@ -26,7 +28,7 @@ private final class FakeTranscriber: WhisperTranscribing, @unchecked Sendable {
     }
 
     func preload(modelPath: URL) async {
-        sync { preloadCount += 1; stateToReport = .loaded }
+        sync { preloadCount += 1; if preloadSucceeds { stateToReport = .loaded } }
     }
     func state(modelPath: URL) async -> ModelLoadState {
         sync { stateToReport }
@@ -166,6 +168,18 @@ private func engine(_ f: any WhisperTranscribing,
         #expect(!evs.contains(.loadingModel))
         #expect(evs.contains(.transcribing))
         #expect(f.preloadCount == 0)                 // 已載入就不必再 preload
+    }
+
+    /// preload 是 best-effort（coordinator 內以 try? 吞錯），載不起來時不得帶著沒載入的模型
+    /// 硬進 transcribe——那會再觸發一次 ANE 編譯（large 數分鐘），還會先誤顯「辨識中…」
+    @Test func failsWhenPreloadDoesNotLoadModel() async {
+        let f = FakeTranscriber()
+        f.preloadSucceeds = false
+        let evs = await drive(engine(f))
+        #expect(evs.contains(.loadingModel))
+        #expect(!evs.contains(.transcribing))
+        #expect(evs.last == .failed(reason: "模型載入失敗"))
+        #expect(f.transcribeCount == 0)
     }
 
     @Test func engineStateFollowsTranscriber() async {

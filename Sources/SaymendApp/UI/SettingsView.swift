@@ -275,8 +275,9 @@ struct GeneralSettingsTab: View {
         HStack {
             Button("載入") { whisperLocalPreload(); refreshLocalModelState() }
                 .disabled(whisperLocalModelPath == nil || localModelState != .idle)
+            // 載入中也可按：large 首次 ANE 編譯要數分鐘，使用者得有中斷的出口
             Button("卸載") { whisperLocalUnload(); refreshLocalModelState() }
-                .disabled(localModelState != .loaded)
+                .disabled(localModelState == .idle)
             if localModelState == .loading { ProgressView().controlSize(.small) }
         }
     }

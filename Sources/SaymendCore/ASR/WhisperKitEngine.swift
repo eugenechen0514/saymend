@@ -125,6 +125,14 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
             continuation.yield(.loadingModel)
             await transcriber.preload(modelPath: modelPath)
             if Task.isCancelled { continuation.finish(); return }
+            // preload 是 best-effort（coordinator 內以 try? 吞掉錯誤），得回頭確認模型真的載起來了。
+            // 少了這一關，載入失敗會被帶進 transcribe 觸發第二次載入＝再等一輪 ANE 編譯
+            // （large 數分鐘），期間還誤顯「辨識中…」，最後才吐失敗。
+            guard await transcriber.state(modelPath: modelPath) == .loaded else {
+                continuation.yield(.failed(reason: "模型載入失敗"))
+                continuation.finish()
+                return
+            }
         }
 
         // 音訊收完、模型就緒，開始辨識
