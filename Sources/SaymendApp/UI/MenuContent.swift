@@ -21,8 +21,11 @@ struct MenuContent: View {
         }
         CoreModeMenu(delegate: delegate)      // M5 新增
         SettingsLink { Text("設定…") }
+        #if DEBUG
+        // 這兩顆會把測試字串打進當下聚焦的任何欄位，正式版不得出現在選單
         Button("測試插入（2 秒後打進聚焦欄位）") { delegate.debugInsert() }
         Button("測試替換（插入後 1 秒潤飾替換）") { delegate.debugReplace() }
+        #endif
         Divider()
         Button("結束 Saymend") { NSApp.terminate(nil) }
     }
