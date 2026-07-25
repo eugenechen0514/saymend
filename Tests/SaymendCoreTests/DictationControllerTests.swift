@@ -101,7 +101,29 @@ import Testing
     polisher.release()
     await c.lastIntentTask?.value
     #expect(!key.ops.contains(.delete(3)))        // 不得替換
-    #expect(hud.states.contains(.notice("未潤飾")))
+    // 成因要說得出口：這是「尾端已前進」，不是凍結、也不是寫入失敗（M10-C #5）
+    #expect(hud.states.contains(.notice(insertSkipNotice(.tailAdvanced))))
+}
+
+@MainActor
+@Test func frozenMidPolishReportsItsOwnCause() async {
+    // 凍結發生在「潤飾已派發、尚未回來」的窗口內，才會走到 applyNewContent 的凍結守衛。
+    // （凍結早於派發時走的是別條路——finalized 的剪貼簿急救。）
+    let polisher = GatedIntentService()
+    polisher.gated = true
+    polisher.outcome = .newContent("你好。")
+    let (c, _, _, key, _, hud) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("呃你好"), at: 11.0)
+    c.tick(at: 12.6)                          // 潤飾發出（被 gate 卡住）
+    c.userActivityDetected(at: 12.8)          // 在途時使用者手動打字 → 凍結
+    polisher.release()
+    await c.lastIntentTask?.value
+    #expect(!key.ops.contains(.delete(3)))    // 凍結後不得改寫欄位
+    // 成因要說得出口，且不得與「尾端已前進」共用同一句（M10-C #5）
+    #expect(hud.states.contains(.notice(insertSkipNotice(.frozen))))
+    #expect(!hud.states.contains(.notice(insertSkipNotice(.tailAdvanced))))
 }
 
 @MainActor

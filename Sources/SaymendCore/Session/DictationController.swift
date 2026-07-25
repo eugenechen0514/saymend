@@ -616,7 +616,7 @@ public final class DictationController {
     private func applyNewContent(_ text: String, snapshot: InsertionCoordinator.UtteranceSnapshot) {
         guard !ledger.frozen else {
             recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: snapshot.text)
-            hud.present(.notice("未潤飾"))
+            hud.present(.notice(insertSkipNotice(.frozen)))
             return
         }
         let old = ledger.sessionText + snapshot.text   // 替換前的欄位鏡像（raw 已上屏）
@@ -627,12 +627,12 @@ public final class DictationController {
             } else {
                 recordInsertEvent(kind: "insertSkipped", classification: "counterMismatch",
                                   utteranceText: snapshot.text)
-                keepRaw(snapshot, notice: "未潤飾")
+                keepRaw(snapshot, notice: insertSkipNotice(.tailAdvanced))
             }
         } catch InserterError.replaceFailedRestored {
             recordInsertEvent(kind: "insertFailed", classification: "replaceFailedRestored",
                               utteranceText: snapshot.text)
-            keepRaw(snapshot, notice: "未潤飾")
+            keepRaw(snapshot, notice: insertSkipNotice(.writeFailed))
         } catch InserterError.lostText(let original) {
             recordInsertEvent(kind: "insertFailed", classification: "lostText",
                               utteranceText: snapshot.text)
@@ -641,7 +641,7 @@ public final class DictationController {
         } catch {
             recordInsertEvent(kind: "insertFailed", classification: "unknown",
                               utteranceText: snapshot.text, detail: "\(error)")
-            keepRaw(snapshot, notice: "未潤飾")
+            keepRaw(snapshot, notice: insertSkipNotice(.unknown))
         }
     }
 
