@@ -111,6 +111,9 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
         let phrases = await MainActor.run { [weak self] in self?.contextualStrings?() ?? [] }
         let samples = accumulator.floatSamples()
         let language = WhisperRemoteEngine.languageCode(from: localeIdentifier)
+        // 偏置讀取往返 MainActor 期間可能被按 Esc：已取消就別再進辨識（本機辨識吃 CPU/ANE，
+        // 白跑一次比什麼都貴）
+        if Task.isCancelled { continuation.finish(); return }
 
         do {
             let raw = try await transcriber.transcribe(modelPath: modelPath, samples: samples,
@@ -126,11 +129,10 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
             continuation.finish()
         } catch is CancellationError {
             continuation.finish()
-        } catch is WhisperLoadError {
-            continuation.yield(.failed(reason: "模型載入失敗"))
-            continuation.finish()
         } catch {
-            continuation.yield(.failed(reason: "辨識失敗"))
+            // 取消不是失敗：被 Esc 打斷後才擲出的 error 不得變成使用者看得到的失敗訊息
+            if Task.isCancelled { continuation.finish(); return }
+            continuation.yield(.failed(reason: error is WhisperLoadError ? "模型載入失敗" : "辨識失敗"))
             continuation.finish()
         }
     }

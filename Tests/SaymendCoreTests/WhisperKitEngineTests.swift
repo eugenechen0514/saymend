@@ -13,6 +13,7 @@ private final class FakeTranscriber: WhisperTranscribing, @unchecked Sendable {
     private(set) var seenModelPath: URL?
     private(set) var seenLanguage: String?
     private(set) var preloadCount = 0
+    private(set) var transcribeCount = 0
 
     func preload(modelPath: URL) async {
         lock.lock(); preloadCount += 1; lock.unlock()
@@ -24,6 +25,7 @@ private final class FakeTranscriber: WhisperTranscribing, @unchecked Sendable {
         seenPhrases = promptPhrases
         seenModelPath = modelPath
         seenLanguage = language
+        transcribeCount += 1
         lock.unlock()
         if let loadError { throw loadError }
         if let transcribeError { throw transcribeError }
@@ -36,6 +38,8 @@ private final class GatedFake: WhisperTranscribing, @unchecked Sendable {
     let lock = NSLock()
     private var cont: CheckedContinuation<Void, Never>?
     var onEntered: (@Sendable () -> Void)?
+    /// 放行後改以擲錯收場（驗取消時不得吐 .failed）
+    var errorAfterRelease: Error?
 
     func preload(modelPath: URL) async {}
 
@@ -45,6 +49,7 @@ private final class GatedFake: WhisperTranscribing, @unchecked Sendable {
             lock.lock(); cont = c; lock.unlock()
             onEntered?()
         }
+        if let errorAfterRelease { throw errorAfterRelease }
         return "遲到結果"
     }
 
@@ -122,6 +127,39 @@ private func engine(_ f: any WhisperTranscribing,
         let f = FakeTranscriber()
         await engine(f).preload()
         #expect(f.preloadCount == 1)
+    }
+
+    /// REV #3：偏置讀取（MainActor 往返）期間被取消 → 根本不該進辨識
+    @Test func cancelBeforeTranscribeSkipsTranscriber() async {
+        let f = FakeTranscriber()
+        let e = engine(f)
+        e.contextualStrings = { [weak e] in e?.cancel(); return [] }   // 讀偏置的當下取消
+        let evs = await drive(e)
+        #expect(f.transcribeCount == 0)
+        #expect(!evs.contains { if case .finalized = $0 { return true }; return false })
+    }
+
+    /// REV #3：辨識中被取消，之後才擲錯 → 不得吐 .failed（取消不是失敗）
+    @Test func cancelDuringTranscribeSuppressesFailure() async {
+        let f = GatedFake()
+        f.errorAfterRelease = NSError(domain: "x", code: 1)
+        let e = engine(f)
+        let (entered, enteredC) = AsyncStream.makeStream(of: Void.self)
+        f.onEntered = { enteredC.yield(()) }
+        let (st, c) = AsyncStream.makeStream(of: AudioChunk.self)
+        c.yield(chunk16k())
+        c.finish()
+        let collector = Task {
+            var evs: [TranscriptEvent] = []
+            for await ev in e.start(audio: st, localeIdentifier: "zh-TW") { evs.append(ev) }
+            return evs
+        }
+        var it = entered.makeAsyncIterator()
+        _ = await it.next()
+        e.cancel()
+        f.release()
+        let evs = await collector.value
+        #expect(!evs.contains { if case .failed = $0 { return true }; return false })
     }
 
     @Test func cancelDuringTranscribeEmitsNoFinalized() async {
