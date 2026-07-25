@@ -77,9 +77,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         transcriber: WhisperKitTranscriber(),
         configProvider: { [settings] in settings.whisperLocalConfig() })
 
+    /// 前一次預載：換模型時取消它（best-effort）。連點多個模型時不讓過期的預載繼續佔載入排隊。
+    private var whisperLocalPreloadTask: Task<Void, Never>?
+
     /// 背景預載目前選定的本機模型（切到本機引擎／換模型時呼叫），讓第一句不必等 3GB 載入。
     func preloadWhisperLocal() {
-        Task { await whisperLocalEngine.preload() }
+        whisperLocalPreloadTask?.cancel()
+        whisperLocalPreloadTask = Task { [whisperLocalEngine] in await whisperLocalEngine.preload() }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
