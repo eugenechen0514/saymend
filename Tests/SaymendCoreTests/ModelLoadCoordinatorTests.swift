@@ -72,6 +72,77 @@ private actor Gate {
         #expect(await ct.v == 2)
     }
 
+    // MARK: - 載入狀態與卸載（M9 追加：首次 ANE 編譯很久，UI 要能如實顯示與釋放）
+
+    @Test func stateIsLoadedAfterLoad() async throws {
+        let co = ModelLoadCoordinator<String> { $0.lastPathComponent }
+        let u = URL(filePath: "/m/a")
+        #expect(await co.state(for: u) == .idle)
+        _ = try await co.model(for: u)
+        #expect(await co.state(for: u) == .loaded)
+    }
+
+    @Test func stateIsLoadingWhileInFlight() async throws {
+        let entered = Gate(), release = Gate()
+        let co = ModelLoadCoordinator<String> { u in
+            await entered.open(); await release.wait(); return u.lastPathComponent
+        }
+        let u = URL(filePath: "/m/a")
+        let t = Task { try await co.model(for: u) }
+        await entered.wait()
+        #expect(await co.state(for: u) == .loading)
+        await release.open()
+        _ = try await t.value
+        #expect(await co.state(for: u) == .loaded)
+    }
+
+    @Test func unloadReleasesModelAndReloadsOnDemand() async throws {
+        let ct = Counter()
+        let co = ModelLoadCoordinator<String> { u in await ct.inc(); return u.lastPathComponent }
+        let u = URL(filePath: "/m/a")
+        _ = try await co.model(for: u)
+        await co.unload()
+        #expect(await co.state(for: u) == .idle)
+        _ = try await co.model(for: u)                 // 已釋放＝下次要重載
+        #expect(await ct.v == 2)
+    }
+
+    /// unload 當下的 in-flight 載入完成後，不得把模型又塞回 current（epoch 防呆）
+    @Test func unloadDuringInFlightPreventsCacheWriteBack() async throws {
+        let entered = Gate(), release = Gate()
+        let co = ModelLoadCoordinator<String> { u in
+            await entered.open(); await release.wait(); return u.lastPathComponent
+        }
+        let u = URL(filePath: "/m/a")
+        let t = Task { try await co.model(for: u) }
+        await entered.wait()
+        await co.unload()
+        await release.open()
+        _ = try? await t.value
+        #expect(await co.state(for: u) == .idle)
+    }
+
+    /// unload 不得破壞序列化不變式：卸載當下仍在跑的載入與新載入不可並發（峰值仍為 1）
+    @Test func unloadKeepsSerialization() async throws {
+        let pc = PeakCounter()
+        let entered = Gate(), release = Gate()
+        let co = ModelLoadCoordinator<String> { u in
+            await pc.enter()
+            if u.lastPathComponent == "a" { await entered.open(); await release.wait() }
+            await pc.leave()
+            return u.lastPathComponent
+        }
+        let ta = Task { try await co.model(for: URL(filePath: "/m/a")) }
+        await entered.wait()
+        await co.unload()
+        let tb = Task { try await co.model(for: URL(filePath: "/m/b")) }
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        await release.open()
+        _ = try? await ta.value
+        _ = try? await tb.value
+        #expect(await pc.peak == 1)
+    }
+
     /// REV #8：symlink 與實體路徑是同一個模型，不得各載一份
     @Test func symlinkedPathSharesCacheKey() async throws {
         let fm = FileManager.default
