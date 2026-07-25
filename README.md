@@ -13,7 +13,8 @@ macOS 語音輸入工具：說完即成稿，改稿用嘴不用滑鼠（M1 為�
     ./Scripts/make-app.sh
     open build/Saymend.app
 
-首次啟動請允許：輔助使用、麥克風、語音辨識。ad-hoc 簽章重建後可能需重新授權輔助使用。
+首次啟動請允許：輔助使用、麥克風、語音辨識。打包會以本機的 Apple Development 憑證簽章——
+簽章身分穩定，故重新建置後既有的輔助使用授權會保留（ad-hoc 簽章每次重簽都會讓授權失效，本專案不用）。
 
 ## 使用
 - 按住「右 Cmd」說話，放開即潤飾上屏；短按切換鎖定聽寫，再短按結束。
@@ -40,6 +41,10 @@ Saymend 的 JSON 輸出格式、意圖分類（new_content／edit_command／undo
 ## 開發
     swift test          # 核心邏輯全部單元測試
     swift build         # 編譯
+
+## 授權
+
+MIT，見 [LICENSE](LICENSE)。
 
 ## 靈感來源
 
