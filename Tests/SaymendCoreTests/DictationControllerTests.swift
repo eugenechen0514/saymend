@@ -105,6 +105,117 @@ import Testing
     #expect(hud.states.contains(.notice(insertSkipNotice(.tailAdvanced))))
 }
 
+// MARK: - 回收晚到的潤飾（M10-C #7）
+
+@MainActor
+@Test func lateArrivingPolishIsRecoveredInPlace() async {
+    // 連續講話的主場景：第一句還在潤飾，第二句已經落地 → 尾端前進。
+    // 過去這裡直接放棄潤飾、螢幕留原始轉錄；現在改以絕對範圍就地回收。
+    let polisher = GatedIntentService()
+    polisher.gated = true
+    polisher.outcome = .newContent("第一段。")
+    let ax = FakeRangeReplacer()
+    let field = FakeFieldReader()
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 0)
+    let history = FakeHistory()
+    let (c, _, _, key, _, hud) = makeController(polisher: polisher, rangeReplacer: ax,
+                                                fieldReader: field, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("第一段"), at: 11.0)
+    c.tick(at: 12.6)                                    // 第一段的潤飾發出（被 gate 卡住）
+    c.handleTranscript(.finalized("第二段"), at: 13.0)    // 尾端前進
+    polisher.release()
+    await c.lastIntentTask?.value
+
+    // 位置＝session 錨點 + 已定稿文字長度（此時尚無定稿，故為 0）
+    #expect(ax.preservingCaretCalls.count == 1)
+    #expect(ax.preservingCaretCalls.first?.location == 0)
+    #expect(ax.preservingCaretCalls.first?.expected == "第一段")
+    #expect(ax.preservingCaretCalls.first?.new == "第一段。")
+    #expect(!key.ops.contains(.delete(3)))              // 第二段一個字都不能被動到
+    #expect(!hud.states.contains(.notice(insertSkipNotice(.tailAdvanced))))
+    #expect(history.exchanges.contains { $0.outcomeKind == "insertRecovered" })
+    #expect(history.exchanges.contains { $0.outcomeText?.contains("第一段。") == true })
+    #expect(c.ledger.sessionText == "第一段。")            // 帳本收的是潤飾後的版本
+}
+
+@MainActor
+@Test func recoveredLocationCountsAnchorPlusCommittedText() async {
+    // 位置公式的兩個項都要有牙：錨點刻意非 0，且回收的那句前面已經有一句定稿文字。
+    // （若錨點是 0、前面又沒有定稿，location 會剛好等於 0，公式被拿掉也測不出來。）
+    let polisher = GatedIntentService()
+    polisher.outcomeByRaw = ["第一段": .newContent("第一段。"), "第二段": .newContent("第二段。")]
+    polisher.gatedRaws = ["第二段"]                       // 只卡第二句
+    let ax = FakeRangeReplacer()
+    let field = FakeFieldReader()
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 100)
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, rangeReplacer: ax, fieldReader: field)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("第一段"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value                        // 第一段正常落地 → 帳本 = "第一段。"（4 個 UTF-16）
+    #expect(c.ledger.sessionText == "第一段。")
+
+    c.handleTranscript(.finalized("第二段"), at: 13.0)
+    c.tick(at: 14.6)                                     // 第二段的潤飾發出（被 gate 卡住）
+    c.handleTranscript(.finalized("第三段"), at: 15.0)     // 尾端前進
+    polisher.release()
+    await c.lastIntentTask?.value
+
+    #expect(ax.preservingCaretCalls.count == 1)
+    #expect(ax.preservingCaretCalls.first?.location == 104)   // 100（錨點）+ 4（已定稿）
+    #expect(ax.preservingCaretCalls.first?.expected == "第二段")
+    #expect(c.ledger.sessionText == "第一段。第二段。")
+}
+
+@MainActor
+@Test func lateArrivingPolishKeepsRawWhenFieldChangedUnderneath() async {
+    // 潤飾在途時使用者手動改了那一句 → 校驗不符 → 放棄回收，原文與使用者的修改都留著
+    let polisher = GatedIntentService()
+    polisher.gated = true
+    polisher.outcome = .newContent("第一段。")
+    let ax = FakeRangeReplacer()
+    ax.verifyResult = .mismatch
+    let field = FakeFieldReader()
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 0)
+    let history = FakeHistory()
+    let (c, _, _, _, _, hud) = makeController(polisher: polisher, rangeReplacer: ax,
+                                              fieldReader: field, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("第一段"), at: 11.0)
+    c.tick(at: 12.6)
+    c.handleTranscript(.finalized("第二段"), at: 13.0)
+    polisher.release()
+    await c.lastIntentTask?.value
+
+    #expect(ax.preservingCaretCalls.isEmpty)            // 校驗不過＝一個字都不准寫
+    #expect(hud.states.contains(.notice(insertSkipNotice(.tailAdvanced))))
+    #expect(history.exchanges.contains { $0.outcomeText == "counterMismatch" })
+    #expect(!history.exchanges.contains { $0.outcomeKind == "insertRecovered" })
+}
+
+@MainActor
+@Test func lateArrivingPolishKeepsRawWithoutAXCapability() async {
+    // 無 AX 範圍能力的 App：維持現狀保留原文，但要說得出原因（不做退格重打，見 spec §2.2）
+    let polisher = GatedIntentService()
+    polisher.gated = true
+    polisher.outcome = .newContent("第一段。")
+    let (c, _, _, key, _, hud) = makeController(polisher: polisher)   // rangeReplacer: nil
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("第一段"), at: 11.0)
+    c.tick(at: 12.6)
+    c.handleTranscript(.finalized("第二段"), at: 13.0)
+    polisher.release()
+    await c.lastIntentTask?.value
+
+    #expect(!key.ops.contains(.delete(3)))
+    #expect(hud.states.contains(.notice(insertSkipNotice(.tailAdvanced))))
+}
+
 @MainActor
 @Test func frozenMidPolishReportsItsOwnCause() async {
     // 凍結發生在「潤飾已派發、尚未回來」的窗口內，才會走到 applyNewContent 的凍結守衛。

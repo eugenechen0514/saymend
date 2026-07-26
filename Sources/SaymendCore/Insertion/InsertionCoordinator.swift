@@ -14,6 +14,14 @@ public final class InsertionCoordinator {
         case fieldMismatch     // AX 校驗不符（外力改動欄位）：放棄且呼叫端應凍結
     }
 
+    /// 過期尾端回收結果（M10-C）。與另外兩個 outcome 型別分開：語意不同——
+    /// 這條路徑失敗時原文完好留在螢幕上，呼叫端只需保留原文並說明原因，不必凍結、也無需急救。
+    public enum StaleTailOutcome: Equatable {
+        case replaced
+        case mismatch       // 欄位已被外力改動，或兩步之間變動：放棄，保留原文
+        case unsupported    // 無 AX 範圍能力：放棄，保留原文
+    }
+
     /// 選取替換結果（規格 §3.6）。與 SessionReplaceOutcome 分開：語意不同（selectionChanged
     /// ＝放棄且結果進 HUD 供複製；fieldMismatch＝凍結）。
     public enum SelectionReplaceOutcome: Equatable {
@@ -107,6 +115,31 @@ public final class InsertionCoordinator {
                 return .replaced
             }
             return .selectionChanged
+        }
+    }
+
+    /// 回收「已不在尾端」的潤飾（M10-C）。
+    /// A 後面已經接了 B，退格重打會從游標往回刪、吃掉 B 的字，故 replaceTail 擋下它是對的；
+    /// 這裡改以絕對範圍帶校驗替換，並保留游標（後續串流插入才不會落在句子中間）。
+    /// 校驗不符＝欄位被外力改動，放棄（鐵律：不覆蓋使用者的修改）。
+    /// **刻意不遞增 insertCounter**：中段改寫沒有改變「誰是尾端」，遞增會讓後續句子的快照
+    /// 對不上而被迫也走這條慢路徑——它們其實仍在尾端，正常的 replaceTail 就能處理。
+    public func replaceStaleTail(_ snap: UtteranceSnapshot,
+                                 at location: Int,
+                                 with newText: String) -> StaleTailOutcome {
+        guard let ax = rangeReplacer else { return .unsupported }
+        // 零長度快照沒有可校驗的錨——那樣的「替換」等於在算出來的位置盲插，寧可放棄
+        guard !snap.text.isEmpty else { return .mismatch }
+        switch ax.verifyRange(location: location, expected: snap.text) {
+        case .unsupported: return .unsupported
+        case .mismatch:    return .mismatch
+        case .replaced:
+            if ax.replaceVerifiedRangePreservingCaret(location: location,
+                                                      expected: snap.text,
+                                                      with: newText) == .replaced {
+                return .replaced
+            }
+            return .mismatch   // 兩步之間變動：放棄，原文留在螢幕上
         }
     }
 

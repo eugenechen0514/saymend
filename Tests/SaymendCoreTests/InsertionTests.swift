@@ -320,6 +320,77 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     #expect(key.ops == [.insert("指令")])              // 除最初插入外，零 keystroke 收尾
 }
 
+// MARK: - 回收晚到的潤飾（M10-C #7）
+// 前一句已不在尾端（後面接了下一句），退格重打會吃掉後面那句的字。
+// 改以絕對範圍帶校驗替換，並保留游標。
+
+@Test func staleTailIsRecoveredInPlace() throws {
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let ax = FakeRangeReplacer()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 100)
+    try c.insertFinalized("第一段")
+    let snap = c.snapshotAndBeginNext()
+    try c.insertFinalized("第二段")                     // 尾端前進 → 正常 replaceTail 已不可用
+    #expect(try !c.replaceTail(snap, with: "第一段。"))   // 前提：確實走不了快路徑
+
+    let outcome = c.replaceStaleTail(snap, at: 40, with: "第一段。")
+    #expect(outcome == .replaced)
+    #expect(ax.preservingCaretCalls.count == 1)
+    #expect(ax.preservingCaretCalls[0].location == 40)
+    #expect(ax.preservingCaretCalls[0].expected == "第一段")
+    #expect(ax.preservingCaretCalls[0].new == "第一段。")
+    #expect(ax.calls.isEmpty)                           // 不得走會把游標收到中段的舊路徑
+    #expect(key.ops == [.insert("第一段"), .insert("第二段")])   // 零退格：後面那句不能被動到
+}
+
+@Test func staleTailAbortsWhenFieldChangedUnderneath() throws {
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let ax = FakeRangeReplacer()
+    ax.verifyResult = .mismatch                          // 使用者中途手改了該句
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 100)
+    try c.insertFinalized("第一段")
+    let snap = c.snapshotAndBeginNext()
+
+    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .mismatch)
+    #expect(ax.preservingCaretCalls.isEmpty)             // 鐵律：校驗不過就一個字都不准寫
+}
+
+@Test func staleTailUnsupportedWithoutRangeReplacer() throws {
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: nil)
+    try c.insertFinalized("第一段")
+    let snap = c.snapshotAndBeginNext()
+    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .unsupported)
+}
+
+@Test func staleTailAbortsWhenReplaceFailsBetweenTheTwoSteps() throws {
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let ax = FakeRangeReplacer()
+    ax.replaceResult = .mismatch                         // 校驗通過但兩步之間變動
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 100)
+    try c.insertFinalized("第一段")
+    let snap = c.snapshotAndBeginNext()
+    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .mismatch)
+}
+
+@Test func staleTailRecoveryDoesNotAdvanceTheCounter() throws {
+    // counter 的語意是「尾端是否前進」。中段改寫沒有改變誰是尾端——
+    // 若遞增，下一句自己的快照會對不上，被迫也走慢路徑（其實它仍在尾端）。
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let ax = FakeRangeReplacer()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 100)
+    try c.insertFinalized("第一段")
+    let first = c.snapshotAndBeginNext()
+    try c.insertFinalized("第二段")
+    let second = c.snapshotAndBeginNext()                // 第二段仍在尾端
+
+    #expect(c.replaceStaleTail(first, at: 40, with: "第一段。") == .replaced)
+
+    // 回收完第一段之後，第二段照樣要能走正常的尾端路徑
+    #expect(try c.replaceTail(second, with: "第二段。"))
+    #expect(key.ops.contains(.delete(3)))                // 走的是退格重打＝快路徑仍成立
+}
+
 // MARK: - 備援診斷（issue #1 蒐證）
 // 主 inserter 失敗、備援救回＝控制流無異狀、帳面成功，過去什麼都不留。
 // 這正是 issue #1「replaceTail 偶發落地失敗」兩個候選 trigger 之一（另一個 counter-mismatch

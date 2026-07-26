@@ -624,6 +624,8 @@ public final class DictationController {
             if try coordinator.replaceTail(snapshot, with: text) {
                 ledger.commit(ledger.sessionText + text)
                 emitFeedback(oldText: old)             // 潤飾異動高亮
+            } else if recoverStaleTail(text, snapshot: snapshot, previousMirror: old) {
+                // 尾端已前進，但這句仍能就地回收（M10-C）——細節見 recoverStaleTail
             } else {
                 recordInsertEvent(kind: "insertSkipped", classification: "counterMismatch",
                                   utteranceText: snapshot.text)
@@ -818,6 +820,32 @@ public final class DictationController {
                                       utteranceRaw: utteranceText,
                                       outcomeKind: kind,
                                       outcomeText: detail.map { "\(classification)：\($0)" } ?? classification))
+    }
+
+    /// 回收「已不在尾端」的潤飾（M10-C）。連續講話時，前一句還在潤飾、下一句的辨識結果
+    /// 就已落地，尾端因此前進——過去這裡直接放棄潤飾，螢幕上留原始轉錄。
+    ///
+    /// 這句話的絕對起點 ＝ session 錨點 + 目前已定稿文字的長度。成立的理由（spec §3.1.1）：
+    /// 套用嚴格按句序串行，且每條終局路徑都讓帳本前進「螢幕上實際多出來的那段」，
+    /// 故此刻 `ledger.sessionText` 恰好等於這句話之前的全部文字。**不可改用快照當下的
+    /// sessionBefore**——前一句若在本句閉合之後才套用，那個值就少算了它的長度。
+    ///
+    /// 回傳是否已完成落地；false＝呼叫端照舊保留原文並說明原因。
+    private func recoverStaleTail(_ text: String,
+                                  snapshot: InsertionCoordinator.UtteranceSnapshot,
+                                  previousMirror: String) -> Bool {
+        guard let anchor = ledger.axAnchor else { return false }
+        let location = anchor + ledger.sessionText.utf16.count
+        guard coordinator.replaceStaleTail(snapshot, at: location, with: text) == .replaced else {
+            return false
+        }
+        ledger.commit(ledger.sessionText + text)
+        // 文字有落地、且是潤飾後的版本，故不屬 insertFailed／insertSkipped 二分，另立一類。
+        // detail 帶回收後的文字：歷史頁要看得出回收回來的是什麼內容。
+        recordInsertEvent(kind: "insertRecovered", classification: "staleTail",
+                          utteranceText: snapshot.text, detail: text)
+        emitFeedback(oldText: previousMirror)
+        return true
     }
 
     /// 插入層備援診斷（issue #1 被動蒐證）：主 inserter 失敗、備援成功。
