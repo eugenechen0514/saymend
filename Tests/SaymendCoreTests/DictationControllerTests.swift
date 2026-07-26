@@ -171,6 +171,98 @@ import Testing
 }
 
 @MainActor
+@Test func recoveryUsesLiveLedgerNotTheSnapshotTimeSessionText() async {
+    // 這條鎖住整個設計的承重不變式：位置必須用「套用當下」的 ledger.sessionText，
+    // 不能用 processUtterance 當下捕捉的 sessionBefore。
+    //
+    // 讓兩者真的分岔的時序：第一句還在潤飾（gated）時，第二句就閉合了自己的 utterance
+    // 邊界——此刻 sessionBefore 還是空的。之後第一句才落地，第二句的位置就得算進它。
+    // 若改用 sessionBefore，第二句會回到 anchor+0，覆蓋掉第一句的文字。
+    let polisher = GatedIntentService()
+    polisher.outcomeByRaw = ["第一段": .newContent("第一段。"), "第二段": .newContent("第二段。")]
+    polisher.gatedRaws = ["第一段"]                       // 只卡第一句
+    let ax = FakeRangeReplacer()
+    let field = FakeFieldReader()
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 100)
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, rangeReplacer: ax, fieldReader: field)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("第一段"), at: 11.0)
+    c.tick(at: 12.6)                                     // 第一句派發，卡住
+    c.handleTranscript(.finalized("第二段"), at: 13.0)
+    c.tick(at: 14.6)                                     // 第二句閉合：此刻 sessionBefore 仍是空字串
+    c.handleTranscript(.finalized("第三段"), at: 15.0)     // 尾端再前進，讓第二句也回收不了快路徑
+    polisher.release()
+    await c.lastIntentTask?.value
+
+    #expect(ax.preservingCaretCalls.count == 2)
+    // 第一句：錨點 + 0（前面沒有已定稿文字）
+    #expect(ax.preservingCaretCalls.first?.location == 100)
+    #expect(ax.preservingCaretCalls.first?.expected == "第一段")
+    // 第二句：錨點 + 4（「第一段。」已定稿）。用 sessionBefore 的話這裡會是 100，直接覆蓋掉第一句。
+    #expect(ax.preservingCaretCalls.last?.location == 104)
+    #expect(ax.preservingCaretCalls.last?.expected == "第二段")
+    #expect(c.ledger.sessionText == "第一段。第二段。")
+}
+
+@MainActor
+@Test func recoveryLocationCountsUTF16UnitsNotCharacters() async {
+    // AX 的 offset 是 UTF-16 單位。純中文字每字剛好 1 個單位，兩種算法數值相同、
+    // 測不出差別；代理對（emoji）才會分岔——「第一段😀」是 4 個 Character、5 個 UTF-16 單位。
+    let polisher = GatedIntentService()
+    polisher.outcomeByRaw = ["第一段": .newContent("第一段😀"), "第二段": .newContent("第二段。")]
+    polisher.gatedRaws = ["第一段"]
+    let ax = FakeRangeReplacer()
+    let field = FakeFieldReader()
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 100)
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, rangeReplacer: ax, fieldReader: field)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("第一段"), at: 11.0)
+    c.tick(at: 12.6)
+    c.handleTranscript(.finalized("第二段"), at: 13.0)
+    c.tick(at: 14.6)
+    c.handleTranscript(.finalized("第三段"), at: 15.0)
+    polisher.release()
+    await c.lastIntentTask?.value
+
+    #expect(ax.preservingCaretCalls.count == 2)
+    #expect(ax.preservingCaretCalls.last?.location == 105)   // 100 + 5（用 .count 會算成 104）
+}
+
+@MainActor
+@Test func recoveryHighlightDoesNotFrameTheUntouchedNextUtterance() async {
+    // 回收成功時，畫面上已經有下一句的原文。舊文鏡像若漏掉它，diff 會把使用者
+    // 還沒被碰的那句也框進「剛改動」——M10-C 的主場景每次都會踩到。
+    let polisher = GatedIntentService()
+    polisher.gated = true
+    polisher.outcome = .newContent("第一段。")
+    let ax = FakeRangeReplacer()
+    let field = FakeFieldReader()
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 0)
+    let feedback = FakeFeedback()
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, rangeReplacer: ax,
+                                            fieldReader: field, feedback: feedback)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("第一段"), at: 11.0)
+    c.tick(at: 12.6)
+    c.handleTranscript(.finalized("第二段"), at: 13.0)
+    polisher.release()
+    await c.lastIntentTask?.value
+
+    // 舊文＝「第一段第二段」、新文＝「第一段。第二段」，異動只有中間新增的「。」
+    let updates: [FeedbackUpdate] = feedback.events.compactMap {
+        if case .updated(let u) = $0 { return u }; return nil
+    }
+    let withHighlight = updates.last { $0.highlight != nil }
+    #expect(withHighlight?.oldText == "第一段第二段")
+    #expect(withHighlight?.text == "第一段。第二段")
+    // 高亮長度只能是那一個字元（2 UTF-16 單位以內），不能把「第二段」整段吃進去
+    #expect((withHighlight?.highlight?.length ?? 99) <= 2)
+}
+
+@MainActor
 @Test func lateArrivingPolishKeepsRawWhenFieldChangedUnderneath() async {
     // 潤飾在途時使用者手動改了那一句 → 校驗不符 → 放棄回收，原文與使用者的修改都留著
     let polisher = GatedIntentService()

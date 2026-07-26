@@ -14,9 +14,13 @@ import Testing
     #expect(caretAfterReplacement(current: 30, location: 10, oldLength: 5, newLength: 5) == 30)
 }
 
-@Test func caretExactlyAtRangeEndCountsAsAfter() {
-    // 邊界：游標恰在被替換段落的結尾（15＝10+5），仍屬「之後」，要平移
+@Test func caretExactlyAtRangeEndIsUnambiguous() {
+    // 邊界：游標恰在被替換段落的結尾（15＝10+5）。
+    // 這裡兩個分支代數上等價——「之後」給 current+(new-old)=15+3=18，
+    // 「之內」給 location+new=10+8=18——所以這條只鎖「值」，鎖不了「走哪個分支」。
+    // 誠實記著：把 `>=` 改成 `>` 這條不會紅，因為那個改動在這個點上不改變任何結果。
     #expect(caretAfterReplacement(current: 15, location: 10, oldLength: 5, newLength: 8) == 18)
+    #expect(caretAfterReplacement(current: 15, location: 10, oldLength: 5, newLength: 2) == 12)
 }
 
 @Test func caretInsideTheReplacedRangeCollapsesToNewEnd() {

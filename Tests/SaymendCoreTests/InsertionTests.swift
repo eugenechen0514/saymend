@@ -373,6 +373,33 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .mismatch)
 }
 
+@Test func staleTailRejectsEmptySnapshotWithoutTouchingTheField() throws {
+    // 零長度快照沒有可校驗的錨——那樣的「替換」等於在算出來的位置盲插
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let ax = FakeRangeReplacer()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 100)
+    let empty = c.currentTailSnapshot()                  // text 為空、counter 為現值
+    #expect(empty.text.isEmpty)
+
+    #expect(c.replaceStaleTail(empty, at: 40, with: "憑空出現的字") == .mismatch)
+    #expect(ax.verifyCalls.isEmpty)                      // 連校驗都不該發出
+    #expect(ax.preservingCaretCalls.isEmpty)
+}
+
+@Test func staleTailReportsUnsupportedWhenAXCannotReadTheField() throws {
+    // 與「欄位被外力改動」不同的成因：AX 根本讀不到欄位。兩者對呼叫端的表面行為一樣，
+    // 但語意不同，分類錯了不該沒人發現。
+    let key = RecordingInserter(), paste = RecordingInserter()
+    let ax = FakeRangeReplacer()
+    ax.verifyResult = .unsupported
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 100)
+    try c.insertFinalized("第一段")
+    let snap = c.snapshotAndBeginNext()
+
+    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .unsupported)
+    #expect(ax.preservingCaretCalls.isEmpty)
+}
+
 @Test func staleTailRecoveryDoesNotAdvanceTheCounter() throws {
     // counter 的語意是「尾端是否前進」。中段改寫沒有改變誰是尾端——
     // 若遞增，下一句自己的快照會對不上，被迫也走慢路徑（其實它仍在尾端）。

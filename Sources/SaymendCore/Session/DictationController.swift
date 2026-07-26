@@ -619,7 +619,10 @@ public final class DictationController {
             hud.present(.notice(insertSkipNotice(.frozen)))
             return
         }
-        let old = ledger.sessionText + snapshot.text   // 替換前的欄位鏡像（raw 已上屏）
+        // 替換前的欄位鏡像（raw 已上屏）。必須含 currentUtteranceText——回收路徑走到這裡時，
+        // 下一句的原文已經落在螢幕上；漏掉它會讓 diff 把使用者還沒被碰的那句也框成「剛改動」。
+        // 一般路徑的 currentUtteranceText 是空的，加了不影響。
+        let old = ledger.sessionText + snapshot.text + coordinator.currentUtteranceText
         do {
             if try coordinator.replaceTail(snapshot, with: text) {
                 ledger.commit(ledger.sessionText + text)

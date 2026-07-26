@@ -225,8 +225,19 @@ final class AXInserter: SessionRangeReplacing {
         let check = Self.rangeMatches(value: value, location: location, expected: expected)
         guard check == .replaced else { return check }
 
-        // 必須在設 AXSelectedTextRange 之前讀——那個設值本身就會覆蓋掉游標位置
-        let caretBefore: Int? = policy == .preserve ? Self.caretLocation(of: element) : nil
+        // 必須在設 AXSelectedTextRange 之前讀——那個設值本身就會覆蓋掉游標位置。
+        // preserve 讀不到原游標時 **在動任何一個字之前就放棄**：此時唯一的替代是 collapse，
+        // 而 collapse 會把游標留在被替換段落的尾端，也就是後續文字的正前方——那正是這條
+        // 路徑存在的目的所要防的事（下一個串流插入會落進句子中間）。寧可不潤飾，
+        // 也不要留下「文字對了但游標在錯的地方」的狀態；呼叫端會保留原文並說明原因。
+        let caretBefore: Int?
+        switch policy {
+        case .collapseToNewEnd:
+            caretBefore = nil
+        case .preserve:
+            guard let current = Self.caretLocation(of: element) else { return .unsupported }
+            caretBefore = current
+        }
 
         var range = CFRange(location: location, length: expected.utf16.count)
         guard let rangeValue = AXValueCreate(.cfRange, &range),
@@ -241,17 +252,11 @@ final class AXInserter: SessionRangeReplacing {
         // 游標釘定（M3 設計裁決 2）：部分 App 替換後把整段新文字留成選取狀態，
         // 後續串流鍵入會把剛替換的字吃掉，故一律顯式 collapse。失敗不影響替換結果。
         // collapseToNewEnd＝新文字尾端，讓「session 即尾端（游標相對）」恢復成立，M2 修正機械得以重用。
-        // preserve＝依 caretAfterReplacement 平移；讀不到原游標就退回 collapse，不因此讓替換失敗。
-        let target: Int
-        switch policy {
-        case .collapseToNewEnd:
-            target = location + newText.utf16.count
-        case .preserve:
-            target = caretBefore.map {
-                caretAfterReplacement(current: $0, location: location,
-                                      oldLength: expected.utf16.count, newLength: newText.utf16.count)
-            } ?? (location + newText.utf16.count)
-        }
+        // preserve＝依 caretAfterReplacement 平移（caretBefore 在上面已保證非 nil）。
+        let target = caretBefore.map {
+            caretAfterReplacement(current: $0, location: location,
+                                  oldLength: expected.utf16.count, newLength: newText.utf16.count)
+        } ?? (location + newText.utf16.count)
         Self.setCaret(element, to: target)
         return .replaced
     }
