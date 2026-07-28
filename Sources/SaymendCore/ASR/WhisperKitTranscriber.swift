@@ -22,6 +22,26 @@ public actor WhisperKitModelActor {
         }
     }
 
+    /// 建構解碼參數。抽成純函式**是為了測得到 `skipSpecialTokens`**。
+    ///
+    /// 那個旗標的套件預設是 `false`，而 false 會讓 `SegmentSeeker` 直接解碼原始 token 串
+    /// （`Text/SegmentSeeker.swift:121`／`:165` 的 `options.skipSpecialTokens ? wordTokens : 原始`），
+    /// 於是 `<|startoftranscript|><|zh|><|transcribe|><|0.00|>…<|3.80|><|endoftext|>` 會原封不動
+    /// 出現在 `segment.text`，一路上屏寫進使用者的文件——實機 2026-07-28 真的發生了。
+    /// 套件自己的 server 註解寫著「always skip special tokens for server responses」，
+    /// 示範 App 也一律開；預設 false 是給要看原始 token 的除錯情境用的。
+    static func decodingOptions(language: String,
+                                promptTokens: [Int]?,
+                                options: WhisperStreamingOptions) -> DecodingOptions {
+        var decoding = DecodingOptions(language: language.isEmpty ? nil : language,
+                                       usePrefillPrompt: true,
+                                       skipSpecialTokens: true,
+                                       promptTokens: promptTokens)
+        if let v = options.logProbThreshold { decoding.logProbThreshold = v }
+        if let v = options.compressionRatioThreshold { decoding.compressionRatioThreshold = v }
+        return decoding
+    }
+
     /// 串流辨識：音訊由 `source` 灌入（呼叫端負責餵），進度經回呼吐出。
     /// 本方法在串流結束（呼叫端停止或音訊耗盡）前不返回。
     func streamTranscribe(source: StreamFedAudioSource,
@@ -41,11 +61,8 @@ public actor WhisperKitModelActor {
             throw WhisperLoadError(message: "tokenizer 未就緒")
         }
 
-        var decoding = DecodingOptions(language: language.isEmpty ? nil : language,
-                                       usePrefillPrompt: true,
-                                       promptTokens: promptTokens)
-        if let v = options.logProbThreshold { decoding.logProbThreshold = v }
-        if let v = options.compressionRatioThreshold { decoding.compressionRatioThreshold = v }
+        let decoding = Self.decodingOptions(language: language, promptTokens: promptTokens,
+                                            options: options)
 
         // 注意：`source.relativeEnergyWindow` **不在這裡設**——本方法要等模型載完才被呼叫，
         // 而餵音訊的 Task 早就開始 append 了。窗口在 `transcribe` 建構 source 時就給定。
