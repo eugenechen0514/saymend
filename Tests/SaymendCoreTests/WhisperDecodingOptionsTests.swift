@@ -16,6 +16,24 @@ import WhisperKit
     #expect(o.skipSpecialTokens)
 }
 
+/// **prewarm 必須關閉。**
+///
+/// 套件的 prewarm 把每個模型載起來再丟掉，接著 `load: true` 再完整載一次——開著就是每次
+/// 冷啟動做兩遍。實機 2026-07-28 量到 large-v3-turbo 關掉 prewarm 仍要 631 秒
+/// （文字解碼器 104s ＋ 音訊編碼器 527s），開著約 20 分鐘，使用者會直接認定 App 當掉。
+@Test func modelConfigDisablesPrewarm() {
+    let c = WhisperKitModelActor.modelConfig(modelFolder: URL(filePath: "/m/large"))
+    #expect(c.prewarm == false)
+    #expect(c.load == true)        // 不 prewarm，但要真的載
+}
+
+/// 離線承諾：不得連網下載模型。這條寫在設定頁上給使用者看，破了就是對使用者說謊。
+@Test func modelConfigNeverDownloads() {
+    let c = WhisperKitModelActor.modelConfig(modelFolder: URL(filePath: "/m/large"))
+    #expect(c.download == false)
+    #expect(c.modelFolder == "/m/large")
+}
+
 /// 空語系＝交套件自行偵測，不得送出空字串當語系
 @Test func emptyLanguageBecomesNil() {
     let auto = WhisperKitModelActor.decodingOptions(language: "", promptTokens: nil,

@@ -12,14 +12,30 @@ public actor WhisperKitModelActor {
 
     public init(modelFolder: URL) async throws {
         do {
-            // tokenizerFolder 不指定＝交 WhisperKit 依模型自行解析（讀本機 HF 快取，已快取即離線）。
-            // download: false＝一律不連網下載模型（複用磁碟既有 CoreML 模型）。
-            let config = WhisperKitConfig(modelFolder: modelFolder.path,
-                                          verbose: false, prewarm: true, load: true, download: false)
-            self.pipe = try await WhisperKit(config)
+            self.pipe = try await WhisperKit(Self.modelConfig(modelFolder: modelFolder))
         } catch {
             throw WhisperLoadError(message: String(describing: error))
         }
+    }
+
+    /// 建構模型載入設定。抽成純函式是為了測得到 `prewarm` 與 `download`。
+    ///
+    /// **`prewarm: false` 是有意的，不是漏設。** 套件的 prewarm 會把每個模型載起來**再丟掉**
+    /// （`WhisperKit.loadModels` 的 `model = prewarmMode ? nil : loadedModel`），接著 `load: true`
+    /// 再完整載一次。它的用途是「先編譯、晚點才真的要用」；我們兩件事是背靠背做的，開著就是**每次
+    /// 冷啟動做兩遍**。實機 2026-07-28 量到 large-v3-turbo 關掉 prewarm 仍要 631 秒
+    /// （文字解碼器 104s ＋ 音訊編碼器 527s），開著等於再翻一倍。
+    ///
+    /// `download: false`＝一律不連網下載模型，複用磁碟既有的 CoreML 模型。
+    /// `tokenizerFolder` 不指定＝交套件依模型自行解析（讀本機 HF 快取，已快取即離線）。
+    ///
+    /// `verbose: true` ＋ `.info`：只吐載入階段的里程碑（各子模型耗時、總耗時），不含逐 buffer
+    /// 的除錯訊息。載入期間 CPU 幾乎為 0（工作在 CoreML／ANE 側），沒有這些訊息時
+    /// 「還在載」與「已經死了」在外部完全無法區分——這正是本次查錯耗掉大半時間的原因。
+    static func modelConfig(modelFolder: URL) -> WhisperKitConfig {
+        WhisperKitConfig(modelFolder: modelFolder.path,
+                         verbose: true, logLevel: .info,
+                         prewarm: false, load: true, download: false)
     }
 
     /// 建構解碼參數。抽成純函式**是為了測得到 `skipSpecialTokens`**。
