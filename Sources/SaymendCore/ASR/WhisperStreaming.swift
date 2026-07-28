@@ -58,6 +58,37 @@ public struct WhisperStreamingOptions: Equatable, Sendable {
     }
 }
 
+public extension WhisperStreamingOptions {
+    /// 套件預設值的單一出處：設定頁的「套件預設」標示與「還原預設」都取這裡，
+    /// 不各自再寫一份字面值。
+    static let packageDefault = WhisperStreamingOptions()
+
+    /// 兩個解碼門檻的**套件預設具體值**。本型別自身以 nil 表示「不覆寫」，但設定頁
+    /// 得顯示得出「套件預設是多少」才有得比較，故在此抄一份 WhisperKit `DecodingOptions`
+    /// 的預設。抄來的常數會過期——`packageThresholdConstantsMatchWhisperKit` 釘住它們，
+    /// 套件改預設時該測試會當場失敗。
+    static let packageLogProbThreshold: Float = -1.0
+    static let packageCompressionRatioThreshold: Float = 2.4
+
+    // MARK: - 合理範圍
+    //
+    // 超出範圍的持久化值＝設定損毀（手改 plist、舊版遺留），一律回落套件預設，
+    // 比照 `AppSettings.timeoutRange` 的做法。UI 的 Stepper 另外把使用者輸入
+    // 限制在同一組範圍內，兩道防線各守一端。
+
+    /// 下界為 1：0 表示連正在講的那一段都立刻定稿，等於把必然會被改寫的文字直接上屏。
+    static let requiredSegmentsRange: ClosedRange<Int> = 1...10
+    /// 相對能量本身就被套件夾在 0…1，門檻超出此區間即恆真或恆假。
+    static let silenceThresholdRange: ClosedRange<Float> = 0...1
+    /// 一格 100ms：1 格＝只看前一格、200 格＝往回看 20 秒。
+    static let relativeEnergyWindowRange: ClosedRange<Int> = 1...200
+    static let compressionCheckWindowRange: ClosedRange<Int> = 1...500
+    /// 對數機率恆為負；上界 0 等於「任何結果都不夠好」，下界 -10 已形同不設限。
+    static let logProbThresholdRange: ClosedRange<Float> = -10...0
+    /// 壓縮比下界 1（無法壓縮）；低於 1 不可能發生，設了等於全部判定為重複退化。
+    static let compressionRatioThresholdRange: ClosedRange<Float> = 1...10
+}
+
 /// 串流辨識期間的失敗。載入失敗仍用 `WhisperLoadError`，兩者的失敗語彙不同。
 public enum WhisperStreamError: Error, Equatable {
     /// 超過安全網長度上限（防止鎖定聽寫忘了關而吃光記憶體）

@@ -47,7 +47,8 @@ public actor WhisperKitModelActor {
         if let v = options.logProbThreshold { decoding.logProbThreshold = v }
         if let v = options.compressionRatioThreshold { decoding.compressionRatioThreshold = v }
 
-        source.relativeEnergyWindow = options.relativeEnergyWindow
+        // 注意：`source.relativeEnergyWindow` **不在這裡設**——本方法要等模型載完才被呼叫，
+        // 而餵音訊的 Task 早就開始 append 了。窗口在 `transcribe` 建構 source 時就給定。
 
         // 子元件全部取自 pipe，但只在此 actor 內流動、不回傳給呼叫端
         let streamer = AudioStreamTranscriber(
@@ -117,7 +118,10 @@ public final class WhisperKitTranscriber: WhisperTranscribing {
                            options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamProgress, Error> {
         AsyncThrowingStream { continuation in
             let task = Task { [maxDuration, coordinator] in
-                let source = StreamFedAudioSource(maxDuration: maxDuration)
+                // 窗口在此給定而非等 streamTranscribe：模型載入可達數分鐘，那之前餵進來的
+                // 音訊會先算完能量，晚到的設定救不回已經用舊窗口算掉的那幾十秒。
+                let source = StreamFedAudioSource(maxDuration: maxDuration,
+                                                  relativeEnergyWindow: options.relativeEnergyWindow)
                 let audioDone = Sendable_Flag()
 
                 // 餵音訊：與辨識並行，音訊耗盡即標記結束讓串流轉錄器收工

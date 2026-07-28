@@ -77,7 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// （屬性初始化器不可 reference 其他屬性）。
     lazy var whisperLocalEngine = WhisperKitEngine(
         transcriber: WhisperKitTranscriber(),
-        configProvider: { [settings] in settings.whisperLocalConfig() })
+        configProvider: { [settings] in settings.whisperLocalConfig() },
+        // 每次聽寫現讀（issue #15）：設定改完下一句就生效，不做啟動快照
+        optionsProvider: { [settings] in settings.whisperStreamingOptions() })
 
     /// 前一次預載：換模型時取消它（best-effort）。連點多個模型時不讓過期的預載繼續佔載入排隊。
     private var whisperLocalPreloadTask: Task<Void, Never>?

@@ -91,6 +91,15 @@ struct GeneralSettingsTab: View {
     @State private var whisperTimeout: Double
     // 本機 WhisperKit（M9 §5）
     @State private var whisperLocalModelPath: URL?
+    // 串流參數（issue #15）：預設收合，一般使用者不會碰到
+    @State private var showStreamAdvanced = false
+    @State private var streamRequiredSegments: Int
+    @State private var streamSilenceThreshold: Double
+    @State private var streamUseVAD: Bool
+    @State private var streamEnergyWindow: Int
+    @State private var streamCompressionCheckWindow: Int
+    @State private var streamLogProb: Double
+    @State private var streamCompressionRatio: Double
     @State private var discoveredModels: [DiscoveredModel] = []
     @State private var scanTask: Task<Void, Never>?
     @State private var localModelState: ModelLoadState = .idle
@@ -127,11 +136,30 @@ struct GeneralSettingsTab: View {
         _whisperAPIKey = State(initialValue: settings.whisperAPIKey ?? "")
         _whisperTimeout = State(initialValue: settings.whisperTimeout)
         _whisperLocalModelPath = State(initialValue: settings.whisperLocalModelPath)
+        _streamRequiredSegments = State(initialValue: settings.streamRequiredSegments)
+        _streamSilenceThreshold = State(initialValue: settings.streamSilenceThreshold)
+        _streamUseVAD = State(initialValue: settings.streamUseVAD)
+        _streamEnergyWindow = State(initialValue: settings.streamRelativeEnergyWindow)
+        _streamCompressionCheckWindow = State(initialValue: settings.streamCompressionCheckWindow)
+        _streamLogProb = State(initialValue: settings.streamLogProbThreshold)
+        _streamCompressionRatio = State(initialValue: settings.streamCompressionRatioThreshold)
     }
 
-    /// M8 新增的 5 條設定寫回單獨掛在 body：全部串在同一條 modifier 鏈上會讓
-    /// SwiftUI 型別檢查器超時（錯誤指向鏈中任一子運算式，非新程式碼本身有問題）。
     var body: some View {
+        asrFormWithWriteBack
+            .onChange(of: streamRequiredSegments) { _, v in settings.streamRequiredSegments = v }
+            .onChange(of: streamSilenceThreshold) { _, v in settings.streamSilenceThreshold = v }
+            .onChange(of: streamUseVAD) { _, v in settings.streamUseVAD = v }
+            .onChange(of: streamEnergyWindow) { _, v in settings.streamRelativeEnergyWindow = v }
+            .onChange(of: streamCompressionCheckWindow) { _, v in settings.streamCompressionCheckWindow = v }
+            .onChange(of: streamLogProb) { _, v in settings.streamLogProbThreshold = v }
+            .onChange(of: streamCompressionRatio) { _, v in settings.streamCompressionRatioThreshold = v }
+    }
+
+    /// M8 新增的 5 條設定寫回單獨掛在此：全部串在同一條 modifier 鏈上會讓
+    /// SwiftUI 型別檢查器超時（錯誤指向鏈中任一子運算式，非新程式碼本身有問題）。
+    /// issue #15 的 7 條串流參數同理，再拆一層掛在 `body`。
+    private var asrFormWithWriteBack: some View {
         generalForm
             .onChange(of: asrEngineKind) { _, v in
                 settings.asrEngineKind = v
@@ -271,7 +299,97 @@ struct GeneralSettingsTab: View {
                 whisperLocalIncompatibleRows
             }
             .task { await enterWhisperLocalSection() }
+            streamAdvancedSection
         }
+    }
+
+    /// 串流參數進階區（issue #15）。預設收合：這些旋鈕的最佳值因人、因機器、因環境而異，
+    /// 但絕大多數人不需要碰，攤開來只會讓設定頁看起來很可怕。
+    ///
+    /// **無語音機率門檻不在此列**：WhisperKit 此版把 `noSpeechProb` 寫死為 0、其判斷式恆為假，
+    /// 那顆旋鈕調了不會有任何反應。暴露一個沒反應的旋鈕比不給更糟——使用者會因此不信任整頁設定。
+    @ViewBuilder private var streamAdvancedSection: some View {
+        Section {
+            DisclosureGroup("進階：串流參數", isExpanded: $showStreamAdvanced) {
+                streamBehaviorControls
+                streamDecodingControls
+                Button("還原套件預設") { restoreStreamingDefaults() }
+                Text("改完立刻生效，不必重開 App，也不會因為換模型而失效。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// 串流行為 5 項。說明一律寫「調它會怎樣」——只寫參數名稱的話，使用者無從得知該往哪個方向調。
+    @ViewBuilder private var streamBehaviorControls: some View {
+        Stepper(value: $streamRequiredSegments, in: WhisperStreamingOptions.requiredSegmentsRange) {
+            Text("定稿所需片段數：\(streamRequiredSegments)"
+                 + "（套件預設 \(WhisperStreamingOptions.packageDefault.requiredSegmentsForConfirmation)）")
+        }
+        paramNote("留幾段話先不定稿。調小＝文字更快變成不再改動的定稿，代價是講到一半的字先上屏後又被改掉；調大＝上屏慢但改動少。這是即時感與穩定度的主旋鈕。")
+
+        Stepper(value: $streamSilenceThreshold,
+                in: Self.doubleRange(WhisperStreamingOptions.silenceThresholdRange), step: 0.05) {
+            Text(String(format: "靜音門檻：%.2f（套件預設 %.2f）", streamSilenceThreshold,
+                        Double(WhisperStreamingOptions.packageDefault.silenceThreshold)))
+        }
+        paramNote("多大聲才算有人在講話。環境吵、明明沒開口卻一直冒字就調高；講話小聲、常常整段沒反應就調低。")
+
+        Toggle("啟用語音活動偵測", isOn: $streamUseVAD)
+        paramNote("開著：沒偵測到人聲的片段直接跳過，省電也少無中生有的字。關掉：連靜音都送去辨識——只有在你講話太輕、一直被當成沒講話時才需要關。")
+
+        Stepper(value: $streamEnergyWindow, in: WhisperStreamingOptions.relativeEnergyWindowRange) {
+            Text("能量取樣窗口：\(streamEnergyWindow) 格"
+                 + "（套件預設 \(WhisperStreamingOptions.packageDefault.relativeEnergyWindow)）")
+        }
+        paramNote("判斷靜音時，環境噪音的基準往回看幾格（一格 0.1 秒）。調小＝基準跟著環境快速調整，適合忽吵忽靜的場合；調大＝基準穩定，不被短暫的安靜帶偏。")
+
+        Stepper(value: $streamCompressionCheckWindow,
+                in: WhisperStreamingOptions.compressionCheckWindowRange, step: 10) {
+            Text("壓縮比檢查窗口：\(streamCompressionCheckWindow)"
+                 + "（套件預設 \(WhisperStreamingOptions.packageDefault.compressionCheckWindow)）")
+        }
+        paramNote("往回看幾個字判斷是不是在鬼打牆重複。調小＝更早喊停重複輸出，代價是正常的重複語句也更容易被誤殺。")
+    }
+
+    /// 解碼品質 2 項：低於／高於門檻的辨識結果被視為失敗。
+    @ViewBuilder private var streamDecodingControls: some View {
+        Stepper(value: $streamLogProb,
+                in: Self.doubleRange(WhisperStreamingOptions.logProbThresholdRange), step: 0.1) {
+            Text(String(format: "對數機率門檻：%.1f（套件預設 %.1f）", streamLogProb,
+                        Double(WhisperStreamingOptions.packageLogProbThreshold)))
+        }
+        paramNote("辨識信心低於此值就把該段當成失敗。往 0 調＝更嚴格，寧可少出字；往負值調＝寧可出錯字也不要沒字。")
+
+        Stepper(value: $streamCompressionRatio,
+                in: Self.doubleRange(WhisperStreamingOptions.compressionRatioThresholdRange), step: 0.1) {
+            Text(String(format: "壓縮比門檻：%.1f（套件預設 %.1f）", streamCompressionRatio,
+                        Double(WhisperStreamingOptions.packageCompressionRatioThreshold)))
+        }
+        paramNote("文字重複到這個壓縮比就視為壞掉的輸出。調低＝更早判定重複退化，代價是正常的排比句也可能被判掉。")
+    }
+
+    @ViewBuilder private func paramNote(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary)
+    }
+
+    /// Stepper 的 binding 是 Double，範圍常數是 Float（對齊 WhisperKit 的型別）
+    private static func doubleRange(_ r: ClosedRange<Float>) -> ClosedRange<Double> {
+        Double(r.lowerBound)...Double(r.upperBound)
+    }
+
+    /// 還原：先讓 settings 回到「從未調過」，再從它重新讀回畫面值。
+    /// 畫面值變動會觸發 `onChange` 把同一組值再寫回去，所以 key 實際上不會保持缺席——
+    /// 但 `whisperStreamingOptions()` 的輸出與從未調過完全相同，這才是使用者看得到的契約。
+    private func restoreStreamingDefaults() {
+        settings.resetStreamingOptions()
+        streamRequiredSegments = settings.streamRequiredSegments
+        streamSilenceThreshold = settings.streamSilenceThreshold
+        streamUseVAD = settings.streamUseVAD
+        streamEnergyWindow = settings.streamRelativeEnergyWindow
+        streamCompressionCheckWindow = settings.streamCompressionCheckWindow
+        streamLogProb = settings.streamLogProbThreshold
+        streamCompressionRatio = settings.streamCompressionRatioThreshold
     }
 
     /// 模型載入狀態列＋手動載入／卸載（M9：首次 ANE 編譯可達數分鐘，讓使用者能事先載好、也能放掉記憶體）

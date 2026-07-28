@@ -20,9 +20,14 @@ public enum StreamFedAudioSourceError: Error, Equatable {
 /// 因此本型別的清理方法是**刻意的無操作**，改以 `maxDuration` 當失控 session 的安全網。
 ///
 /// **能量計算逐條照抄套件的 `AudioProcessor.processBuffer`**（見 `appendEnergy`）：
-/// 對「新到的這一塊」而非整段歷史計算、參考值取最近 20 格的最小平均能量（滾動噪音基準）。
+/// 對「新到的這一塊」而非整段歷史計算、參考值取最近 N 格的最小平均能量（滾動噪音基準）。
 /// 對整段歷史算會讓數值隨 session 拉長收斂成常數，VAD 從此無法區分講話與停頓；
 /// 用固定參考值則丟掉套件對環境噪音的自適應。兩種偏差在單次呼叫的測試下都看不出來。
+///
+/// **唯一刻意的偏離：回看格數 N 可調**（issue #15）。套件把它寫死成 20，而它的
+/// `relativeEnergyWindow` 只用來對除錯日誌取模節流、對辨識毫無作用。我們把這個名字
+/// 接到真正有意義的地方：N 預設 20＝與套件逐位元一致，調過才偏離。
+/// 窗口小＝噪音基準跟著環境快速調整，窗口大＝基準穩定不被短暫安靜帶偏。
 ///
 /// 執行緒安全：寫入端是音訊管線的 pump、讀取端是串流轉錄器的隔離域。**所有**可變狀態
 /// （含轉換器與其來源格式）都在同一把鎖內，鎖的持有期間不含任何 await。
@@ -51,8 +56,12 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
     /// 由呼叫端（引擎）檢查 `isOverCapacity` 並結束 session。
     private let maxDuration: TimeInterval
 
-    public init(maxDuration: TimeInterval = 30 * 60) {
+    /// 回看格數由 init 傳入而非事後指派：餵音訊的 Task 一建好就開始 `append`，
+    /// 而串流轉錄器要等模型載完（large 首次可達數分鐘）才碰得到這個物件——
+    /// 在那裡才設，整段開頭的能量都會用到舊值。
+    public init(maxDuration: TimeInterval = 30 * 60, relativeEnergyWindow: Int = 20) {
         self.maxDuration = maxDuration
+        self.energyWindow = relativeEnergyWindow
     }
 
     // MARK: - 本專案的入口
@@ -109,10 +118,17 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
     }
 
     /// 逐條照抄套件 `AudioProcessor.processBuffer` 的能量算法：
-    /// 參考值＝最近 20 格的最小平均能量（滾動噪音基準；空陣列時為 `.infinity`，
-    /// 與套件同樣會讓第一格算出 NaN，而 `isVoiceDetected` 的 `> threshold` 對 NaN 為 false）。
+    /// 參考值＝最近 `energyWindow` 格的最小平均能量（滾動噪音基準；空陣列時為 `.infinity`，
+    /// 與套件同）。套件寫死 20，本型別讓它可調（見型別說明）。
+    ///
+    /// `max(1,)` 不是形式檢查：協定要求 `relativeEnergyWindow` 是公開可寫的 Int，擋不住 0；
+    /// 而 `suffix(0)` 的參考值恆為 `.infinity`，算出的 NaN 會被套件末尾的
+    /// `max(0, min(NaN, 1))` 夾成 **0**（Swift 的 max/min 遇 NaN 回傳另一個運算元）。
+    /// 於是每一格都是 0、永遠衝不過靜音門檻，VAD 判定「永遠沒人講話」
+    /// ——離線聽寫會靜默失效而不報任何錯。
     private func appendEnergyLocked(for bucket: [Float]) {
-        let minAvgEnergy = audioEnergy.suffix(20).reduce(Float.infinity) { min($0, $1.avg) }
+        let minAvgEnergy = audioEnergy.suffix(max(1, energyWindow))
+            .reduce(Float.infinity) { min($0, $1.avg) }
         let rel = AudioProcessor.calculateRelativeEnergy(of: bucket, relativeTo: minAvgEnergy)
         let avg = AudioProcessor.calculateEnergy(of: bucket).avg
         audioEnergy.append((rel: rel, avg: avg))
@@ -184,8 +200,10 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
         return audioEnergy.map(\.rel)
     }
 
-    /// 協定要求的可寫屬性。套件只把它用在 debug log 的節流，**不**用於裁剪能量陣列；
-    /// 本型別同樣不以它裁剪。以鎖保護是為了與其餘可變狀態的同步紀律一致。
+    /// 協定要求的可寫屬性。套件只把它用在 debug log 的節流，對辨識沒有任何作用；
+    /// 本型別把它接到滾動噪音基準的回看格數（見型別說明），**但仍不以它裁剪能量陣列**
+    /// ——裁剪會讓 `isVoiceDetected` 讀到不足的窗口而誤判。
+    /// 正常路徑由 init 設定；此 setter 留給協定與測試。以鎖保護是為了與其餘可變狀態的同步紀律一致。
     public var relativeEnergyWindow: Int {
         get { lock.lock(); defer { lock.unlock() }; return energyWindow }
         set { lock.lock(); defer { lock.unlock() }; energyWindow = newValue }

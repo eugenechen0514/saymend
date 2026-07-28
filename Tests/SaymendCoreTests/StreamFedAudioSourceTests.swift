@@ -161,12 +161,85 @@ private func makeBuffer(sampleRate: Double, channels: AVAudioChannelCount,
 @Test func streamFedSourceEnergyArrayIsNeverTrimmed() throws {
     // 套件的 relativeEnergy 是 audioEnergy.map { $0.rel }，從不裁剪；
     // isVoiceDetected 依「距上次辨識多久」取 suffix，裁短了它就讀到不足的窗口而誤判。
-    // relativeEnergyWindow 在套件裡只用於 debug log 節流，不是裁剪長度。
+    // relativeEnergyWindow 管的是「噪音基準往回看幾格」，**不是**能量陣列的長度上限。
     let src = StreamFedAudioSource()
     src.relativeEnergyWindow = 20
     try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1, seconds: 5.0)))
     // 5 秒 ≒ 50 格，遠超過 relativeEnergyWindow
     #expect(src.relativeEnergy.count > 40, "能量陣列被裁剪了，實得 \(src.relativeEnergy.count) 格")
+}
+
+/// 逐塊算能量的參考實作（比照套件 `processBuffer`），噪音基準的回看格數可指定。
+/// 只算滿格的桶——不足 100ms 的殘量在 `finish()` 之前不會結算成能量。
+private func expectedRelativeEnergy(samples: [Float], window: Int) -> [Float] {
+    let bucketLength = StreamFedAudioSource.energyBufferLength
+    var expected: [Float] = []
+    var avgs: [Float] = []
+    var lo = 0
+    while lo + bucketLength <= samples.count {
+        let bucket = Array(samples[lo..<(lo + bucketLength)])
+        let floor = avgs.suffix(window).reduce(Float.infinity) { min($0, $1) }
+        expected.append(AudioProcessor.calculateRelativeEnergy(of: bucket, relativeTo: floor))
+        avgs.append(AudioProcessor.calculateEnergy(of: bucket).avg)
+        lo += bucketLength
+    }
+    return expected
+}
+
+@Test func energyWindowControlsTheNoiseFloorLookback() throws {
+    // **這顆旋鈕在套件裡是死的**：`AudioProcessor.processBuffer` 只拿它對 debug log
+    // 取模節流，噪音基準的回看格數是寫死的 `suffix(20)`。本型別刻意讓它有真實作用
+    // ——否則設定頁就多一個調了沒反應的旋鈕（正是票裡排除無語音機率門檻的理由）。
+    //
+    // 窗口小＝基準跟著環境快速調整（忽吵忽靜的場合），窗口大＝基準穩定不被短暫安靜帶偏。
+    // 16k 進、16k 出：重取樣是恆等轉換，桶邊界不會有抖動，可逐格全等比對。
+    let src = StreamFedAudioSource(relativeEnergyWindow: 3)
+    try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1,
+                                                 seconds: 0.5, amplitude: 0.0005)))
+    try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1,
+                                                 seconds: 2.0, amplitude: 0.5)))
+
+    let samples = Array(src.audioSamples)
+    let actual = src.relativeEnergy
+    let withNarrow = expectedRelativeEnergy(samples: samples, window: 3)
+    let withDefault = expectedRelativeEnergy(samples: samples, window: 20)
+    #expect(actual.count == withNarrow.count)
+
+    // 前提檢查：兩個窗口在這段音訊上必須算出明顯不同的值，否則這條測試分辨不出
+    // 「窗口有被套用」與「窗口被忽略」——會是一條假綠。
+    let differing = zip(withNarrow, withDefault)
+        .filter { !$0.isNaN && !$1.isNaN && abs($0 - $1) > 0.05 }
+    #expect(differing.count >= 3,
+            "窗口 3 與窗口 20 在這段音訊上幾乎算出同一組值，本測試無法分辨窗口是否被套用")
+
+    for (i, exp) in withNarrow.enumerated() where !exp.isNaN {
+        #expect(abs(actual[i] - exp) < 0.0001,
+                "第 \(i) 格能量 \(actual[i])，窗口 3 的預期值是 \(exp)（窗口 20 會是 \(withDefault[i])）——窗口沒被套用")
+    }
+}
+
+@Test func energyWindowOfZeroStillDetectsLoudSpeech() throws {
+    // 協定要求 relativeEnergyWindow 是公開可寫的 Int，擋不住 0，故實作以 max(1,) 兜底。
+    //
+    // 沒有那道下界會怎樣：suffix(0) 的參考值恆為 .infinity，normalizedEnergy 算出
+    // NaN，接著被套件最後那道 `max(0, min(NaN, 1))` **夾成 0**（Swift 的 max/min
+    // 遇到 NaN 回傳另一個運算元，不是傳染 NaN）。於是每一格都是 0，而 isVoiceDetected
+    // 判的是 `> silenceThreshold`——VAD 從此判定「永遠沒人講話」，離線聽寫靜默失效、
+    // 不報任何錯。判別方式因此不是找 NaN，而是問「大聲講話那幾格有沒有衝過靜音門檻」。
+    let src = StreamFedAudioSource(relativeEnergyWindow: 0)
+    try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1,
+                                                 seconds: 0.5, amplitude: 0.0005)))
+    try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1,
+                                                 seconds: 1.0, amplitude: 0.5)))
+
+    // 1.5 秒名目上是 15 格，但重取樣器每次 append 都留一點延遲在裡面（見
+    // streamFedSourceEmitsOneEnergyValuePer100ms 的 ±1 容許）；此處只需要大聲那段有出現。
+    let energies = src.relativeEnergy
+    #expect(energies.count >= 11)
+    #expect(!energies.contains { $0.isNaN })
+    let peak = energies.max() ?? 0
+    #expect(peak > WhisperStreamingOptions.packageDefault.silenceThreshold,
+            "窗口 0 時最大相對能量只有 \(peak)，衝不過靜音門檻——VAD 會判定永遠沒人講話")
 }
 
 @Test func streamFedSourceFinishDrainsTheConverter() throws {
