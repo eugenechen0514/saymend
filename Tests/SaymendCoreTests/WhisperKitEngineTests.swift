@@ -137,7 +137,9 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         let same = WhisperStreamProgress(confirmed: "已定稿", unconfirmed: "進行中")
         f.steps = [same, same, same, same, same]
         let evs = await drive(engine(f))
-        #expect(finalizedTexts(evs) == ["已定稿"])      // 只有第一次
+        // 五筆完全相同的進度：定稿只在第一次發一次，「進行中」的第二筆來自串流結束時的
+        // 尾端補發。去重若失守，這裡會各出現五筆。
+        #expect(finalizedTexts(evs) == ["已定稿", "進行中"])
         #expect(volatileTexts(evs) == ["進行中"])       // 只有第一次
     }
 
@@ -150,7 +152,10 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         ]
         let evs = await drive(engine(f))
         #expect(volatileTexts(evs) == ["今", "今天", "今天天氣"])
-        #expect(finalizedTexts(evs).isEmpty)            // 尚未定稿，一個字都不該上屏
+        // 串流進行中一個定稿都不該發——暫時文字不是定稿。唯一那筆是串流結束時的尾端補發，
+        // 且必須排在所有暫時文字之後。
+        #expect(finalizedTexts(evs) == ["今天天氣"])
+        #expect(evs.last == .finalized("今天天氣"))
     }
 
     /// 定稿只增不減：每次只吐**新增的那一段**，重覆的部分不得再上屏一次
@@ -172,7 +177,7 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
             .init(confirmed: "今天天氣不錯。", unconfirmed: "我想"),
         ]
         let evs = await drive(engine(f))
-        #expect(finalizedTexts(evs) == ["今天天氣不錯。"])
+        #expect(finalizedTexts(evs) == ["今天天氣不錯。", "我想"])   // 末筆為收尾補發
         #expect(volatileTexts(evs) == ["今天天氣", "我想"])
         // 定稿要排在該步的暫時文字之前：暫時文字是「定稿之後還沒定的那截」
         let fi = evs.firstIndex(of: .finalized("今天天氣不錯。"))!
@@ -190,7 +195,8 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         ]
         let evs = await drive(engine(f))
         #expect(volatileTexts(evs) == ["今天天氣真", "今天", "金田"])
-        #expect(finalizedTexts(evs).isEmpty)
+        // 被推翻的那兩版一個字都不得上屏；只有最後倖存的那版在收尾時補發
+        #expect(finalizedTexts(evs) == ["金田"])
     }
 
     /// 定稿內容被重寫（非前綴關係）時保守處理：整段當新增，寧可重覆也不要漏字
@@ -212,6 +218,57 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         ]
         let evs = await drive(engine(f))
         #expect(finalizedTexts(evs) == ["有字"])
+    }
+
+    // MARK: - 收尾：未定稿的尾端
+
+    /// **短句聽寫會一個字都不出。**
+    ///
+    /// 套件的 `stopStreamTranscription` 只是把迴圈旗標關掉，**不會**把剩下的未定稿段落
+    /// 轉正——它自己的示範 App 是把 confirmed 與 unconfirmed 併起來顯示，所以看不出問題。
+    /// 我們只把 confirmed 的增量送上屏、unconfirmed 僅供 HUD 顯示，於是串流結束時還留在
+    /// unconfirmed 的文字會**永遠遺失**。
+    ///
+    /// 而套件的定稿條件是 `segments.count > 定稿所需片段數`（預設 2）：Whisper 對五秒鐘的
+    /// 一句話通常只切出 1 段，條件永遠不成立——整段聽寫一個字都不會落地。
+    @Test func residualUnconfirmedIsFinalizedWhenStreamEndsNormally() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [.init(confirmed: "", unconfirmed: "一整句話從頭到尾都沒被轉正")]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["一整句話從頭到尾都沒被轉正"])
+    }
+
+    /// 已定稿的部分不得因為補發尾端而重覆上屏
+    @Test func tailFlushDoesNotDuplicateAlreadyConfirmedText() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "第一句。", unconfirmed: "第二句還在改"),
+            .init(confirmed: "第一句。第二句定稿了。", unconfirmed: "第三句還在改"),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["第一句。", "第二句定稿了。", "第三句還在改"])
+    }
+
+    /// 尾端已經被轉正（unconfirmed 收斂成空）時不得再補一次空白事件
+    @Test func emptyTailFlushesNothing() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "", unconfirmed: "進行中"),
+            .init(confirmed: "全都定稿了。", unconfirmed: "   "),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["全都定稿了。"])
+    }
+
+    /// 失敗收場時**不得**補發尾端：辨識中途壞掉，殘留的未定稿文字沒有可信度可言，
+    /// 送上屏等於把半成品當成結果寫進使用者的欄位。
+    @Test func tailIsNotFlushedWhenStreamFails() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [.init(confirmed: "", unconfirmed: "半成品")]
+        f.errorAfterSteps = WhisperStreamError.audioConversionFailed
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs).isEmpty)
+        #expect(evs.contains(.failed(reason: "音訊轉換失敗")))
     }
 
     // MARK: - 失敗路徑

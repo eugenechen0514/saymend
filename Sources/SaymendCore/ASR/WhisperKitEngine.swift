@@ -31,6 +31,8 @@ public protocol WhisperTranscribing: Sendable {
 ///
 /// 事件映射的核心紀律在 `pump`：**只在文字真的變化時發事件**。套件的狀態變更回呼
 /// 每個音訊 buffer 都會觸發，照單全收會讓斷句器的靜音間隔永遠不到期、話語永不閉合。
+/// 收尾另有一條同等重要的紀律：串流正常結束時**必須把殘留的未定稿文字轉正**（見 `flushTail`），
+/// 否則短句聽寫會一個字都不出。
 ///
 /// 失敗一律以 .failed 明示原因，不靜默結束。失敗語彙自成一組（本機無網路概念），
 /// **不套** M7 的 `degradedReason`。
@@ -162,6 +164,7 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
                 }
             }
             if Task.isCancelled { continuation.finish(); return }
+            flushTail(lastUnconfirmed, into: continuation)
             continuation.finish()
         } catch is CancellationError {
             continuation.finish()
@@ -171,6 +174,23 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
             continuation.yield(.failed(reason: Self.reason(for: error)))
             continuation.finish()
         }
+    }
+
+    /// **串流正常結束時把殘留的未定稿文字轉正。**
+    ///
+    /// 套件的 `stopStreamTranscription` 只是把主迴圈旗標關掉，不會把 `unconfirmedSegments`
+    /// 搬進 `confirmedSegments`——它自己的示範 App 是把兩段併起來顯示，所以看不出問題。
+    /// 我們只把定稿的增量送上屏、暫時文字僅供 HUD 顯示，殘留在此的尾端若不補發就永遠遺失。
+    ///
+    /// 這不是罕見的邊角：套件的定稿條件是 `segments.count > 定稿所需片段數`（預設 2），
+    /// 而 Whisper 對五秒鐘的一句話通常只切出 1 段——條件永遠不成立，**短句聽寫會一個字
+    /// 都不出**。定稿所需片段數愈大愈嚴重（設定頁上限 10）。
+    ///
+    /// 只在**正常結束**時補：取消與失敗都不補。中途壞掉時殘留的未定稿文字沒有可信度可言，
+    /// 送上屏等於把半成品當結果寫進使用者的欄位。
+    private func flushTail(_ tail: String, into continuation: AsyncStream<TranscriptEvent>.Continuation) {
+        let trimmed = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { continuation.yield(.finalized(trimmed)) }
     }
 
     /// 定稿文字只增不減，故新增部分＝去掉共同前綴。萬一不是前綴關係（套件重寫了已定稿
