@@ -143,6 +143,20 @@ private actor Gate {
         #expect(await pc.peak == 1)
     }
 
+    /// **目錄 URL 與同一路徑的非目錄 URL 是同一個模型，不得各載一份。**
+    ///
+    /// 掃描器給的是目錄 URL（帶尾斜線），設定經 UserDefaults 來回一趟會變成不帶斜線的，
+    /// 而**尾斜線的差異 `resolvingSymlinksInPath()` 與 `standardizedFileURL` 都消不掉**。
+    /// 兩種形式同時出現在系統裡時，同一個模型會被當成兩個 key ——large-v3-turbo 各 3.2GB。
+    @Test func directoryURLAndPlainPathShareOneCacheKey() async throws {
+        let ct = Counter()
+        let co = ModelLoadCoordinator<String> { u in await ct.inc(); return u.lastPathComponent }
+        _ = try await co.model(for: URL(filePath: "/m/large", directoryHint: .isDirectory))   // 掃描器形式
+        _ = try await co.model(for: URL(filePath: "/m/large"))                                // 設定讀回的形式
+        let loads = await ct.v
+        #expect(loads == 1, "同一個資料夾被載了兩次（掃描器形式與設定讀回形式各一份）")
+    }
+
     /// REV #8：symlink 與實體路徑是同一個模型，不得各載一份
     @Test func symlinkedPathSharesCacheKey() async throws {
         let fm = FileManager.default

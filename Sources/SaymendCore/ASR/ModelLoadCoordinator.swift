@@ -38,7 +38,15 @@ public actor ModelLoadCoordinator<Model: Sendable> {
         self.loader = loader
     }
 
-    private func cacheKey(_ url: URL) -> URL { url.resolvingSymlinksInPath().standardizedFileURL }
+    /// 快取 key 的正規化。
+    ///
+    /// 最後那趟 `URL(filePath:)` 專治**目錄 URL 的尾斜線**：掃描器給的是 `…/model/`，
+    /// 設定經 UserDefaults 來回一趟變成 `…/model`，而尾斜線的差異
+    /// `resolvingSymlinksInPath()` 與 `standardizedFileURL` **都消不掉**。
+    /// 少了這一步，同一個模型會落在兩個 key 上——large-v3-turbo 各佔 3.2GB。
+    private func cacheKey(_ url: URL) -> URL {
+        URL(filePath: url.resolvingSymlinksInPath().standardizedFileURL.path)
+    }
 
     public func state(for url: URL) -> ModelLoadState {
         let key = cacheKey(url)
