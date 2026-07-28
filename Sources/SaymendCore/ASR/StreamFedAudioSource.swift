@@ -19,22 +19,37 @@ public enum StreamFedAudioSourceError: Error, Equatable {
 /// 並以從串流起點算起的絕對秒數決定解碼起點。在它背後清理會讓兩個記帳同時失效。
 /// 因此本型別的清理方法是**刻意的無操作**，改以 `maxDuration` 當失控 session 的安全網。
 ///
-/// 執行緒安全：寫入端是音訊管線的 pump、讀取端是串流轉錄器的隔離域，故以鎖保護。
-/// 鎖的持有期間不含任何 await。
+/// **能量計算逐條照抄套件的 `AudioProcessor.processBuffer`**（見 `appendEnergy`）：
+/// 對「新到的這一塊」而非整段歷史計算、參考值取最近 20 格的最小平均能量（滾動噪音基準）。
+/// 對整段歷史算會讓數值隨 session 拉長收斂成常數，VAD 從此無法區分講話與停頓；
+/// 用固定參考值則丟掉套件對環境噪音的自適應。兩種偏差在單次呼叫的測試下都看不出來。
+///
+/// 執行緒安全：寫入端是音訊管線的 pump、讀取端是串流轉錄器的隔離域。**所有**可變狀態
+/// （含轉換器與其來源格式）都在同一把鎖內，鎖的持有期間不含任何 await。
 public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
     /// 串流轉錄器一律以 16kHz 單聲道解讀樣本
     public static let sampleRate: Double = 16_000
+    /// 一格能量對應的音訊長度。套件的 `isVoiceDetected` 以 `nextBufferInSeconds / 0.1`
+    /// 換算「要看幾格」，故一格必須恰好是 100ms，否則格數與時間的對應會系統性偏掉。
+    /// （本專案的 tap 是 4096 frames ≒ 85ms，與此不同，因此必須自行重新分桶。）
+    static let energyBufferLength = Int(sampleRate * 0.1)
 
     private let lock = NSLock()
     private var samples = ContiguousArray<Float>()
-    private var energy: [Float] = []
+    /// 比照套件的 `audioEnergy`：一格一個 100ms 音訊桶。rel 供 VAD 判斷、avg 供滾動噪音基準。
+    /// **不裁剪**——套件的 `relativeEnergy` 是 `audioEnergy.map { $0.rel }`，從不裁剪；
+    /// 而 `isVoiceDetected` 會依「距上次辨識多久」取 suffix，裁短了它就讀到不足的窗口。
+    private var audioEnergy: [(rel: Float, avg: Float)] = []
+    /// 不足一格（100ms）的殘量，留到下次 append 湊滿
+    private var pendingEnergySamples: [Float] = []
     private var converter: AVAudioConverter?
     private var outputFormat: AVAudioFormat?
+    private var sourceFormat: AVAudioFormat?
+    private var energyWindow = 20
 
     /// 安全網上限（秒）。超過只回報、不截斷——截斷會破壞「只增不減」而毀掉轉錄器的記帳。
+    /// 由呼叫端（引擎）檢查 `isOverCapacity` 並結束 session。
     private let maxDuration: TimeInterval
-
-    public var relativeEnergyWindow: Int = 20
 
     public init(maxDuration: TimeInterval = 30 * 60) {
         self.maxDuration = maxDuration
@@ -47,22 +62,38 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
     public func append(_ chunk: AudioChunk) throws {
         let src = chunk.buffer
         guard src.frameLength > 0 else { return }
-        let converted = try convert(src)
+        lock.lock()
+        defer { lock.unlock() }
+        let converted = try convertLocked(src)
         guard !converted.isEmpty else { return }
-
-        lock.lock()
         samples.append(contentsOf: converted)
-        // 能量以「整段樣本」為輸入，與套件靜態函式的語意一致；只保留最近的窗口
-        let snapshot = Array(samples)
-        lock.unlock()
-
-        let value = AudioProcessor.calculateRelativeEnergy(of: snapshot, relativeTo: nil)
-        lock.lock()
-        energy.append(value)
-        if energy.count > relativeEnergyWindow {
-            energy.removeFirst(energy.count - relativeEnergyWindow)
+        pendingEnergySamples.append(contentsOf: converted)
+        while pendingEnergySamples.count >= Self.energyBufferLength {
+            let bucket = Array(pendingEnergySamples.prefix(Self.energyBufferLength))
+            pendingEnergySamples.removeFirst(Self.energyBufferLength)
+            appendEnergyLocked(for: bucket)
         }
-        lock.unlock()
+    }
+
+    /// 音訊串流結束：排出轉換器內部殘留的樣本，並把不足一格的殘量結算成最後一格能量。
+    /// 不呼叫的話，每次聽寫的尾端會有一小段音訊永遠留在轉換器裡進不了 `audioSamples`。
+    public func finish() {
+        lock.lock()
+        defer { lock.unlock() }
+        if let drained = try? drainConverterLocked(), !drained.isEmpty {
+            samples.append(contentsOf: drained)
+            pendingEnergySamples.append(contentsOf: drained)
+        }
+        while pendingEnergySamples.count >= Self.energyBufferLength {
+            let bucket = Array(pendingEnergySamples.prefix(Self.energyBufferLength))
+            pendingEnergySamples.removeFirst(Self.energyBufferLength)
+            appendEnergyLocked(for: bucket)
+        }
+        // 最後不足 100ms 的殘量也結算一格（時間對應略短，但總比整段遺漏好）
+        if !pendingEnergySamples.isEmpty {
+            appendEnergyLocked(for: pendingEnergySamples)
+            pendingEnergySamples.removeAll()
+        }
     }
 
     /// 已累積音訊是否超過安全網上限。呼叫端據此結束 session，不由本型別自行截斷。
@@ -77,8 +108,19 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
         return TimeInterval(samples.count) / Self.sampleRate
     }
 
-    private func convert(_ src: AVAudioPCMBuffer) throws -> [Float] {
-        if converter == nil || outputFormat == nil {
+    /// 逐條照抄套件 `AudioProcessor.processBuffer` 的能量算法：
+    /// 參考值＝最近 20 格的最小平均能量（滾動噪音基準；空陣列時為 `.infinity`，
+    /// 與套件同樣會讓第一格算出 NaN，而 `isVoiceDetected` 的 `> threshold` 對 NaN 為 false）。
+    private func appendEnergyLocked(for bucket: [Float]) {
+        let minAvgEnergy = audioEnergy.suffix(20).reduce(Float.infinity) { min($0, $1.avg) }
+        let rel = AudioProcessor.calculateRelativeEnergy(of: bucket, relativeTo: minAvgEnergy)
+        let avg = AudioProcessor.calculateEnergy(of: bucket).avg
+        audioEnergy.append((rel: rel, avg: avg))
+    }
+
+    private func convertLocked(_ src: AVAudioPCMBuffer) throws -> [Float] {
+        // 來源格式中途改變（換音訊裝置）必須重建轉換器，否則會拿舊格式的轉換器餵新格式的 buffer
+        if converter == nil || outputFormat == nil || sourceFormat != src.format {
             guard let out = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                           sampleRate: Self.sampleRate,
                                           channels: 1,
@@ -88,6 +130,7 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
             }
             outputFormat = out
             converter = c
+            sourceFormat = src.format
         }
         guard let converter, let outputFormat else { throw StreamFedAudioSourceError.converterUnavailable }
 
@@ -114,6 +157,19 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
         return Array(UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength)))
     }
 
+    /// 以 `.endOfStream` 排出重取樣器內部殘留的樣本
+    private func drainConverterLocked() throws -> [Float] {
+        guard let converter, let outputFormat else { return [] }
+        guard let out = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 4096) else { return [] }
+        var convError: NSError?
+        let status = converter.convert(to: out, error: &convError) { _, outStatus in
+            outStatus.pointee = .endOfStream
+            return nil
+        }
+        guard status != .error, convError == nil, let ch = out.floatChannelData else { return [] }
+        return Array(UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength)))
+    }
+
     // MARK: - AudioProcessing：串流轉錄器讀取的部分
 
     public var audioSamples: ContiguousArray<Float> {
@@ -121,9 +177,18 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
         return samples
     }
 
+    /// **不裁剪**：套件的同名屬性是 `audioEnergy.map { $0.rel }`，長度隨 session 成長；
+    /// `isVoiceDetected` 依「距上次辨識多久」取 suffix，裁短了會讀到不足的窗口而誤判。
     public var relativeEnergy: [Float] {
         lock.lock(); defer { lock.unlock() }
-        return energy
+        return audioEnergy.map(\.rel)
+    }
+
+    /// 協定要求的可寫屬性。套件只把它用在 debug log 的節流，**不**用於裁剪能量陣列；
+    /// 本型別同樣不以它裁剪。以鎖保護是為了與其餘可變狀態的同步紀律一致。
+    public var relativeEnergyWindow: Int {
+        get { lock.lock(); defer { lock.unlock() }; return energyWindow }
+        set { lock.lock(); defer { lock.unlock() }; energyWindow = newValue }
     }
 
     /// **刻意無操作**（見型別說明）：串流轉錄器以絕對索引記帳，清理會讓它算出負的新增量、
@@ -131,6 +196,8 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
     public func purgeAudioSamples(keepingLast keep: Int) {}
 
     // MARK: - AudioProcessing：錄音生命週期（麥克風由既有管線持有，一律無操作）
+    // 注意：排空轉換器是由本專案的 `finish()` 負責，不掛在 stopRecording 上——
+    // 套件可能在 session 中途呼叫 stopRecording，屆時排空會把尾端樣本提前結算。
 
     public func startRecordingLive(inputDeviceID: DeviceID?, callback: (([Float]) -> Void)?) throws {}
     public func resumeRecordingLive(inputDeviceID: DeviceID?, callback: (([Float]) -> Void)?) throws {}
