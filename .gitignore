@@ -5,4 +5,5 @@ build/
 .claude/
 .vscode/
 .superpowers/
+.serena/
 docs/superpowers/
