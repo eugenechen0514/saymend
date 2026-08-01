@@ -143,6 +143,20 @@ private actor Gate {
         #expect(await pc.peak == 1)
     }
 
+    /// **目錄 URL 與同一路徑的非目錄 URL 是同一個模型，不得各載一份。**
+    ///
+    /// 掃描器給的是目錄 URL（帶尾斜線），設定經 UserDefaults 來回一趟會變成不帶斜線的，
+    /// 而**尾斜線的差異 `resolvingSymlinksInPath()` 與 `standardizedFileURL` 都消不掉**。
+    /// 兩種形式同時出現在系統裡時，同一個模型會被當成兩個 key ——large-v3-turbo 各 3.2GB。
+    @Test func directoryURLAndPlainPathShareOneCacheKey() async throws {
+        let ct = Counter()
+        let co = ModelLoadCoordinator<String> { u in await ct.inc(); return u.lastPathComponent }
+        _ = try await co.model(for: URL(filePath: "/m/large", directoryHint: .isDirectory))   // 掃描器形式
+        _ = try await co.model(for: URL(filePath: "/m/large"))                                // 設定讀回的形式
+        let loads = await ct.v
+        #expect(loads == 1, "同一個資料夾被載了兩次（掃描器形式與設定讀回形式各一份）")
+    }
+
     /// REV #8：symlink 與實體路徑是同一個模型，不得各載一份
     @Test func symlinkedPathSharesCacheKey() async throws {
         let fm = FileManager.default
@@ -204,5 +218,48 @@ private actor Gate {
         let r = try await co.model(for: u)                                           // 重載成功
         #expect(r == "a")
         #expect(await ct.v == 2)
+    }
+
+    /// **卸載之後還是載不起來——使用者唯一的自救動作失效。**
+    ///
+    /// 實機症狀（2026-07-28）：App 閒置 20 小時、0% CPU、所有執行緒停在 run loop、
+    /// 記憶體峰值 148MB（486MB 的模型從未進記憶體），設定頁卻一直顯示「載入中…」，
+    /// 按「卸載」再按「載入」也回不來。
+    ///
+    /// 機制：一次永不返回、也不理會取消的載入會讓排隊鏈尾永遠不完成。`unload()`
+    /// 刻意不清 `chainTail`（為了守住「同時最多一個 loader」的記憶體上界），
+    /// 於是**後續每一次載入都排在一個死掉的前置者後面**，永遠等不到自己上場。
+    ///
+    /// 記憶體上界與可復原性衝突時，可復原性優先：掛住的那次載入根本沒把模型載進來、
+    /// 佔不到記憶體，而代價是整個離線引擎永久失效、且沒有任何出口。
+    @Test func unloadRecoversFromALoaderThatNeverReturns() async {
+        let neverOpens = Gate()
+        let hang = URL(filePath: "/m/hang")
+        let ok = URL(filePath: "/m/ok")
+        // 寬限期縮短才測得動；正式預設是 60 秒，由 unloadKeepsSerialization 走預設值把關
+        let co = ModelLoadCoordinator<String>(queueGrace: .milliseconds(200)) { u in
+            if u.lastPathComponent == "hang" { await neverOpens.wait() }   // 永不返回、不理會取消
+            return u.lastPathComponent
+        }
+
+        let stuck = Task { _ = try? await co.model(for: hang) }
+        while await co.state(for: hang) != .loading { await Task.yield() }
+
+        await co.unload()
+        #expect(await co.state(for: hang) == .idle)     // 卸載確實清掉了 in-flight 記錄
+
+        // 使用者接著按「載入」——這一次必須真的載得起來
+        let retry = Task { _ = try? await co.model(for: ok) }
+        var loaded = false
+        for _ in 0..<150 {                              // 有界等待 1.5 秒；不能 await 那個永不返回的 Task
+            if await co.state(for: ok) == .loaded { loaded = true; break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(loaded, "卸載後的載入排在死掉的前置者後面——使用者再也載不起來")
+
+        // 收尾：放行掛住的載入，否則 Gate 裡的 continuation 會在解構時被判定洩漏
+        await neverOpens.open()
+        _ = await stuck.value
+        _ = await retry.value
     }
 }

@@ -29,9 +29,24 @@ public actor ModelLoadCoordinator<Model: Sendable> {
     /// 卸載世代：unload 遞增。載入完成時世代不符＝這份結果已過期，不得寫回 current。
     private var epoch = 0
 
-    public init(loader: @escaping @Sendable (URL) async throws -> Model) { self.loader = loader }
+    /// 卸載後等待舊排隊鏈的寬限期（見 `unload()`）。只在卸載後生效，正常排隊仍是無限期嚴格序列化。
+    private let queueGrace: Duration
 
-    private func cacheKey(_ url: URL) -> URL { url.resolvingSymlinksInPath().standardizedFileURL }
+    public init(queueGrace: Duration = .seconds(60),
+                loader: @escaping @Sendable (URL) async throws -> Model) {
+        self.queueGrace = queueGrace
+        self.loader = loader
+    }
+
+    /// 快取 key 的正規化。
+    ///
+    /// 最後那趟 `URL(filePath:)` 專治**目錄 URL 的尾斜線**：掃描器給的是 `…/model/`，
+    /// 設定經 UserDefaults 來回一趟變成 `…/model`，而尾斜線的差異
+    /// `resolvingSymlinksInPath()` 與 `standardizedFileURL` **都消不掉**。
+    /// 少了這一步，同一個模型會落在兩個 key 上——large-v3-turbo 各佔 3.2GB。
+    private func cacheKey(_ url: URL) -> URL {
+        URL(filePath: url.resolvingSymlinksInPath().standardizedFileURL.path)
+    }
 
     public func state(for url: URL) -> ModelLoadState {
         let key = cacheKey(url)
@@ -44,13 +59,38 @@ public actor ModelLoadCoordinator<Model: Sendable> {
     ///
     /// **best-effort**：WhisperKit 的載入未必能中途停（同 NEW-3），被取消的載入可能仍會跑完；
     /// 但 epoch 保證它跑完後**不會**把模型塞回 current，狀態一致性守得住。
-    /// chainTail 刻意不清空——排隊鏈是「同時最多一個 loader」這個不變式的載體，
-    /// 清掉會讓卸載後的新載入與仍在跑的舊載入重疊，峰值記憶體回到無上界。
+    ///
+    /// **排隊鏈不清空，但改成有時限地等它。** 清空會讓卸載後的新載入與仍在跑的舊載入重疊，
+    /// 峰值記憶體失去上界；不清空又有致命的出口問題：載入若**永不返回**
+    /// （實機 2026-07-28：App 閒置 20 小時、0% CPU、模型從未進記憶體，設定頁卻一直是
+    /// 「載入中…」），鏈尾永遠不會完成，之後每一次載入都排在死掉的前置者後面——連
+    /// 「卸載再載入」這個唯一的自救動作都失效，整個離線引擎永久壞死且沒有出口。
+    ///
+    /// 折衷：使用者按下卸載＝明確要求全部停手。肯回應取消的載入會在瞬間收工，等它不花成本、
+    /// 序列化不變式完好；不肯停的載入等滿寬限期就放行，用一次短暫的記憶體重疊換回可復原性。
+    /// **寬限期只在卸載後生效**——正常的連續換模型仍是無限期嚴格序列化，那才是不變式真正
+    /// 要防的情境（連點兩個模型讓兩份 3GB 同時載入）。
     public func unload() {
         epoch &+= 1
         current = nil
         for (_, task) in inFlight { task.cancel() }
         inFlight.removeAll()
+        if let old = chainTail {
+            let grace = queueGrace
+            chainTail = Task { await Self.awaitBounded(old, grace: grace) }
+        }
+    }
+
+    /// 等 `task` 完成，但最多等 `grace`。時限到就返回，不再理會它。
+    ///
+    /// 不用 `withTaskGroup`：group 在 closure 返回時會隱式等待所有子任務，而
+    /// `await task.value` **不理會取消**——前置者永不返回時那個子任務也永遠不結束，
+    /// group 於是卡在原地，等於沒有時限。
+    private static func awaitBounded(_ task: Task<Void, Never>, grace: Duration) async {
+        let signal = OneShotSignal()
+        Task { await task.value; await signal.fire() }
+        Task { try? await Task.sleep(for: grace); await signal.fire() }   // 保證訊號一定會響
+        await signal.wait()
     }
 
     public func model(for url: URL) async throws -> Model {
@@ -76,4 +116,24 @@ public actor ModelLoadCoordinator<Model: Sendable> {
 
     /// 背景預載（best-effort）：錯誤吞掉，由實際辨識時再擲出對應失敗。
     public func preload(_ url: URL) async { _ = try? await model(for: url) }
+}
+
+/// 一次性訊號：任一方先 `fire()` 就放行所有等待者，後續 `fire()` 無作用。
+/// 供 `awaitBounded` 把「等前置者」與「等計時器」兩條路併成一個可返回的等待點。
+private actor OneShotSignal {
+    private var fired = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func fire() {
+        guard !fired else { return }
+        fired = true
+        let w = waiters
+        waiters = []
+        w.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        if fired { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
 }

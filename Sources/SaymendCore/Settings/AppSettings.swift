@@ -69,6 +69,21 @@ public final class AppSettings: @unchecked Sendable {
         static let whisperTimeout = "whisperTimeout"
         static let whisperLocalModelPath = "whisperLocalModelPath"
         static let whisperLocalScanRoots = "whisperLocalScanRoots"
+        // 串流參數（issue #15）。key 名一旦改動，既有使用者調好的值就等同被清空，
+        // `WhisperStreamingSettingsTests` 以字面值釘住這幾個名字。
+        static let streamRequiredSegments = "whisperStreamRequiredSegments"
+        static let streamSilenceThreshold = "whisperStreamSilenceThreshold"
+        static let streamUseVAD = "whisperStreamUseVAD"
+        static let streamEnergyWindow = "whisperStreamEnergyWindow"
+        static let streamCompressionCheckWindow = "whisperStreamCompressionCheckWindow"
+        static let streamLogProbThreshold = "whisperStreamLogProbThreshold"
+        static let streamCompressionRatioThreshold = "whisperStreamCompressionRatioThreshold"
+
+        /// 「還原預設」移除的 key 集合。少列一個就會出現「按了還原但那一項沒回去」的鬼打牆。
+        static let allStreamKeys = [
+            streamRequiredSegments, streamSilenceThreshold, streamUseVAD, streamEnergyWindow,
+            streamCompressionCheckWindow, streamLogProbThreshold, streamCompressionRatioThreshold,
+        ]
     }
 
     private let defaults: UserDefaults
@@ -164,6 +179,106 @@ public final class AppSettings: @unchecked Sendable {
     /// 永回非 optional：selectedModelPath 為 nil 時交引擎映射「未選擇本機模型」（契約單一）
     public func whisperLocalConfig() -> WhisperLocalConfig {
         WhisperLocalConfig(selectedModelPath: whisperLocalModelPath, extraScanRoots: whisperLocalScanRoots)
+    }
+
+    // MARK: - 本機串流參數（issue #15）
+    //
+    // 讀取防線比照 `readTimeout`：缺失／型別不符／非有限／超出合理範圍一律**回落套件預設**，
+    // 不夾到邊界值——邊界是使用者從未選過的值，套件預設才是已知良好的那個。
+    // 設定與模型無關，換模型不影響（`streamingOptionsSurviveModelChange`）。
+
+    public var streamRequiredSegments: Int {
+        get {
+            readInt(K.streamRequiredSegments,
+                    default: WhisperStreamingOptions.packageDefault.requiredSegmentsForConfirmation,
+                    in: WhisperStreamingOptions.requiredSegmentsRange)
+        }
+        set { defaults.set(newValue, forKey: K.streamRequiredSegments) }
+    }
+
+    public var streamSilenceThreshold: Double {
+        get {
+            readDouble(K.streamSilenceThreshold,
+                       default: Double(WhisperStreamingOptions.packageDefault.silenceThreshold),
+                       in: WhisperStreamingOptions.silenceThresholdRange)
+        }
+        set { defaults.set(newValue, forKey: K.streamSilenceThreshold) }
+    }
+
+    public var streamUseVAD: Bool {
+        get { defaults.object(forKey: K.streamUseVAD) as? Bool ?? WhisperStreamingOptions.packageDefault.useVAD }
+        set { defaults.set(newValue, forKey: K.streamUseVAD) }
+    }
+
+    public var streamRelativeEnergyWindow: Int {
+        get {
+            readInt(K.streamEnergyWindow,
+                    default: WhisperStreamingOptions.packageDefault.relativeEnergyWindow,
+                    in: WhisperStreamingOptions.relativeEnergyWindowRange)
+        }
+        set { defaults.set(newValue, forKey: K.streamEnergyWindow) }
+    }
+
+    public var streamCompressionCheckWindow: Int {
+        get {
+            readInt(K.streamCompressionCheckWindow,
+                    default: WhisperStreamingOptions.packageDefault.compressionCheckWindow,
+                    in: WhisperStreamingOptions.compressionCheckWindowRange)
+        }
+        set { defaults.set(newValue, forKey: K.streamCompressionCheckWindow) }
+    }
+
+    public var streamLogProbThreshold: Double {
+        get {
+            readDouble(K.streamLogProbThreshold,
+                       default: Double(WhisperStreamingOptions.packageLogProbThreshold),
+                       in: WhisperStreamingOptions.logProbThresholdRange)
+        }
+        set { defaults.set(newValue, forKey: K.streamLogProbThreshold) }
+    }
+
+    public var streamCompressionRatioThreshold: Double {
+        get {
+            readDouble(K.streamCompressionRatioThreshold,
+                       default: Double(WhisperStreamingOptions.packageCompressionRatioThreshold),
+                       in: WhisperStreamingOptions.compressionRatioThresholdRange)
+        }
+        set { defaults.set(newValue, forKey: K.streamCompressionRatioThreshold) }
+    }
+
+    /// 串流辨識參數。**每次呼叫現讀**（不做啟動快照），故設定改完下一次聽寫就生效。
+    public func whisperStreamingOptions() -> WhisperStreamingOptions {
+        WhisperStreamingOptions(
+            requiredSegmentsForConfirmation: streamRequiredSegments,
+            silenceThreshold: Float(streamSilenceThreshold),
+            useVAD: streamUseVAD,
+            relativeEnergyWindow: streamRelativeEnergyWindow,
+            compressionCheckWindow: streamCompressionCheckWindow,
+            logProbThreshold: Float(streamLogProbThreshold),
+            compressionRatioThreshold: Float(streamCompressionRatioThreshold))
+    }
+
+    /// 「還原預設」：移除 key 而非寫入一份預設值的複本，讓狀態回到與從未調過完全相同。
+    public func resetStreamingOptions() {
+        for key in K.allStreamKeys { defaults.removeObject(forKey: key) }
+    }
+
+    /// 整數版讀取防線。型別不符（舊版寫成字串、手改 plist）與超範圍都回預設。
+    private func readInt(_ key: String, default def: Int, in range: ClosedRange<Int>) -> Int {
+        guard let v = defaults.object(forKey: key) as? Int, range.contains(v) else { return def }
+        return v
+    }
+
+    /// 浮點版讀取防線。
+    ///
+    /// **誠實說明**：`isFinite` 這一關在此是冗餘的——NaN 的所有比較都是 false，範圍檢查
+    /// 本來就會擋下它；±Inf 也一樣超界。它擋得住的輸入，範圍檢查也擋得住，因此**測試無法
+    /// 單獨驅動它**。保留是因為「不是數字」與「超出範圍」是兩種不同的損毀，各自寫明比
+    /// 倚賴 NaN 比較語意的巧合來得清楚（`readTimeout` 亦同）。不得宣稱它有測試覆蓋。
+    private func readDouble(_ key: String, default def: Double, in range: ClosedRange<Float>) -> Double {
+        guard let v = defaults.object(forKey: key) as? Double, v.isFinite else { return def }
+        guard v >= Double(range.lowerBound), v <= Double(range.upperBound) else { return def }
+        return v
     }
 
     /// prompt 第 4 層：使用者全域自訂 system prompt（規格 §4.4；空字串＝未設定）

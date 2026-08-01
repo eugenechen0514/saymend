@@ -203,4 +203,28 @@ private enum FX {
         let r = WhisperKitModelScanner().scan(roots: [root, root])
         #expect(r.count == 1); #expect(r.first?.displayName == "openai_whisper-small")
     }
+
+    /// **選好的模型必須在重啟後仍然對得上自己。**
+    ///
+    /// `contentsOfDirectory(at:includingPropertiesForKeys:[.isDirectoryKey])` 回傳的是
+    /// **目錄 URL——帶尾斜線**；而設定存進 UserDefaults 走的是 `URL.path` 字串，
+    /// 尾斜線在那裡被吃掉，讀回來就是不帶斜線的 URL。兩者指向同一個資料夾卻不相等。
+    ///
+    /// 尾斜線的差異 **`resolvingSymlinksInPath()` 與 `standardizedFileURL` 都消不掉**，
+    /// 所以「正規化過了」不代表對得上——這正是實機 2026-07-28 的症狀：模型明明載入成功
+    /// （狀態顯示「已載入」），設定頁的下拉選單卻是空白，還跳出「先前選定的模型目前不在
+    /// 掃描結果中」的假警告。每個使用者選完模型重開 App 都會遇到。
+    @Test func discoveredPathSurvivesTheSettingsRoundTrip() throws {
+        let root = try FX.temp()
+        _ = try FX.whisperModel(root, "openai_whisper-large-v3_turbo")
+        let found = try #require(WhisperKitModelScanner().scan(roots: [root]).first)
+
+        let d = UserDefaults(suiteName: "scan-\(UUID().uuidString)")!
+        let settings = AppSettings(defaults: d, secrets: InMemorySecretStore())
+        settings.whisperLocalModelPath = found.path          // 使用者從下拉選單選了它
+        let reloaded = try #require(settings.whisperLocalModelPath)   // 重啟後讀回來
+
+        #expect(reloaded == found.path,
+                "掃描器給 \(found.path.absoluteString)，設定讀回 \(reloaded.absoluteString)——下拉選單會比對失敗而顯示空白，並跳出「不在掃描結果中」的假警告")
+    }
 }

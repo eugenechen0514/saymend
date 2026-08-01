@@ -146,7 +146,15 @@ public struct WhisperKitModelScanner {
         var seen = Set<URL>()
         func consider(_ dir: URL) {
             // symlink 一併解析後才當去重 key（REV #8）：同一實體目錄經 symlink 掃到不得重複列出
-            let std = dir.resolvingSymlinksInPath().standardizedFileURL
+            //
+            // 最後再走一趟 `URL(filePath:)` 是為了**消掉目錄 URL 的尾斜線**：
+            // `contentsOfDirectory(at:includingPropertiesForKeys:[.isDirectoryKey])` 給的是
+            // 目錄 URL（`…/model/`），而設定存進 UserDefaults 走的是 `URL.path` 字串，
+            // 尾斜線在那裡被吃掉，讀回來是 `…/model`。兩者指向同一個資料夾卻**不相等**，
+            // 且這個差異 `resolvingSymlinksInPath()` 與 `standardizedFileURL` 都消不掉。
+            // 少了這一步，使用者選好模型重開 App，下拉選單就會空白並跳出
+            // 「先前選定的模型目前不在掃描結果中」的假警告（實機 2026-07-28）。
+            let std = URL(filePath: dir.resolvingSymlinksInPath().standardizedFileURL.path)
             guard !seen.contains(std) else { return }
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { return }
