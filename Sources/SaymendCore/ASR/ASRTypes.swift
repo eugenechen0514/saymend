@@ -11,6 +11,14 @@ public enum TranscriptEvent: Equatable, Sendable {
     case loadingModel
     /// M8：辨識失敗，不上屏、不入帳本（僅 WhisperRemoteEngine 會吐）
     case failed(reason: String)
+    /// issue #18：整段音訊都沒有任何一格超過靜音門檻——使用者可能講了話但麥克風太遠。
+    ///
+    /// **一個 session 最多一次**（邊緣觸發）。持續判否時底層每 0.5 秒就有一筆音訊統計進來，
+    /// 若照單全發，斷句器的靜音計時會被打爆、話語永不閉合（同 `WhisperKitEngine.pump`
+    /// 對套件回呼的去重紀律）。故本事件**不進斷句器**，由控制器單獨處理。
+    ///
+    /// 目前僅本機串流引擎會發；其他引擎不發，對它們是可選資訊。
+    case noSpeechDetected
 }
 
 /// AVAudioPCMBuffer 的 Sendable 包裝（單一生產者、單一消費者，不共享可變狀態）

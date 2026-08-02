@@ -148,17 +148,25 @@ public final class WhisperKitTranscriber: WhisperTranscribing {
                            audio: AsyncStream<AudioChunk>,
                            language: String,
                            promptPhrases: [String],
-                           options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamProgress, Error> {
+                           options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task { [maxDuration, coordinator] in
-                // 窗口在此給定而非等 streamTranscribe：模型載入可達數分鐘，那之前餵進來的
-                // 音訊會先算完能量，晚到的設定救不回已經用舊窗口算掉的那幾十秒。
+                // 窗口與門檻在此給定而非等 streamTranscribe：模型載入可達數分鐘，那之前餵進來的
+                // 音訊會先算完能量，晚到的設定救不回已經用舊值算掉的那幾十秒。
                 let source = StreamFedAudioSource(maxDuration: maxDuration,
-                                                  relativeEnergyWindow: options.relativeEnergyWindow)
+                                                  relativeEnergyWindow: options.relativeEnergyWindow,
+                                                  silenceThreshold: options.silenceThreshold)
                 let audioDone = Sendable_Flag()
 
                 // 餵音訊：與辨識並行，音訊耗盡即標記結束讓串流轉錄器收工
+                // **誠實說明覆蓋範圍**：下面這段餵音訊迴圈（含 0.5 秒降頻與收尾補一筆統計）
+                // **沒有單元測試**——它要真的 `WhisperKitTranscriber`，而那需要載入真模型。
+                // 引擎端消費 `audioStats` 的政策有完整測試（含 9 發變異），但「統計有沒有被發出來、
+                // 頻率對不對」只有實機驗收擋得住。不得宣稱這段有測試覆蓋。
                 let feeder = Task {
+                    // 音訊統計降頻至每 0.5 秒一筆（issue #18）。逐 chunk 發是每 85ms 一次，
+                    // 對「已經三秒沒人講話」這個判斷毫無增益，只是白白製造跨隔離域流量。
+                    var lastStatsAt: TimeInterval = 0
                     for await chunk in audio {
                         if Task.isCancelled { break }
                         do { try source.append(chunk) } catch {
@@ -172,8 +180,18 @@ public final class WhisperKitTranscriber: WhisperTranscribing {
                                 WhisperStreamError.overCapacity(minutes: Int(maxDuration / 60)))
                             return
                         }
+                        let now = source.duration
+                        if now - lastStatsAt >= 0.5 {
+                            lastStatsAt = now
+                            continuation.yield(.audioStats(voicedBuckets: source.voicedBuckets,
+                                                           seconds: now))
+                        }
                     }
                     source.finish()      // 排出重取樣器殘留，否則尾端音訊進不了樣本陣列
+                    // 收尾必補一筆：引擎的「1.5 秒以上零語音就補示警」規則要拿最終數字判斷，
+                    // 而短 session 可能一次降頻窗口都沒滿過，不補就完全沒有統計可依據。
+                    continuation.yield(.audioStats(voicedBuckets: source.voicedBuckets,
+                                                   seconds: source.duration))
                     audioDone.set()
                 }
                 defer { feeder.cancel() }
@@ -184,7 +202,7 @@ public final class WhisperKitTranscriber: WhisperTranscribing {
                     try await model.streamTranscribe(
                         source: source, language: language, promptPhrases: promptPhrases,
                         options: options,
-                        onProgress: { continuation.yield($0) },
+                        onProgress: { continuation.yield(.progress($0)) },
                         shouldStop: { audioDone.isSet || Task.isCancelled })
                     continuation.finish()
                 } catch {

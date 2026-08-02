@@ -8,6 +8,8 @@ private final class FakeStreamTranscriber: WhisperTranscribing, @unchecked Senda
     let lock = NSLock()
     /// 依序吐出的進度。預設：一次定稿。
     var steps: [WhisperStreamProgress] = [.init(confirmed: "整段本機辨識結果", unconfirmed: "")]
+    /// 需要編排音訊統計時改設這個；設了就整串照發，`steps` 不再使用。
+    var events: [WhisperStreamEvent]?
     var loadError: WhisperLoadError?
     /// 吐完 steps 之後改以擲錯收場
     var errorAfterSteps: Error?
@@ -36,14 +38,14 @@ private final class FakeStreamTranscriber: WhisperTranscribing, @unchecked Senda
 
     func transcribe(modelPath: URL, audio: AsyncStream<AudioChunk>, language: String,
                     promptPhrases: [String],
-                    options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamProgress, Error> {
-        let (load, plan, err) = sync { () -> (WhisperLoadError?, [WhisperStreamProgress], Error?) in
+                    options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamEvent, Error> {
+        let (load, plan, err) = sync { () -> (WhisperLoadError?, [WhisperStreamEvent], Error?) in
             seenPhrases = promptPhrases
             seenModelPath = modelPath
             seenLanguage = language
             seenOptions = options
             transcribeCount += 1
-            return (loadError, steps, errorAfterSteps)
+            return (loadError, events ?? steps.map { .progress($0) }, errorAfterSteps)
         }
         return AsyncThrowingStream { cont in
             if let load { cont.finish(throwing: load); return }
@@ -56,7 +58,7 @@ private final class FakeStreamTranscriber: WhisperTranscribing, @unchecked Senda
 /// 可控暫停的假辨識器：進到辨識就發 entered 訊號、等 release 才收尾。
 private final class GatedStreamFake: WhisperTranscribing, @unchecked Sendable {
     let lock = NSLock()
-    private var cont: AsyncThrowingStream<WhisperStreamProgress, Error>.Continuation?
+    private var cont: AsyncThrowingStream<WhisperStreamEvent, Error>.Continuation?
     var onEntered: (@Sendable () -> Void)?
     /// 放行後改以擲錯收場（驗取消時不得吐 .failed）
     var errorAfterRelease: Error?
@@ -70,7 +72,7 @@ private final class GatedStreamFake: WhisperTranscribing, @unchecked Sendable {
 
     func transcribe(modelPath: URL, audio: AsyncStream<AudioChunk>, language: String,
                     promptPhrases: [String],
-                    options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamProgress, Error> {
+                    options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamEvent, Error> {
         AsyncThrowingStream { c in
             lock.lock(); cont = c; lock.unlock()
             onEntered?()
@@ -79,7 +81,7 @@ private final class GatedStreamFake: WhisperTranscribing, @unchecked Sendable {
 
     func release() {
         lock.lock(); let c = cont; cont = nil; lock.unlock()
-        if yieldOnRelease { c?.yield(.init(confirmed: "遲到結果", unconfirmed: "")) }
+        if yieldOnRelease { c?.yield(.progress(.init(confirmed: "遲到結果", unconfirmed: ""))) }
         c?.finish(throwing: errorAfterRelease)
     }
 }
@@ -218,6 +220,90 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         ]
         let evs = await drive(engine(f))
         #expect(finalizedTexts(evs) == ["有字"])
+    }
+
+    // MARK: - 沒偵測到語音的示警（issue #18）
+
+    /// **實機 2026-08-01 的失敗情境**：使用者講了 11 秒，整段沒有一格相對能量超過門檻，
+    /// 串流轉錄器一次都沒把音訊送去解碼——欄位、HUD 全空，沒有任何錯誤。
+    /// 引擎必須在聽寫進行中就把這件事說出來，而不是讓使用者講完整段才發現。
+    @Test func silentSessionWarnsWhileStillListening() async throws {
+        let f = FakeStreamTranscriber()
+        f.events = [.audioStats(voicedBuckets: 0, seconds: 1.0),
+                    .audioStats(voicedBuckets: 0, seconds: 2.5),
+                    .audioStats(voicedBuckets: 0, seconds: 3.5),   // 過門檻 → 此刻就該示警
+                    .progress(.init(confirmed: "後面才辨出的字", unconfirmed: ""))]
+        let evs = await drive(engine(f))
+        // 判別靠**順序**：聽寫中發的示警必然排在後續定稿之前。
+        // 只寫 `contains` 的話，拿掉聽寫中示警、單靠收尾補發也會通過——測試就沒有牙齒。
+        let wi = try #require(evs.firstIndex(of: .noSpeechDetected))
+        let fi = try #require(evs.firstIndex(of: .finalized("後面才辨出的字")))
+        #expect(wi < fi, "示警排在定稿之後——它是收尾補發的，不是聽寫進行中發的")
+    }
+
+    /// 3 秒以下不示警：按了熱鍵先醞釀一下是常態，誤報比漏報更傷信任
+    @Test func silenceUnderThreeSecondsDoesNotWarnWhileListening() async {
+        let f = FakeStreamTranscriber()
+        f.events = [.audioStats(voicedBuckets: 0, seconds: 1.0),
+                    .audioStats(voicedBuckets: 0, seconds: 2.9),
+                    .progress(.init(confirmed: "後來還是辨出東西了", unconfirmed: ""))]
+        let evs = await drive(engine(f))
+        // 2.9 秒仍 ≥ 1.5，收尾會補發——所以驗的是「聽寫中沒發」而非「完全沒發」。
+        // 判別靠**順序**：聽寫中發的話會排在定稿之前，收尾補發的必然在定稿之後。
+        // 少了這個順序斷言，把門檻改成 0 秒（即刻示警）也一樣能過，測試就沒有牙齒。
+        #expect(evs.filter { $0 == .noSpeechDetected }.count == 1)
+        let wi = evs.firstIndex(of: .noSpeechDetected)!
+        let fi = evs.firstIndex(of: .finalized("後來還是辨出東西了"))!
+        #expect(wi > fi, "示警排在定稿之前——它是聽寫中發的，不是收尾補發的")
+    }
+
+    /// 有偵測到語音就永不示警——正常聽寫不得被打擾
+    @Test func voicedSessionNeverWarns() async {
+        let f = FakeStreamTranscriber()
+        f.events = [.audioStats(voicedBuckets: 0, seconds: 2.0),
+                    .audioStats(voicedBuckets: 7, seconds: 4.0),
+                    .audioStats(voicedBuckets: 12, seconds: 9.0),
+                    .progress(.init(confirmed: "今天天氣不錯", unconfirmed: ""))]
+        let evs = await drive(engine(f))
+        #expect(!evs.contains(.noSpeechDetected))
+        #expect(finalizedTexts(evs) == ["今天天氣不錯"])
+    }
+
+    /// 一個 session 最多示警一次。持續判否時 `audioStats` 每 0.5 秒就來一筆，
+    /// 若每筆都發，斷句器的靜音計時會被打爆、話語永不閉合——#14 的核心紀律。
+    @Test func warningIsEmittedAtMostOncePerSession() async {
+        let f = FakeStreamTranscriber()
+        f.events = (0..<12).map { .audioStats(voicedBuckets: 0, seconds: 3.0 + Double($0) * 0.5) }
+        let evs = await drive(engine(f))
+        #expect(evs.filter { $0 == .noSpeechDetected }.count == 1)
+    }
+
+    /// 1.5–3.0 秒的零語音 session：聽寫中不夠格示警，但收尾要補發。
+    /// 少了收尾這一關，短嘗試會完全靜默——正是這張票要消滅的失敗模式。
+    @Test func shortSilentSessionIsWarnedAtStreamEnd() async {
+        let f = FakeStreamTranscriber()
+        f.events = [.audioStats(voicedBuckets: 0, seconds: 1.8)]
+        let evs = await drive(engine(f))
+        #expect(evs.contains(.noSpeechDetected))
+    }
+
+    /// 1.5 秒以下＝誤觸熱鍵，不得每次手滑都被唸
+    @Test func accidentalTapIsNotWarned() async {
+        let f = FakeStreamTranscriber()
+        f.events = [.audioStats(voicedBuckets: 0, seconds: 0.8)]
+        let evs = await drive(engine(f))
+        #expect(!evs.contains(.noSpeechDetected))
+    }
+
+    /// 失敗收場不得再疊一個示警：使用者要看的是失敗原因，不是「沒偵測到語音」
+    @Test func failedStreamDoesNotAlsoWarn() async {
+        let f = FakeStreamTranscriber()
+        f.events = [.audioStats(voicedBuckets: 0, seconds: 5.0)]
+        f.errorAfterSteps = WhisperStreamError.audioConversionFailed
+        let evs = await drive(engine(f))
+        // 聽寫中那筆示警已經發出去了（5 秒 > 3 秒），但收尾不得再補一筆
+        #expect(evs.filter { $0 == .noSpeechDetected }.count == 1)
+        #expect(evs.contains(.failed(reason: "音訊轉換失敗")))
     }
 
     // MARK: - 收尾：未定稿的尾端

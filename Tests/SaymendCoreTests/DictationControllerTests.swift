@@ -1925,3 +1925,89 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(spy.texts == ["整段遠端辨識結果"])           // 未重複急救
     #expect(c.phase == .idle)                           // frozen → asrStreamEnded 封存
 }
+
+// MARK: - 沒偵測到語音的回饋（issue #18）
+
+/// 聽寫進行中收到示警 → HUD 立刻換狀態，使用者第三秒就知道要靠近麥克風，
+/// 不必講完整段才發現什麼都沒發生。
+@MainActor
+@Test func noSpeechWarningSwitchesHUDWhileListening() {
+    let (c, _, _, _, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.noSpeechDetected, at: 13.0)
+    #expect(hud.states.last == .noSpeechDetected(mode: .hold))
+}
+
+/// **這條是防 #14 迴歸的關鍵。**
+/// 斷句器對任何辨識事件都會重置靜音計時。示警事件若進了斷句器，靜音間隔就永遠不會到期、
+/// 話語永不閉合——整個串流改造歸零。判別方式：示警之後把靜音走完，先前的定稿仍須閉合成話語。
+@MainActor
+@Test func noSpeechWarningDoesNotResetTheSegmenter() {
+    let (c, _, _, _, _, _) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("今天天氣不錯"), at: 10.5)
+    // 時間刻意挑在判別窗上：quietGap 是 1.5 秒。
+    // 沒重置 → 12.0 距 10.5 剛好 1.5 秒，話語閉合；
+    // 被重置 → 12.0 距 11.9 只有 0.1 秒，話語不會閉合。差別看得出來。
+    c.handleTranscript(.noSpeechDetected, at: 11.9)
+    c.tick(at: 12.0)
+    #expect(c.pendingIntents == 1, "示警事件重置了斷句器的靜音計時——話語沒有閉合")
+}
+
+/// 收尾時若整段都沒偵測到語音，發 notice 取代延續窗。
+/// 取代而非疊加：沒偵測到語音就沒有東西可修正，延續窗本來就沒意義；
+/// 而且這樣 notice 不會被 lingering 蓋掉（M8 code review 第 4 個 finding 的坑）。
+@MainActor
+@Test func silentSessionEndsWithNoticeInsteadOfLingering() {
+    let (c, _, _, _, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.noSpeechDetected, at: 13.0)
+    c.hotkeyReleased(at: 14.0)
+    c.asrStreamEnded(at: 14.1)
+    #expect(hud.states.last == .notice(DictationController.noSpeechNotice))
+    #expect(!hud.states.contains(.lingering), "延續窗不該出現——沒有東西可修正")
+}
+
+/// 示警之後使用者才開始講話：文字產出即為解除訊號，收尾不得再唸他。
+@MainActor
+@Test func warningIsReleasedOnceTextIsProduced() {
+    let (c, _, _, _, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.noSpeechDetected, at: 13.0)
+    c.handleTranscript(.finalized("後來我開口了"), at: 14.0)
+    c.hotkeyReleased(at: 16.0)
+    c.asrStreamEnded(at: 16.1)
+    #expect(!hud.states.contains(.notice(DictationController.noSpeechNotice)),
+            "使用者後來有講話，不該還在唸他沒偵測到語音")
+}
+
+/// **HUD 也必須跟著解除，不只是 notice。**
+///
+/// 示警之後使用者開口，文字若以**定稿**形式回來（`.finalized` 分支不碰 HUD，只有 `.volatile`
+/// 會呼叫 presentListening），HUD 會整段停在橘色「沒偵測到語音」——而 notice 又因為
+/// 「有產出文字」而不發。結果是畫面持續說謊到 session 結束，且沒有任何機制會糾正它。
+/// 尾端補發走的也是 `.finalized`，所以這條路徑並不罕見。
+@MainActor
+@Test func hudRecoversFromWarningWhenTextArrivesAsFinalized() {
+    let (c, _, _, _, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.noSpeechDetected, at: 13.0)
+    #expect(hud.states.last == .noSpeechDetected(mode: .hold))
+    c.handleTranscript(.finalized("後來我開口了"), at: 14.0)
+    #expect(hud.states.last == .listening(mode: .hold, volatile: ""),
+            "文字都上屏了，HUD 還停在「沒偵測到語音」——畫面在說謊")
+}
+
+/// 沒有示警在畫面上時，定稿**不得**動 HUD。
+/// 少了這道守衛，每筆定稿都會把正在顯示的暫時文字清成空白——
+/// 使用者會在每句話之間看到 HUD 閃一下。
+@MainActor
+@Test func finalizedLeavesTheVolatilePreviewAloneWhenNoWarningIsShowing() {
+    let (c, _, _, _, _, hud) = makeController()
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.volatile("今天天"), at: 10.5)
+    #expect(hud.states.last == .listening(mode: .hold, volatile: "今天天"))
+    c.handleTranscript(.finalized("今天天氣"), at: 10.8)
+    #expect(hud.states.last == .listening(mode: .hold, volatile: "今天天"),
+            "定稿把正在顯示的暫時文字清掉了——HUD 會在每句話之間閃一下空白")
+}

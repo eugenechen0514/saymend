@@ -34,6 +34,24 @@ struct HUDView: View {
                         .frame(maxWidth: 360, alignment: .leading)
                 }
                 UndoPill(action: model.onUndoTap)
+            // issue #18：麥克風圖示改成橘色的警示版本，文字直接說「太遠」而非只報告
+            // 「沒偵測到語音」——使用者要的是下一步動作。「聽寫階段仍在進行」這個事實
+            // 由圖示與「聽寫中」字樣承載，不會從畫面上消失。
+            //
+            // **音量條刻意拿掉。** 它畫的是絕對音量，而 VAD 判的是相對能量——兩者是不同的量。
+            // 絕對音量條一邊跳、旁邊一邊寫「沒偵測到語音」，正是 #18 點名「等於在說謊」的畫面。
+            // 代價：使用者少了「麥克風全死」與「麥克風太遠」的區分線索。若實機回報需要，
+            // 該補的是一個以相對能量為準的指示，而不是把絕對音量條放回來。
+            case .noSpeechDetected(let mode):
+                Image(systemName: "mic.slash.fill")
+                    .foregroundStyle(.orange)
+                Text(mode == .locked ? "鎖定聽寫" : "聽寫中")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("沒偵測到語音——麥克風可能太遠")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                UndoPill(action: model.onUndoTap)
             case .selectionListening(_, let volatile):
                 Image(systemName: "character.cursor.ibeam")
                     .foregroundStyle(.orange)

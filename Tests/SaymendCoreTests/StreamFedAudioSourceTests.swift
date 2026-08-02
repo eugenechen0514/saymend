@@ -218,6 +218,57 @@ private func expectedRelativeEnergy(samples: [Float], window: Int) -> [Float] {
     }
 }
 
+// MARK: - 超標格數（issue #18）
+
+/// 契約：`voicedBuckets` ＝ 相對能量超過門檻的格數。
+/// 實作是逐格累計（O(1)），這條以「掃整個陣列」的參考算法對答案——
+/// 累計若漏格、重算或用錯門檻，兩邊就對不上。
+@Test func voicedBucketsMatchesScanningTheWholeEnergyArray() throws {
+    let src = StreamFedAudioSource(silenceThreshold: 0.3)
+    // 秒數刻意**不是** 100ms 的整數倍：能量格會跨 chunk 邊界（殘量留到下次 append 湊滿），
+    // 累計若在邊界上重算或漏算就會與參考算法對不上。用 0.5／1.5 這種對齊值測不到這件事。
+    try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1,
+                                                 seconds: 0.37, amplitude: 0.0005)))
+    try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1,
+                                                 seconds: 1.31, amplitude: 0.5)))
+    try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1,
+                                                 seconds: 0.42, amplitude: 0.0005)))
+
+    let expected = src.relativeEnergy.filter { !$0.isNaN && $0 > 0.3 }.count
+    #expect(expected > 0, "這段音訊一格都沒超標，測不出東西")
+    #expect(src.voicedBuckets == expected)
+}
+
+/// 門檻確實由 init 生效——同一段音訊、不同門檻必須算出不同結果。
+/// 少了這條，「門檻參數被忽略、寫死用套件預設」不會被任何測試抓到。
+@Test func voicedBucketsHonoursTheThresholdGivenAtInit() throws {
+    func count(threshold: Float) throws -> Int {
+        let src = StreamFedAudioSource(silenceThreshold: threshold)
+        try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1,
+                                                     seconds: 0.5, amplitude: 0.0005)))
+        try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1,
+                                                     seconds: 1.5, amplitude: 0.5)))
+        return src.voicedBuckets
+    }
+    let lenient = try count(threshold: 0.05)
+    let strict = try count(threshold: 0.95)
+    #expect(lenient > strict, "寬門檻 \(lenient) 格、嚴門檻 \(strict) 格——門檻沒被套用")
+    #expect(strict == 0, "門檻 0.95 幾乎不可能有格超過，實得 \(strict) 格")
+}
+
+/// **實機 2026-08-01 的失敗情境**：音量均勻、沒有明顯轉變，整段零格超標。
+/// 相對能量量的是相對於滾動噪音基準的變化量，音量穩定時基準會追上訊號、數值趨近 0。
+@Test func uniformAudioProducesNoVoicedBuckets() throws {
+    let src = StreamFedAudioSource(silenceThreshold: 0.3)
+    for _ in 0..<10 {
+        try src.append(AudioChunk(buffer: makeBuffer(sampleRate: 16000, channels: 1,
+                                                     seconds: 0.5, amplitude: 0.05)))
+    }
+    #expect(src.relativeEnergy.count > 40)          // 音訊確實有進來
+    #expect(src.voicedBuckets == 0,
+            "均勻音量算出 \(src.voicedBuckets) 格超標——本測試無法代表實機那次靜默失敗")
+}
+
 @Test func energyWindowOfZeroStillDetectsLoudSpeech() throws {
     // 協定要求 relativeEnergyWindow 是公開可寫的 Int，擋不住 0，故實作以 max(1,) 兜底。
     //
