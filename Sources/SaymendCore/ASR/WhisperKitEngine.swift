@@ -150,6 +150,9 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
         do {
             var lastConfirmed = ""
             var lastUnconfirmed = ""
+            // issue #10：定稿文字的品質診斷。已發出去的片段數要記著，才切得出「這次新增的是哪幾個」。
+            var confirmedQualityCount = 0
+            var lastUnconfirmedQuality: [TranscriptSegmentQuality] = []
             // issue #18：整段零語音的示警狀態。邊緣觸發——一個 session 最多發一次。
             var warnedNoSpeech = false
             var lastStats: (voiced: Int, seconds: Double) = (0, 0)
@@ -175,17 +178,28 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
                 if step.confirmed != lastConfirmed {
                     // 定稿只增不減：只吐新增的那一段，重覆的部分不得再上屏一次
                     let delta = Self.newlyConfirmed(previous: lastConfirmed, current: step.confirmed)
+                    let deltaQuality = Self.newlyConfirmedQuality(previousCount: confirmedQualityCount,
+                                                                  current: step.confirmedQuality)
                     lastConfirmed = step.confirmed
+                    confirmedQualityCount = step.confirmedQuality.count
                     let trimmed = delta.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !trimmed.isEmpty { continuation.yield(.finalized(trimmed)) }
+                    if !trimmed.isEmpty {
+                        continuation.yield(.finalized(trimmed,
+                                                      quality: TranscriptQuality(segments: deltaQuality)))
+                    }
                 }
+                // 未定稿的品質**每一步都留存**，不跟著文字去重。去重紀律是為了不亂發事件，
+                // 而這只是更新一個本地變數；跟著去重的話，套件重新解碼出同樣文字但不同信心度時，
+                // 收尾補發會帶著過期的數字。
+                lastUnconfirmedQuality = step.unconfirmedQuality
                 if step.unconfirmed != lastUnconfirmed {
                     lastUnconfirmed = step.unconfirmed
                     continuation.yield(.volatile(step.unconfirmed))
                 }
             }
             if Task.isCancelled { continuation.finish(); return }
-            flushTail(lastUnconfirmed, into: continuation)
+            flushTail(lastUnconfirmed, quality: TranscriptQuality(segments: lastUnconfirmedQuality),
+                      into: continuation)
             // 1.5–3.0 秒的零語音 session 在聽寫中不夠格示警，收尾才補——
             // 少了這一關，短嘗試會完全靜默，正是本票要消滅的失敗模式。
             if !warnedNoSpeech, lastStats.voiced == 0, lastStats.seconds >= Self.endOfStreamWarnAfter {
@@ -214,9 +228,10 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
     ///
     /// 只在**正常結束**時補：取消與失敗都不補。中途壞掉時殘留的未定稿文字沒有可信度可言，
     /// 送上屏等於把半成品當結果寫進使用者的欄位。
-    private func flushTail(_ tail: String, into continuation: AsyncStream<TranscriptEvent>.Continuation) {
+    private func flushTail(_ tail: String, quality: TranscriptQuality?,
+                           into continuation: AsyncStream<TranscriptEvent>.Continuation) {
         let trimmed = tail.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty { continuation.yield(.finalized(trimmed)) }
+        if !trimmed.isEmpty { continuation.yield(.finalized(trimmed, quality: quality)) }
     }
 
     /// 定稿文字只增不減，故新增部分＝去掉共同前綴。萬一不是前綴關係（套件重寫了已定稿
@@ -224,6 +239,19 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
     static func newlyConfirmed(previous: String, current: String) -> String {
         guard current.hasPrefix(previous) else { return current }
         return String(current.dropFirst(previous.count))
+    }
+
+    /// 新定稿那段文字對應的片段品質（issue #10）。以「已發出去幾個片段」切，切不出來就整組回傳。
+    ///
+    /// **誠實說明精確度**：文字增量以字串前綴算、品質增量以片段數算，兩者在
+    /// 「片段數沒變但該片段文字被改寫」時會不一致——那時品質會涵蓋得比那段文字寬。
+    /// 沒有改成以片段為單位統一計算，是因為字串前綴那套是 #14 實機驗收過的行為，
+    /// 為了診斷資料去動它不划算。診斷取的是最壞值，涵蓋過寬只會讓數字偏保守，
+    /// 而 `segmentCount` 讓這件事在回查時看得見。
+    static func newlyConfirmedQuality(previousCount: Int,
+                                      current: [TranscriptSegmentQuality]) -> [TranscriptSegmentQuality] {
+        guard previousCount > 0, previousCount < current.count else { return current }
+        return Array(current.dropFirst(previousCount))
     }
 
     static func reason(for error: any Error) -> String {

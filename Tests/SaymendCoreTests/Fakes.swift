@@ -115,13 +115,16 @@ final class FakeHistory: HistoryRecording {
     private(set) var sessions: [HistorySessionRecord] = []
     private(set) var exchanges: [HistoryExchangeRecord] = []
     private(set) var finished: [(id: String, finalText: String?)] = []
+    private(set) var diagnostics: [ASRDiagnosticRecord] = []
     func beginSession(_ record: HistorySessionRecord) { sessions.append(record) }
     func recordExchange(_ record: HistoryExchangeRecord) { exchanges.append(record) }
+    func recordASRDiagnostic(_ record: ASRDiagnosticRecord) { diagnostics.append(record) }
     func finishSession(id: String, finalText: String?) { finished.append((id, finalText)) }
     func recentSessions(limit: Int) -> [HistorySessionRecord] { Array(sessions.suffix(limit).reversed()) }
     func exchanges(sessionID: String) -> [HistoryExchangeRecord] { exchanges.filter { $0.sessionID == sessionID } }
+    func asrDiagnostics(sessionID: String) -> [ASRDiagnosticRecord] { diagnostics.filter { $0.sessionID == sessionID } }
     func purge(olderThanDays: Int) {}
-    func deleteAll() { sessions = []; exchanges = []; finished = [] }
+    func deleteAll() { sessions = []; exchanges = []; finished = []; diagnostics = [] }
 }
 
 /// 回饋層 spy（M3 overlay／diff 的 Core 側接點）

@@ -48,12 +48,51 @@ public struct HistoryExchangeRecord: Codable, Equatable, Sendable, FetchableReco
     }
 }
 
+/// 一段定稿文字的辨識品質診斷（issue #10）。
+///
+/// **另開一張表而不是給 `history_exchange` 加欄位**，有三個理由：
+/// ① 錨點不同——exchange 列寫在話語閉合、語言模型回應之後，而那條路徑會漏。實機 id=116
+///    那筆幻覺就只留下 `insertSkipped` 一列，沒有 outcome 列：封存已把 historySessionID 清掉，
+///    晚到的 outcome 無處可歸。診斷若掛在 outcome 列上，**恰好會漏掉最需要的樣本**。
+/// ② 語意不同——`outcomeKind` 講的是「這句話最後怎麼了」，塞進辨識器的自評會混淆它。
+/// ③ 給 exchange 加兩個可空欄位，對 undo／degraded 這些非辨識列永遠是 null。
+///
+/// 生命週期完全跟著 session：FK cascade 連帶刪除，保留天數與「全部清除」自動涵蓋。
+public struct ASRDiagnosticRecord: Codable, Equatable, Sendable, FetchableRecord, PersistableRecord {
+    public static let databaseTableName = "asr_diagnostic"
+    public var id: Int64?
+    public var sessionID: String
+    public var at: Date
+    public var finalizedText: String
+    public var minAvgLogprob: Double
+    public var maxCompressionRatio: Double
+    public var segmentCount: Int
+
+    public init(id: Int64? = nil, sessionID: String, at: Date, finalizedText: String,
+                minAvgLogprob: Double, maxCompressionRatio: Double, segmentCount: Int) {
+        self.id = id
+        self.sessionID = sessionID
+        self.at = at
+        self.finalizedText = finalizedText
+        self.minAvgLogprob = minAvgLogprob
+        self.maxCompressionRatio = maxCompressionRatio
+        self.segmentCount = segmentCount
+    }
+
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+}
+
 public protocol HistoryRecording: AnyObject {
     func beginSession(_ record: HistorySessionRecord)
     func recordExchange(_ record: HistoryExchangeRecord)
+    /// issue #10：辨識品質診斷。與 exchange 分開記，理由見 `ASRDiagnosticRecord`。
+    func recordASRDiagnostic(_ record: ASRDiagnosticRecord)
     func finishSession(id: String, finalText: String?)
     func recentSessions(limit: Int) -> [HistorySessionRecord]
     func exchanges(sessionID: String) -> [HistoryExchangeRecord]
+    func asrDiagnostics(sessionID: String) -> [ASRDiagnosticRecord]
     func purge(olderThanDays: Int)
     func deleteAll()
 }
@@ -84,6 +123,19 @@ public final class GRDBHistoryStore: HistoryRecording {
                 t.column("outcomeText", .text)
             }
         }
+        // v2（issue #10）：辨識品質診斷表。獨立 migration＝既有資料庫就地升級，不重建、不搬資料。
+        migrator.registerMigration("v2") { db in
+            try db.create(table: "asr_diagnostic") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("sessionID", .text).notNull().indexed()
+                    .references("history_session", onDelete: .cascade)
+                t.column("at", .datetime).notNull()
+                t.column("finalizedText", .text).notNull()
+                t.column("minAvgLogprob", .double).notNull()
+                t.column("maxCompressionRatio", .double).notNull()
+                t.column("segmentCount", .integer).notNull()
+            }
+        }
         try migrator.migrate(dbQueue)
     }
 
@@ -104,6 +156,10 @@ public final class GRDBHistoryStore: HistoryRecording {
     }
 
     public func recordExchange(_ record: HistoryExchangeRecord) {
+        dbQueue.asyncWrite({ try record.insert($0) }, completion: { _, _ in })
+    }
+
+    public func recordASRDiagnostic(_ record: ASRDiagnosticRecord) {
         dbQueue.asyncWrite({ try record.insert($0) }, completion: { _, _ in })
     }
 
@@ -132,11 +188,20 @@ public final class GRDBHistoryStore: HistoryRecording {
         }) ?? []
     }
 
+    public func asrDiagnostics(sessionID: String) -> [ASRDiagnosticRecord] {
+        (try? dbQueue.read { db in
+            try ASRDiagnosticRecord
+                .filter(Column("sessionID") == sessionID)
+                .order(Column("at"))
+                .fetchAll(db)
+        }) ?? []
+    }
+
     public func purge(olderThanDays days: Int) {
         let cutoff = Date(timeIntervalSinceNow: -Double(days) * 86400)
         try? dbQueue.write { db in
             try db.execute(sql: "DELETE FROM history_session WHERE startedAt < ?", arguments: [cutoff])
-        }   // exchange 由 FK cascade 連帶清
+        }   // exchange 與 asr_diagnostic 由 FK cascade 連帶清
     }
 
     public func deleteAll() {

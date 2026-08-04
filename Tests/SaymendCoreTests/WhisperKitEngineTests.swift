@@ -114,7 +114,11 @@ private func engine(_ f: any WhisperTranscribing,
 }
 
 private func finalizedTexts(_ evs: [TranscriptEvent]) -> [String] {
-    evs.compactMap { if case .finalized(let t) = $0 { return t }; return nil }
+    evs.compactMap { if case .finalized(let t, _) = $0 { return t }; return nil }
+}
+/// issue #10：定稿事件帶的品質診斷，順序與 `finalizedTexts` 一致
+private func finalizedQualities(_ evs: [TranscriptEvent]) -> [TranscriptQuality?] {
+    evs.compactMap { if case .finalized(_, let q) = $0 { return .some(q) }; return nil }
 }
 private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
     evs.compactMap { if case .volatile(let t) = $0 { return t }; return nil }
@@ -355,6 +359,53 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         let evs = await drive(engine(f))
         #expect(finalizedTexts(evs).isEmpty)
         #expect(evs.contains(.failed(reason: "音訊轉換失敗")))
+    }
+
+    // MARK: - 辨識品質診斷（issue #10）
+
+    /// 每筆定稿只帶**新增那幾個片段**的品質。刻意讓第一個片段品質很差、第二個很好：
+    /// 切分若失守（整組都算進去），第二筆的兩個數字與片段數會同時對不上。
+    @Test func finalizedCarriesQualityOfNewlyConfirmedSegmentsOnly() async throws {
+        let bad = TranscriptSegmentQuality(avgLogprob: -0.90, compressionRatio: 2.5)
+        let good = TranscriptSegmentQuality(avgLogprob: -0.10, compressionRatio: 1.0)
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "第一句。", unconfirmed: "", confirmedQuality: [bad]),
+            .init(confirmed: "第一句。第二句。", unconfirmed: "", confirmedQuality: [bad, good]),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["第一句。", "第二句。"])
+        let qs = finalizedQualities(evs)
+        let first = try #require(qs.first ?? nil)
+        #expect(first.minAvgLogprob == -0.90)
+        #expect(first.segmentCount == 1)
+        let second = try #require(qs.count > 1 ? qs[1] : nil)
+        #expect(second.minAvgLogprob == -0.10)
+        #expect(second.maxCompressionRatio == 1.0)
+        #expect(second.segmentCount == 1)
+    }
+
+    /// **收尾補發那筆也必須帶品質。** #15 的驗收量到短句聽寫**全部**的文字都走這條路
+    /// （套件的定稿條件對只切出一段的短句永遠不成立）——漏了它，診斷對短句永遠是空的，
+    /// 而幻覺恰好都是短句。
+    @Test func tailFlushCarriesUnconfirmedQuality() async throws {
+        let f = FakeStreamTranscriber()
+        f.steps = [.init(confirmed: "", unconfirmed: "一整句話從頭到尾都沒被轉正",
+                         unconfirmedQuality: [.init(avgLogprob: -0.55, compressionRatio: 1.9)])]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["一整句話從頭到尾都沒被轉正"])
+        let q = try #require(finalizedQualities(evs).first ?? nil)
+        #expect(q.minAvgLogprob == -0.55)
+        #expect(q.maxCompressionRatio == 1.9)
+        #expect(q.segmentCount == 1)
+    }
+
+    /// 給不出品質的來源不得被捏造成有資料——空值會在統計時混進假樣本
+    @Test func progressWithoutQualityYieldsNilQuality() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [.init(confirmed: "沒有品質資料的定稿", unconfirmed: "")]
+        let evs = await drive(engine(f))
+        #expect(finalizedQualities(evs) == [nil])
     }
 
     // MARK: - 失敗路徑

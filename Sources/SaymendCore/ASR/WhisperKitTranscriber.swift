@@ -58,6 +58,14 @@ public actor WhisperKitModelActor {
         return decoding
     }
 
+    /// 片段的品質自評（issue #10）。抽成純函式是為了在不載真模型的前提下測得到欄位對應——
+    /// `avgLogprob` 與 `compressionRatio` 名字相近、都是浮點數，接反了不會有任何編譯或執行期徵兆，
+    /// 只會讓幾週後累積出來的樣本全部無效。
+    static func quality(of segment: TranscriptionSegment) -> TranscriptSegmentQuality {
+        TranscriptSegmentQuality(avgLogprob: segment.avgLogprob,
+                                 compressionRatio: segment.compressionRatio)
+    }
+
     /// 串流辨識：音訊由 `source` 灌入（呼叫端負責餵），進度經回呼吐出。
     /// 本方法在串流結束（呼叫端停止或音訊耗盡）前不返回。
     func streamTranscribe(source: StreamFedAudioSource,
@@ -99,7 +107,9 @@ public actor WhisperKitModelActor {
             stateChangeCallback: { _, new in
                 onProgress(WhisperStreamProgress(
                     confirmed: new.confirmedSegments.map(\.text).joined(),
-                    unconfirmed: new.unconfirmedSegments.map(\.text).joined()))
+                    unconfirmed: new.unconfirmedSegments.map(\.text).joined(),
+                    confirmedQuality: new.confirmedSegments.map(Self.quality(of:)),
+                    unconfirmedQuality: new.unconfirmedSegments.map(Self.quality(of:))))
             })
 
         // 停止監看：串流轉錄器的主迴圈在 stopStreamTranscription 之前不返回
