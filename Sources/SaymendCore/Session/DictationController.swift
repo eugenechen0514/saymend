@@ -74,6 +74,15 @@ public final class DictationController {
     private var readerTask: Task<Void, Never>?
     /// 60 秒靜音逾時結束：排空後直接封存，不進延續窗（規格 §3.4 逾時＝凍結觸發器）
     private var archiveAfterDrain = false
+    /// issue #18：本 session 是否收過「沒偵測到語音」示警。收尾時據此決定要不要發 notice。
+    private var sawNoSpeechWarning = false
+    /// issue #18：本 session 是否辨識出過任何文字。示警的解除訊號。
+    private var sawTextThisSession = false
+
+    /// 收尾時的提示文案。兩條出路都給：物理上的（靠近麥克風）與設定上的（調低門檻）。
+    /// 只寫「沒偵測到語音」而不給方向的話，使用者只會重試一次同樣的動作然後放棄。
+    public static let noSpeechNotice =
+        "沒偵測到語音。麥克風可能太遠，或到「設定 › 進階：串流參數」調低靜音門檻"
     /// 遞增 session 序號：readerTask 事件過濾，避免跨 session 污染
     private(set) var sessionID = 0
     /// 在途（已派發、尚未 dispatch 完成）的意圖任務數：undo 按鈕的在途防護（測試經 @testable 檢視）
@@ -251,6 +260,17 @@ public final class DictationController {
         case .listening, .finishing:
             break   // finishing（排空窗）的尾端 finalized 仍須處理，不能丟
         }
+        // **示警不進斷句器**（issue #18）：斷句器對任何辨識事件都會重置靜音計時，
+        // 而本事件與「有沒有人在講話」無關。放進去會讓靜音間隔延後到期、話語晚閉合，
+        // 方向上正是 #14 最怕的那種失效。這裡提前 return，走在 segmenter 之前。
+        if case .noSpeechDetected = event {
+            sawNoSpeechWarning = true
+            if case .listening(let mode) = internalPhase {
+                hud.present(.noSpeechDetected(mode: mode))
+            }
+            return
+        }
+        releaseNoSpeechWarningIfTextArrived(event)
         segmenter.onTranscript(event, at: t)
         switch event {
         case .volatile(let text):
@@ -296,7 +316,31 @@ public final class DictationController {
             hud.present(.loadingModel)          // 本機模型載入中（首次較久）；同樣不動 ledger、不動欄位
         case .failed(let reason):
             handleASRFailure(reason: reason)
+        case .noSpeechDetected:
+            break   // 前方已提前 return（刻意不進 segmenter），此處不可達；列出僅為窮盡性
         }
+    }
+
+    /// 辨識出任何文字＝確實偵測到語音，「沒偵測到語音」示警就此解除（issue #18）。
+    ///
+    /// 用「有沒有辨識出文字」而非 `ledger.sessionText.isEmpty` 判斷：帳本要等潤飾回來才提交，
+    /// 而潤飾是非同步的——收尾時很可能還在途中、帳本仍是空的，會誤判成「整段沒講話」。
+    ///
+    /// **HUD 也必須在這裡復原，不能只靠 `.volatile` 分支。** `.finalized` 分支不碰 HUD，
+    /// 所以文字若以定稿形式回來（尾端補發就是這條路），畫面會整段停在橘色示警，
+    /// 而 notice 又因為「有產出文字」而不發——沒有任何機制會糾正它。
+    /// 只在示警確實還掛在畫面上時才復原，否則每筆定稿都會把正在顯示的暫時文字清掉。
+    private func releaseNoSpeechWarningIfTextArrived(_ event: TranscriptEvent) {
+        let text: String
+        switch event {
+        case .finalized(let t), .volatile(let t): text = t
+        default: return
+        }
+        guard !text.isEmpty else { return }
+        let warningOnScreen = sawNoSpeechWarning && !sawTextThisSession
+        sawTextThisSession = true
+        guard warningOnScreen, case .listening(let mode) = internalPhase else { return }
+        presentListening(mode: mode, volatile: "")
     }
 
     /// 聽寫中的 HUD 狀態依 sessionTarget 分流：選取目標模式顯示 selectionListening
@@ -319,6 +363,21 @@ public final class DictationController {
             break
         }
         process(actions: segmenter.flush())
+        // issue #18：整段沒偵測到語音且確實一個字都沒產出——發提示**取代**延續窗。
+        //
+        // 取代而非疊加有兩個理由。語意上：沒偵測到語音就沒有東西可修正，延續窗本來就沒意義。
+        // 實務上：M8 code review 第 4 個 finding 記載「notice 會被緊接的 lingering 蓋掉」，
+        // 走這條路就不會有那個坑。
+        //
+        // 「一個字都沒產出」同時**就是示警的解除機制**——使用者在示警之後才開口時文字會產出，
+        // 這裡自然不發，不需要另一個解除事件。notice 必須排在 archiveSession 之後，
+        // 否則會被它發的 .hidden 蓋掉。
+        if sawNoSpeechWarning, !sawTextThisSession {
+            archiveAfterDrain = false
+            archiveSession()
+            hud.present(.notice(Self.noSpeechNotice))
+            return
+        }
         if archiveAfterDrain || ledger.frozen || !ledger.isActive {
             archiveAfterDrain = false
             archiveSession()
@@ -357,6 +416,8 @@ public final class DictationController {
             coordinator.reset()
             segmenter.sessionStarted(at: t)
             archiveAfterDrain = false
+            sawNoSpeechWarning = false
+            sawTextThisSession = false
             capturedContextBefore = field.contextBefore
             capturedContextAfter = field.contextAfter
             if !resuming {

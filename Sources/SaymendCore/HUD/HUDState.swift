@@ -15,6 +15,9 @@ public enum HUDState: Equatable, Sendable {
     case transcribing
     /// M9：本機引擎載入模型中（首次含 ANE 編譯，可能數分鐘）
     case loadingModel
+    /// issue #18：聽寫中但整段都沒偵測到語音（麥克風可能太遠）。
+    /// 與 `.listening` 並列而非取代其語意——聽寫階段仍在進行，那個事實不能從畫面上消失。
+    case noSpeechDetected(mode: ListeningMode)
     case notice(String)
     /// 最近異動的 inline diff（規格 §3.5 降級）：overlay 不可用時在 HUD 呈現
     case diff([DiffWindow])

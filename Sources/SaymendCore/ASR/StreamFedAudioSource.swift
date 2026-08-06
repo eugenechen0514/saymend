@@ -51,6 +51,10 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
     private var outputFormat: AVAudioFormat?
     private var sourceFormat: AVAudioFormat?
     private var energyWindow = 20
+    /// 相對能量超過此值的格子視為「有人在講話」。與套件 `isVoiceDetected` 用同一個門檻值。
+    private let silenceThreshold: Float
+    /// 至今超過門檻的格數。逐格累計（O(1)），不掃陣列——陣列會隨 session 線性成長。
+    private var voicedBucketCount = 0
 
     /// 安全網上限（秒）。超過只回報、不截斷——截斷會破壞「只增不減」而毀掉轉錄器的記帳。
     /// 由呼叫端（引擎）檢查 `isOverCapacity` 並結束 session。
@@ -59,9 +63,23 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
     /// 回看格數由 init 傳入而非事後指派：餵音訊的 Task 一建好就開始 `append`，
     /// 而串流轉錄器要等模型載完（large 首次可達數分鐘）才碰得到這個物件——
     /// 在那裡才設，整段開頭的能量都會用到舊值。
-    public init(maxDuration: TimeInterval = 30 * 60, relativeEnergyWindow: Int = 20) {
+    public init(maxDuration: TimeInterval = 30 * 60,
+                relativeEnergyWindow: Int = 20,
+                silenceThreshold: Float = WhisperStreamingOptions.packageDefault.silenceThreshold) {
         self.maxDuration = maxDuration
         self.energyWindow = relativeEnergyWindow
+        self.silenceThreshold = silenceThreshold
+    }
+
+    /// 至今有幾格相對能量超過靜音門檻（issue #18）。
+    ///
+    /// **判準刻意比套件寬鬆**：套件的 `isVoiceDetected` 檢查的是「距上次辨識那段」的滑動窗口，
+    /// 是本集合的子集。故本計數為 0 時，套件**必定**也沒偵測到語音——這個方向性是它能拿來
+    /// 當「整段沒人講話」判準的理由。反之不成立（有格超標未必代表套件會辨識），
+    /// 所以只用它來決定「要不要示警」，不用來推論「套件應該有辨識到」。
+    public var voicedBuckets: Int {
+        lock.lock(); defer { lock.unlock() }
+        return voicedBucketCount
     }
 
     // MARK: - 本專案的入口
@@ -132,6 +150,9 @@ public final class StreamFedAudioSource: AudioProcessing, @unchecked Sendable {
         let rel = AudioProcessor.calculateRelativeEnergy(of: bucket, relativeTo: minAvgEnergy)
         let avg = AudioProcessor.calculateEnergy(of: bucket).avg
         audioEnergy.append((rel: rel, avg: avg))
+        // NaN 不計：第一格的參考值是 .infinity，套件會把它夾成 0，但這裡防的是未來
+        // 算法變動讓 NaN 漏出來——`NaN > threshold` 為 false，寫明比倚賴這個巧合清楚。
+        if !rel.isNaN, rel > silenceThreshold { voicedBucketCount += 1 }
     }
 
     private func convertLocked(_ src: AVAudioPCMBuffer) throws -> [Float] {

@@ -23,7 +23,7 @@ public protocol WhisperTranscribing: Sendable {
                     audio: AsyncStream<AudioChunk>,
                     language: String,
                     promptPhrases: [String],
-                    options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamProgress, Error>
+                    options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamEvent, Error>
 }
 
 /// WhisperKit 本機引擎（issue #12）：**串流**辨識——邊聽邊出文字，一個聽寫階段
@@ -48,6 +48,13 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
 
     private let stateLock = NSLock()
     private var pumpTask: Task<Void, Never>?
+
+    /// 聽寫進行中示警所需的最短音訊長度（issue #18）。
+    /// 要避開「按了熱鍵先醞釀一下」的誤報——誤報比漏報更傷信任。
+    static let listeningWarnAfter: Double = 3.0
+    /// 收尾補發示警所需的最短音訊長度。比聽寫中低，因為 session 已結束且確知零產出、
+    /// 沒有誤報空間；門檻低一些才涵蓋得到短嘗試。低於此值視為誤觸熱鍵，不唸使用者。
+    static let endOfStreamWarnAfter: Double = 1.5
 
     public init(transcriber: any WhisperTranscribing,
                 configProvider: @escaping () -> WhisperLocalConfig,
@@ -143,8 +150,22 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
         do {
             var lastConfirmed = ""
             var lastUnconfirmed = ""
-            for try await step in progress {
+            // issue #18：整段零語音的示警狀態。邊緣觸發——一個 session 最多發一次。
+            var warnedNoSpeech = false
+            var lastStats: (voiced: Int, seconds: Double) = (0, 0)
+            for try await element in progress {
                 if Task.isCancelled { continuation.finish(); return }
+
+                guard case .progress(let step) = element else {
+                    if case .audioStats(let voiced, let seconds) = element {
+                        lastStats = (voiced, seconds)
+                        if !warnedNoSpeech, voiced == 0, seconds >= Self.listeningWarnAfter {
+                            warnedNoSpeech = true
+                            continuation.yield(.noSpeechDetected)
+                        }
+                    }
+                    continue
+                }
 
                 // **只在文字真的變化時發事件。**
                 // 套件的狀態變更回呼掛在 state 的 didSet 上，而 state 含每個音訊 buffer
@@ -165,6 +186,11 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
             }
             if Task.isCancelled { continuation.finish(); return }
             flushTail(lastUnconfirmed, into: continuation)
+            // 1.5–3.0 秒的零語音 session 在聽寫中不夠格示警，收尾才補——
+            // 少了這一關，短嘗試會完全靜默，正是本票要消滅的失敗模式。
+            if !warnedNoSpeech, lastStats.voiced == 0, lastStats.seconds >= Self.endOfStreamWarnAfter {
+                continuation.yield(.noSpeechDetected)
+            }
             continuation.finish()
         } catch is CancellationError {
             continuation.finish()

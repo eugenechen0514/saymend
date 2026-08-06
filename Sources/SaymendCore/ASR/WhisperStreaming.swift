@@ -58,6 +58,22 @@ public struct WhisperStreamingOptions: Equatable, Sendable {
     }
 }
 
+/// 串流辨識過程中吐出的元素（issue #18）。
+///
+/// **為什麼音訊統計要另開一條，不塞進 `WhisperStreamProgress`**：`progress` 只在套件的
+/// 狀態變更回呼時產生，而套件在 VAD 判否時只設一次 `state.currentText = "Waiting for speech..."`
+/// （`AudioStreamTranscriber.transcribeCurrentBuffer` 有 `if state.currentText == ""` 守衛，
+/// 設過就不再設），**回呼隨即停止**。最需要訊號的情境，恰恰是 progress 不會來的情境。
+///
+/// `audioStats` 由我們自己的餵音訊 Task 發出，不受套件狀態機影響；且**只帶數字、不帶判斷**
+/// ——要不要示警的政策留在 `WhisperKitEngine.pump`，與其他事件映射紀律放在一起。
+public enum WhisperStreamEvent: Equatable, Sendable {
+    /// 套件回呼來的文字進度
+    case progress(WhisperStreamProgress)
+    /// 音訊事實：至今超過靜音門檻的格數、已累積的音訊秒數
+    case audioStats(voicedBuckets: Int, seconds: Double)
+}
+
 public extension WhisperStreamingOptions {
     /// 套件預設值的單一出處：設定頁的「套件預設」標示與「還原預設」都取這裡，
     /// 不各自再寫一份字面值。
