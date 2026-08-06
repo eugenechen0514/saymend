@@ -85,8 +85,9 @@ struct HistorySettingsTab: View {
 
     private func reload() { sessions = store?.recentSessions(limit: 100) ?? [] }
 
-    /// 診斷數字的一行摘要。兩個數字都取涵蓋片段的**最壞值**（見 `TranscriptQuality`），
-    /// 片段數列出來，是為了讓「極值來自一個片段還是二十個」在回查時看得見。
+    /// 診斷數字的一行摘要。兩個數字都取涵蓋片段的**最壞值**（見 `TranscriptQuality`）。
+    /// 片段數列出來是為了看得見涵蓋範圍，但它**不是量測次數**——同一趟解碼切出的片段
+    /// 共用同一組數字，所以兩筆診斷數字一樣往往只代表它們出自同一趟解碼。
     static func qualityLine(_ d: ASRDiagnosticRecord) -> String {
         String(format: "對數機率 %.2f · 壓縮比 %.2f · %d 段",
                d.minAvgLogprob, d.maxCompressionRatio, d.segmentCount)

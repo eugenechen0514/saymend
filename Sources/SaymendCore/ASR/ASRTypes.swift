@@ -2,10 +2,20 @@ import AVFoundation
 
 /// 一段定稿文字的辨識品質摘要（issue #10）。
 ///
-/// 兩個數字都是 Whisper 解碼器對**單一片段**給的自評，本型別是「這段定稿文字涵蓋的
-/// 全部片段」的**最壞值**摘要。取最壞值而非平均，是因為 WhisperKit 的門檻本來就是
-/// 逐片段套用的（`DecodingOptions.logProbThreshold`／`compressionRatioThreshold`）——
-/// 最壞值才回答得了「若門檻設在 X，這段文字會不會被擋下」，平均會把一個爛片段稀釋掉。
+/// **這兩個數字是「每個解碼窗口一組」，不是每個片段一組。** WhisperKit 在
+/// `Text/SegmentSeeker.swift:132`／`:176` 把 `decodingResult.avgLogProb` 與
+/// `compressionRatio` **原樣複製到該窗口切出的每一個片段**上。所以同一趟解碼產生的
+/// 片段，這兩個值必然完全相同——實機 2026-08-07 的 session `B6099B79` 就是這樣：
+/// 定稿與收尾補發兩筆診斷相隔 15 毫秒、數字一模一樣，因為它們出自同一趟解碼。
+///
+/// 因此本型別的最壞值聚合**只在一段文字橫跨多個解碼窗口時才做事**（定稿片段會跨趟
+/// 累積，且超過 30 秒的音訊本來就會切成多個窗口）。同一窗口內取最壞值是恆等運算，
+/// 不會出錯，只是沒有增益。
+///
+/// 取最壞值而非平均，是因為 WhisperKit 的門檻也是**逐窗口**套用的
+/// （`DecodingOptions.logProbThreshold`／`compressionRatioThreshold` 在 fallback 迴圈裡
+/// 比對 `decodingResult`）——最壞值才回答得了「若門檻設在 X，這段文字背後有沒有任何
+/// 一趟解碼會被擋下」，平均會把一趟爛解碼稀釋掉。
 ///
 /// **這是診斷資料，不是判決。** 目前沒有任何程式碼依這兩個數字做取捨；先累積幾筆
 /// 幻覺與正常語句的對照，有依據之後才決定要調門檻還是做輸出過濾。只有一筆樣本時
@@ -15,7 +25,9 @@ public struct TranscriptQuality: Equatable, Sendable {
     public let minAvgLogprob: Float
     /// 壓縮比的最大值。愈高＝文字愈重複，Whisper 用它偵測退化成複讀的輸出。
     public let maxCompressionRatio: Float
-    /// 摘要涵蓋幾個片段。少了它，回查時無法分辨極值是來自一個片段還是二十個。
+    /// 摘要涵蓋幾個片段。**注意它不等於「幾次獨立量測」**——同一趟解碼切出的片段共用
+    /// 同一組數字（見型別說明），所以片段數多不代表極值有更多證據支持。它回答的是
+    /// 「這段文字被切成幾段」，回查時用來判斷極值的涵蓋範圍。
     public let segmentCount: Int
 
     public init(minAvgLogprob: Float, maxCompressionRatio: Float, segmentCount: Int) {
@@ -39,7 +51,11 @@ public struct TranscriptQuality: Equatable, Sendable {
     }
 }
 
-/// 單一片段的辨識品質自評（issue #10）。聚合成 `TranscriptQuality` 之前的原始形狀。
+/// 掛在單一片段上的辨識品質自評（issue #10）。聚合成 `TranscriptQuality` 之前的原始形狀。
+///
+/// 值的來源是**該片段所屬的解碼窗口**，不是片段本身——同窗口的片段拿到的是同一份
+/// 複本（見 `TranscriptQuality`）。命名保留「片段」是因為我們確實是從 `TranscriptionSegment`
+/// 讀出來的，但不得據此以為每個片段都被獨立評分過。
 public struct TranscriptSegmentQuality: Equatable, Sendable {
     public let avgLogprob: Float
     public let compressionRatio: Float
