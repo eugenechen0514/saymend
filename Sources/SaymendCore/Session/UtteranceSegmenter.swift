@@ -29,7 +29,7 @@ public struct UtteranceSegmenter {
     public mutating func onTranscript(_ event: TranscriptEvent, at t: TimeInterval) {
         lastEventAt = t
         lastActivityAt = t
-        if case .finalized(let text) = event {
+        if case .finalized(let text, _) = event {
             buffer += text
         }
     }

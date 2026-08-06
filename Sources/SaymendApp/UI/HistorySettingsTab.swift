@@ -36,11 +36,31 @@ struct HistorySettingsTab: View {
             }
             if let selected = selection {
                 let exchanges = store?.exchanges(sessionID: selected) ?? []
-                List(exchanges, id: \.id) { ex in
+                let diagnostics = store?.asrDiagnostics(sessionID: selected) ?? []
+                // 兩份資料的錨點不同（話語閉合後 vs 定稿當下），故並排而非合併——
+                // 硬湊成一列會在其中一邊缺列時對錯行，那正是回查時最容易看走眼的地方。
+                HStack(alignment: .top, spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("🎙 \(ex.utteranceRaw)").font(.caption)
-                        Text("→ [\(ex.outcomeKind)] \(ex.outcomeText ?? "")")
-                            .font(.caption).foregroundStyle(.secondary)
+                        Text("話語與結果").font(.caption).foregroundStyle(.secondary)
+                        List(exchanges, id: \.id) { ex in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("🎙 \(ex.utteranceRaw)").font(.caption)
+                                Text("→ [\(ex.outcomeKind)] \(ex.outcomeText ?? "")")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    // issue #10：辨識器對每段定稿文字的自評。幻覺輸出與正常語句的對數機率
+                    // 若分得開，調門檻就比維護一份永遠追不完的字串黑名單乾淨。
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("辨識品質（僅本機引擎）").font(.caption).foregroundStyle(.secondary)
+                        List(diagnostics, id: \.id) { d in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(d.finalizedText).font(.caption).lineLimit(1)
+                                Text(Self.qualityLine(d))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
                 .frame(height: 120)
@@ -64,4 +84,11 @@ struct HistorySettingsTab: View {
     }
 
     private func reload() { sessions = store?.recentSessions(limit: 100) ?? [] }
+
+    /// 診斷數字的一行摘要。兩個數字都取涵蓋片段的**最壞值**（見 `TranscriptQuality`），
+    /// 片段數列出來，是為了讓「極值來自一個片段還是二十個」在回查時看得見。
+    static func qualityLine(_ d: ASRDiagnosticRecord) -> String {
+        String(format: "對數機率 %.2f · 壓縮比 %.2f · %d 段",
+               d.minAvgLogprob, d.maxCompressionRatio, d.segmentCount)
+    }
 }

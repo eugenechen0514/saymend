@@ -12,10 +12,20 @@ public struct WhisperStreamProgress: Equatable, Sendable {
     public let confirmed: String
     /// 尚未定稿：可能被後續解碼推翻
     public let unconfirmed: String
+    /// 已定稿各片段的品質自評，順序與 `confirmed` 的片段一致（issue #10）。
+    /// 引擎靠「這次比上次多了幾個」切出新定稿那段對應的品質，故**順序與長度都有意義**。
+    public let confirmedQuality: [TranscriptSegmentQuality]
+    /// 尚未定稿各片段的品質自評。收尾補發（`flushTail`）用的就是這一組——
+    /// #15 的驗收量到短句聽寫**全部**的文字都走那條路，漏了它等於診斷對短句永遠是空的。
+    public let unconfirmedQuality: [TranscriptSegmentQuality]
 
-    public init(confirmed: String, unconfirmed: String) {
+    public init(confirmed: String, unconfirmed: String,
+                confirmedQuality: [TranscriptSegmentQuality] = [],
+                unconfirmedQuality: [TranscriptSegmentQuality] = []) {
         self.confirmed = confirmed
         self.unconfirmed = unconfirmed
+        self.confirmedQuality = confirmedQuality
+        self.unconfirmedQuality = unconfirmedQuality
     }
 }
 

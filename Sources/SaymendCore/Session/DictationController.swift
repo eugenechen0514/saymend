@@ -277,13 +277,16 @@ public final class DictationController {
             if case .listening(let mode) = internalPhase {
                 presentListening(mode: mode, volatile: text)
             }
-        case .finalized(let text):
+        case .finalized(let text, let quality):
             // M2 遺留債：聽寫中焦點切進密碼欄位（Tab、程式切換焦點——滑鼠/鍵盤活動已由凍結涵蓋，
             // 但焦點可以不經這兩者移動）。規格 §5.3：密碼欄位一個字都不能進。硬停整個 session。
             if let field = fieldReader?.snapshot(), field.isSecure {
                 abortForSecureField()
                 return
             }
+            // **必須在密碼欄位守衛之後**（issue #10）：診斷列會把定稿文字原樣落進資料庫，
+            // 寫在守衛之前等於在密碼欄位裡留下一份使用者說的話。
+            recordASRDiagnostic(text: text, quality: quality)
             if case .selectionPending = sessionTarget {
                 coordinator.accumulateFinalized(text)      // 緩衝：不上屏（M3 設計裁決 1）
             } else {
@@ -321,6 +324,22 @@ public final class DictationController {
         }
     }
 
+    /// 辨識品質診斷（issue #10）：記在**定稿當下**，不等話語閉合、不等語言模型回應。
+    ///
+    /// 錨在這裡是被實機資料逼出來的：id=116 那筆幻覺（`请不吝点赞 订阅 转发…`）在歷史裡
+    /// 只留下一列 `insertSkipped/frozen`，沒有 outcome 列——潤飾回來時 session 已封存、
+    /// `historySessionID` 已清空。診斷若掛在話語或 outcome 上，**最需要的樣本恰好記不到**。
+    ///
+    /// 沒有品質資料就不寫列：系統內建引擎與遠端 Whisper 都給不出這兩個數字，
+    /// 寫一堆空值只會在統計時混進假樣本。
+    private func recordASRDiagnostic(text: String, quality: TranscriptQuality?) {
+        guard let quality, settings.historyEnabled, let hid = historySessionID else { return }
+        history?.recordASRDiagnostic(.init(sessionID: hid, at: now(), finalizedText: text,
+                                           minAvgLogprob: Double(quality.minAvgLogprob),
+                                           maxCompressionRatio: Double(quality.maxCompressionRatio),
+                                           segmentCount: quality.segmentCount))
+    }
+
     /// 辨識出任何文字＝確實偵測到語音，「沒偵測到語音」示警就此解除（issue #18）。
     ///
     /// 用「有沒有辨識出文字」而非 `ledger.sessionText.isEmpty` 判斷：帳本要等潤飾回來才提交，
@@ -333,7 +352,7 @@ public final class DictationController {
     private func releaseNoSpeechWarningIfTextArrived(_ event: TranscriptEvent) {
         let text: String
         switch event {
-        case .finalized(let t), .volatile(let t): text = t
+        case .finalized(let t, _), .volatile(let t): text = t
         default: return
         }
         guard !text.isEmpty else { return }
