@@ -55,6 +55,33 @@ import Testing
     #expect(hud.states.last == .hidden)
 }
 
+/// **Esc 退字的有效窗口只有 quietGap 那 1.5 秒**（issue #16 實機驗收 ⑤ 的定性測試）。
+///
+/// 實機 2026-08-08：使用者按住熱鍵、等文字真的落進 Antinote 之後才按 Esc，字沒有退掉。
+/// 查下來不是 Esc 壞了——`escapeDiscardsUtteranceAndEndsSession` 證明機制是好的，
+/// 差別只在那條測試的 finalized 與 escape 之間**沒有 tick**。
+///
+/// 真實情境有 tick：App 每 250ms 呼叫一次，文字落地後靜音滿 1.5 秒話語就閉合，
+/// `snapshotAndBeginNext()` 把 `currentUtteranceText` 歸零，Esc 就沒有東西可刪。
+/// 而本機串流引擎的解碼延遲是 1–5 秒，文字是一陣一陣落的，兩陣之間必然超過 1.5 秒
+/// ——**所以每次落地的文字都會在 1.5 秒後定案，人手很難搶在那之前按下 Esc**。
+///
+/// 這條測試不主張現行行為是對的，只是把它釘住：日後若決定改成「Esc 退掉整個
+/// 聽寫階段的文字」，這條會失敗，提醒改的人那是一個有意的行為變更。
+@MainActor
+@Test func escapeAfterUtteranceClosedRetractsNothing() {
+    let polisher = GatedIntentService()
+    polisher.gated = true                       // 卡住潤飾，排除它對欄位的干擾
+    let (c, _, _, key, _, _) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("已經落地的字"), at: 10.5)
+    #expect(key.ops == [.insert("已經落地的字")])
+    c.tick(at: 12.1)                            // 靜音 1.6 秒 > quietGap 1.5 → 話語閉合
+    key.ops.removeAll()
+    c.escapePressed()
+    #expect(key.ops.isEmpty, "話語已閉合，Esc 不應該再退字——退了就是刪到已定案的內容")
+}
+
 @MainActor
 @Test func pressWhileHoldIsIgnored() {
     let (c, audio, _, _, _, _) = makeController()
