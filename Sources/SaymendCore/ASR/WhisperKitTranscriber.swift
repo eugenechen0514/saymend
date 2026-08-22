@@ -172,7 +172,6 @@ public final class WhisperKitTranscriber: WhisperTranscribing {
         self.tracker = tracker
         tracker.installAsWhisperKitLogSink()
 
-        let history = self.history
         coordinator = ModelLoadCoordinator<WhisperKitModelActor> { url in
             try await ModelLoadRun.perform(
                 url: url, tracker: tracker, history: history,
