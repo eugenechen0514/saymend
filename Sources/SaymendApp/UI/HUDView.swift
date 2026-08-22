@@ -78,12 +78,12 @@ struct HUDView: View {
                 Text("辨識中…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            // issue #17：加上已等待秒數。載入期間 App 的 CPU 幾乎是 0%，一行不動的字
+            // 與當機在畫面上沒有差別——實機回報使用者就是這樣放棄的。
             case .loadingModel:
                 Image(systemName: "hourglass")
                     .foregroundStyle(.secondary)
-                Text("載入模型中…（首次較久）")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                LoadingModelElapsedText()
             case .notice(let message):
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
@@ -168,5 +168,28 @@ struct LevelBar: View {
             }
         }
         .frame(width: 60, height: 6)
+    }
+}
+
+/// HUD 的「載入模型中… m:ss」（issue #17）。
+///
+/// 秒數從**這個 HUD 狀態出現**時起算，不是模型載入實際開始的時刻——使用者關心的是
+/// 「我按下熱鍵之後等了多久」，而不是背景那趟載入跑了多久（那個數字在設定頁）。
+/// 這也讓 `HUDState.loadingModel` 不必帶 payload，Core 零改動。
+///
+/// 用 `TimelineView` 而不是自己開 Timer：HUD 隱藏時 SwiftUI 會自動停掉排程，
+/// 不必手動管生命週期。
+private struct LoadingModelElapsedText: View {
+    @State private var appearedAt = Date()
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            Text("載入模型中… \(ModelLoadStatusText.elapsed(context.date.timeIntervalSince(appearedAt)))"
+                 + "（首次較久）")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .onAppear { appearedAt = Date() }
     }
 }

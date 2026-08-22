@@ -15,6 +15,9 @@ struct SettingsView: View {
     let whisperLocalPreload: () -> Void
     let whisperLocalUnload: () -> Void
     let whisperLocalState: @MainActor () async -> ModelLoadState
+    /// issue #17：載入階段進度／該模型上次的耗時。給不出來就 nil，UI 退回純碼表。
+    let whisperLocalProgress: @MainActor () async -> ModelLoadProgress?
+    let whisperLocalLastLoad: @MainActor () async -> CompletedLoad?
 
     init(settings: AppSettings,
          vocab: (any VocabStore)? = nil,
@@ -24,7 +27,9 @@ struct SettingsView: View {
          tester: ProviderTester? = nil,
          whisperLocalPreload: @escaping () -> Void = {},
          whisperLocalUnload: @escaping () -> Void = {},
-         whisperLocalState: @escaping @MainActor () async -> ModelLoadState = { .idle }) {
+         whisperLocalState: @escaping @MainActor () async -> ModelLoadState = { .idle },
+         whisperLocalProgress: @escaping @MainActor () async -> ModelLoadProgress? = { nil },
+         whisperLocalLastLoad: @escaping @MainActor () async -> CompletedLoad? = { nil }) {
         self.settings = settings
         self.vocab = vocab
         self.history = history
@@ -34,6 +39,8 @@ struct SettingsView: View {
         self.whisperLocalPreload = whisperLocalPreload
         self.whisperLocalUnload = whisperLocalUnload
         self.whisperLocalState = whisperLocalState
+        self.whisperLocalProgress = whisperLocalProgress
+        self.whisperLocalLastLoad = whisperLocalLastLoad
     }
 
     var body: some View {
@@ -41,7 +48,9 @@ struct SettingsView: View {
             GeneralSettingsTab(settings: settings, detector: detector, tester: tester,
                                whisperLocalPreload: whisperLocalPreload,
                                whisperLocalUnload: whisperLocalUnload,
-                               whisperLocalState: whisperLocalState)
+                               whisperLocalState: whisperLocalState,
+                               whisperLocalProgress: whisperLocalProgress,
+                               whisperLocalLastLoad: whisperLocalLastLoad)
                 .tabItem { Label("一般", systemImage: "gearshape") }
             CoreModeSettingsTab(store: coreModes)
                 .tabItem { Label("核心模式", systemImage: "square.stack.3d.up") }
@@ -68,6 +77,8 @@ struct GeneralSettingsTab: View {
     let whisperLocalPreload: () -> Void
     let whisperLocalUnload: () -> Void
     let whisperLocalState: @MainActor () async -> ModelLoadState
+    let whisperLocalProgress: @MainActor () async -> ModelLoadProgress?
+    let whisperLocalLastLoad: @MainActor () async -> CompletedLoad?
 
     @State private var hotkey: HotkeyChoice
     @State private var language: OutputLanguage
@@ -103,6 +114,11 @@ struct GeneralSettingsTab: View {
     @State private var discoveredModels: [DiscoveredModel] = []
     @State private var scanTask: Task<Void, Never>?
     @State private var localModelState: ModelLoadState = .idle
+    // issue #17：階段進度、上次耗時，以及每秒更新一次的「現在」——碼表要靠它才會動。
+    @State private var localProgress: ModelLoadProgress?
+    @State private var localLastLoad: CompletedLoad?
+    @State private var nowTick = Date()
+    @State private var modelWaitTimeout: TimeInterval
     // Provider 連通性測試（M7 §5）
     @State private var testTask: Task<Void, Never>?
     @State private var testReport: ProviderTestReport?
@@ -111,13 +127,18 @@ struct GeneralSettingsTab: View {
     init(settings: AppSettings, detector: ClaudeCLIDetector? = nil, tester: ProviderTester? = nil,
          whisperLocalPreload: @escaping () -> Void = {},
          whisperLocalUnload: @escaping () -> Void = {},
-         whisperLocalState: @escaping @MainActor () async -> ModelLoadState = { .idle }) {
+         whisperLocalState: @escaping @MainActor () async -> ModelLoadState = { .idle },
+         whisperLocalProgress: @escaping @MainActor () async -> ModelLoadProgress? = { nil },
+         whisperLocalLastLoad: @escaping @MainActor () async -> CompletedLoad? = { nil }) {
         self.settings = settings
         self.detector = detector
         self.tester = tester
         self.whisperLocalPreload = whisperLocalPreload
         self.whisperLocalUnload = whisperLocalUnload
         self.whisperLocalState = whisperLocalState
+        self.whisperLocalProgress = whisperLocalProgress
+        self.whisperLocalLastLoad = whisperLocalLastLoad
+        _modelWaitTimeout = State(initialValue: settings.whisperModelWaitTimeout)
         _hotkey = State(initialValue: settings.hotkey)
         _language = State(initialValue: settings.outputLanguage)
         _baseURL = State(initialValue: settings.llmBaseURLString)
@@ -147,6 +168,7 @@ struct GeneralSettingsTab: View {
 
     var body: some View {
         asrFormWithWriteBack
+            .onChange(of: modelWaitTimeout) { _, v in settings.whisperModelWaitTimeout = v }
             .onChange(of: streamRequiredSegments) { _, v in settings.streamRequiredSegments = v }
             .onChange(of: streamSilenceThreshold) { _, v in settings.streamSilenceThreshold = v }
             .onChange(of: streamUseVAD) { _, v in settings.streamUseVAD = v }
@@ -393,23 +415,67 @@ struct GeneralSettingsTab: View {
     }
 
     /// 模型載入狀態列＋手動載入／卸載（M9：首次 ANE 編譯可達數分鐘，讓使用者能事先載好、也能放掉記憶體）
+    ///
+    /// issue #17：載入中要看得出它還活著。碼表在模型活著和死掉時都一樣會跳，所以除了
+    /// 經過時間，還顯示階段推進與上次的耗時參照——階段轉換才是真的活著訊號。
     @ViewBuilder private var whisperLocalLoadControls: some View {
-        LabeledContent("模型狀態", value: Self.stateText(localModelState))
+        LabeledContent("模型狀態", value: Self.stateText(localModelState, now: nowTick))
+        if case .loading = localModelState {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(ModelLoadStage.allCases, id: \.self) { stage in
+                    Text(ModelLoadStatusText.stageLine(stage, progress: localProgress,
+                                                       previous: localLastLoad, now: nowTick))
+                        .font(.caption).monospacedDigit()
+                        .foregroundStyle(localProgress?.currentStage == stage ? .primary : .secondary)
+                }
+            }
+            .padding(.leading, 4)
+            if Self.warnsNow(localModelState, previous: localLastLoad, now: nowTick) {
+                Label(ModelLoadStatusText.warning(previousTotal: localLastLoad?.total),
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                Button("重新啟動 App") { Self.relaunch() }
+            }
+        }
         HStack {
             Button("載入") { whisperLocalPreload(); refreshLocalModelState() }
                 .disabled(whisperLocalModelPath == nil || localModelState != .idle)
-            // 載入中也可按：large 首次 ANE 編譯要數分鐘，使用者得有中斷的出口
+            // 「卸載」對**已載好**的模型有用（放掉 3.2GB）。對**卡住的載入**沒有用——
+            // ANE 是同步 XPC 等待，停不掉（見 `awaitBounded`）。所以載入中卡太久時，
+            // 上面給的是「重新啟動 App」而不是叫使用者按這顆。
             Button("卸載") { whisperLocalUnload(); refreshLocalModelState() }
                 .disabled(localModelState == .idle)
             if localModelState.isLoading { ProgressView().controlSize(.small) }
         }
+        Stepper(value: $modelWaitTimeout, in: AppSettings.modelWaitTimeoutRange, step: 5) {
+            Text("聽寫時等待模型載入的上限：\(Int(modelWaitTimeout)) 秒")
+        }
+        Text("逾時只放棄那一次聽寫，載入會在背景繼續完成，下一次聽寫就能用。")
+            .font(.caption).foregroundStyle(.secondary)
     }
 
-    private static func stateText(_ s: ModelLoadState) -> String {
+    private static func stateText(_ s: ModelLoadState, now: Date) -> String {
         switch s {
         case .idle:    return "未載入"
-        case .loading: return "載入中…（首次較久）"
+        case .loading(let since):
+            return "載入中… \(ModelLoadStatusText.elapsed(now.timeIntervalSince(since)))"
         case .loaded:  return "已載入"
+        }
+    }
+
+    private static func warnsNow(_ s: ModelLoadState, previous: CompletedLoad?, now: Date) -> Bool {
+        guard case .loading(let since) = s else { return false }
+        return ModelLoadStatusText.shouldWarn(elapsed: now.timeIntervalSince(since),
+                                              previousTotal: previous?.total)
+    }
+
+    /// 重新啟動 App——載入卡死時唯一真的出口（見 `ModelLoadStatusText.warning`）。
+    /// 先開一個新實例再結束自己，免得使用者面對一個消失的 App。
+    private static func relaunch() {
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config) { _, _ in
+            DispatchQueue.main.async { NSApp.terminate(nil) }
         }
     }
 
@@ -419,6 +485,10 @@ struct GeneralSettingsTab: View {
         if asrEngineKind == .whisperLocal { rescanLocalModels() }
         while !Task.isCancelled {
             localModelState = await whisperLocalState()
+            localProgress = await whisperLocalProgress()
+            localLastLoad = await whisperLocalLastLoad()
+            // 碼表要靠這個才會動：`.loading(since:)` 是固定的，會變的是「現在」。
+            nowTick = Date()
             try? await Task.sleep(for: .seconds(1))
         }
     }

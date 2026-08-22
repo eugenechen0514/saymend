@@ -92,6 +92,17 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
         await transcriber.unload()
     }
 
+    /// 這一趟載入的階段進度（issue #17）。實作給不出來就 nil，設定頁退回純碼表。
+    public func loadProgress() async -> ModelLoadProgress? {
+        await transcriber.loadProgress()
+    }
+
+    /// 目前選定模型上次載入花了多久（issue #17）；未選模型＝nil。
+    public func lastLoad() async -> CompletedLoad? {
+        guard let path = configProvider().selectedModelPath else { return nil }
+        return await transcriber.lastLoad(modelPath: path)
+    }
+
     public func start(audio: AsyncStream<AudioChunk>, localeIdentifier: String) -> AsyncStream<TranscriptEvent> {
         AsyncStream { continuation in
             let task = Task { [weak self] in

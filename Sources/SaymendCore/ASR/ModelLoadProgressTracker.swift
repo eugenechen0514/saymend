@@ -20,6 +20,13 @@ public struct ModelLoadProgress: Equatable, Sendable {
     /// **該階段**開始的時刻，不是整趟載入開始的時刻。混用會讓最長的那一段
     /// （音訊編碼器，實測 527 秒）顯示成從頭算起，數字直接翻倍。
     public let currentStageStartedAt: Date?
+
+    public init(finished: [FinishedStage], currentStage: ModelLoadStage?,
+                currentStageStartedAt: Date?) {
+        self.finished = finished
+        self.currentStage = currentStage
+        self.currentStageStartedAt = currentStageStartedAt
+    }
 }
 
 /// 一趟走完的載入（issue #17）：寫進 `ModelLoadHistory` 當下次的參照。
