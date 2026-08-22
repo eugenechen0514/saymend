@@ -1,5 +1,26 @@
 import Foundation
 
+/// 模型路徑的正規化——「同一顆模型」的判準。
+///
+/// 最後那趟 `URL(filePath:)` 專治**目錄 URL 的尾斜線**：掃描器給的是 `…/model/`，
+/// 設定經 UserDefaults 來回一趟變成 `…/model`，而尾斜線的差異
+/// `resolvingSymlinksInPath()` 與 `standardizedFileURL` **都消不掉**。
+/// 少了這一步，同一個模型會落在兩個 key 上——large-v3-turbo 各佔 3.2GB。
+///
+/// 抽成公開型別是因為 `ModelLoadHistory`（issue #17）要用同一套判準：
+/// 兩邊各自實作遲早會分岔，屆時載入快取認得是同一顆、載入耗時的歷史卻認不得，
+/// 使用者會看到「上次耗時」在換一種寫法之後就憑空消失。
+public enum ModelPathKey {
+    public static func normalize(_ url: URL) -> URL {
+        URL(filePath: url.resolvingSymlinksInPath().standardizedFileURL.path)
+    }
+
+    /// 字典 key 用的字串形式。**用完整路徑而非 `lastPathComponent`**：
+    /// 不同根目錄下的同名模型是兩顆模型，共用一筆紀錄會讓慢機器量到的耗時
+    /// 被拿去當另一顆的參照。
+    public static func string(_ url: URL) -> String { normalize(url).path }
+}
+
 /// 模型載入狀態（供設定頁顯示與引擎決定要不要先報「載入模型中…」）。
 public enum ModelLoadState: Sendable {
     case idle       // 未載入（含已卸載）
@@ -38,15 +59,7 @@ public actor ModelLoadCoordinator<Model: Sendable> {
         self.loader = loader
     }
 
-    /// 快取 key 的正規化。
-    ///
-    /// 最後那趟 `URL(filePath:)` 專治**目錄 URL 的尾斜線**：掃描器給的是 `…/model/`，
-    /// 設定經 UserDefaults 來回一趟變成 `…/model`，而尾斜線的差異
-    /// `resolvingSymlinksInPath()` 與 `standardizedFileURL` **都消不掉**。
-    /// 少了這一步，同一個模型會落在兩個 key 上——large-v3-turbo 各佔 3.2GB。
-    private func cacheKey(_ url: URL) -> URL {
-        URL(filePath: url.resolvingSymlinksInPath().standardizedFileURL.path)
-    }
+    private func cacheKey(_ url: URL) -> URL { ModelPathKey.normalize(url) }
 
     public func state(for url: URL) -> ModelLoadState {
         let key = cacheKey(url)
