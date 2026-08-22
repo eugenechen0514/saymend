@@ -151,23 +151,3 @@ public actor ModelLoadCoordinator<Model: Sendable> {
     /// 背景預載（best-effort）：錯誤吞掉，由實際辨識時再擲出對應失敗。
     public func preload(_ url: URL) async { _ = try? await model(for: url) }
 }
-
-/// 一次性訊號：任一方先 `fire()` 就放行所有等待者，後續 `fire()` 無作用。
-/// 供 `awaitBounded` 把「等前置者」與「等計時器」兩條路併成一個可返回的等待點。
-private actor OneShotSignal {
-    private var fired = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func fire() {
-        guard !fired else { return }
-        fired = true
-        let w = waiters
-        waiters = []
-        w.forEach { $0.resume() }
-    }
-
-    func wait() async {
-        if fired { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-}

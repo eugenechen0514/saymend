@@ -69,6 +69,7 @@ public final class AppSettings: @unchecked Sendable {
         static let whisperTimeout = "whisperTimeout"
         static let whisperLocalModelPath = "whisperLocalModelPath"
         static let whisperLocalScanRoots = "whisperLocalScanRoots"
+        static let whisperModelWaitTimeout = "whisperModelWaitTimeout"
         // 串流參數（issue #15）。key 名一旦改動，既有使用者調好的值就等同被清空，
         // `WhisperStreamingSettingsTests` 以字面值釘住這幾個名字。
         static let streamRequiredSegments = "whisperStreamRequiredSegments"
@@ -178,8 +179,32 @@ public final class AppSettings: @unchecked Sendable {
 
     /// 永回非 optional：selectedModelPath 為 nil 時交引擎映射「未選擇本機模型」（契約單一）
     public func whisperLocalConfig() -> WhisperLocalConfig {
-        WhisperLocalConfig(selectedModelPath: whisperLocalModelPath, extraScanRoots: whisperLocalScanRoots)
+        WhisperLocalConfig(selectedModelPath: whisperLocalModelPath,
+                           extraScanRoots: whisperLocalScanRoots,
+                           modelWaitTimeout: whisperModelWaitTimeout)
     }
+
+    /// 聽寫時等模型載入的上限（秒，issue #17）。
+    ///
+    /// **逾時只放棄這次聽寫，不中止載入**——ANE 載入是同步 XPC 等待，停不掉
+    /// （見 `awaitBounded`）。載入會繼續在背景跑完，下一次聽寫就能用。
+    ///
+    /// 預設 15 秒的依據不是量測而是使用情境：使用者正按著熱鍵站在那裡，冷載入
+    /// （實測 543～1297 秒）不可能在他還記得要講什麼的時間內完成；暖快取實測 2.26 秒。
+    /// 讀取防線比照 `readInt`：超界或型別不符**回落預設而非夾到邊界**——邊界是使用者
+    /// 從未選過的值。
+    public var whisperModelWaitTimeout: TimeInterval {
+        get {
+            guard let v = defaults.object(forKey: K.whisperModelWaitTimeout) as? Double,
+                  v.isFinite, Self.modelWaitTimeoutRange.contains(v) else { return 15 }
+            return v
+        }
+        set { defaults.set(newValue, forKey: K.whisperModelWaitTimeout) }
+    }
+
+    /// 下限 5 秒：再短連暖快取（實測 2.26 秒）都可能來不及。
+    /// 上限 600 秒：超過十分鐘還按著熱鍵等，已經不是「等一下」而是該去做別的事了。
+    public static let modelWaitTimeoutRange: ClosedRange<Double> = 5...600
 
     // MARK: - 本機串流參數（issue #15）
     //

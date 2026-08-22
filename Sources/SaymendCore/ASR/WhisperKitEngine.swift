@@ -124,7 +124,27 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
         // 可達數分鐘，全折進「辨識中…」會讓使用者以為當掉（實機回報）。
         if await transcriber.state(modelPath: modelPath) != .loaded {
             continuation.yield(.loadingModel)
-            await transcriber.preload(modelPath: modelPath)
+            // **等待要有上限（issue #17）。** 改之前這裡是裸的 `await preload`，沒有任何時限：
+            // 載入若掛住（實機發生過），整次聽寫就永遠掛在「載入模型中…」，連 Esc 都出不來
+            // ——`cancel()` 只設旗標，而 `await` 一個不返回的 Task 不是取消點。
+            //
+            // 中止「載入」做不到（ANE 是同步 XPC 等待），中止「這次聽寫的等待」做得到。
+            // 逾時之後載入繼續在背景跑完，下一次聽寫就能用。
+            let limit = configProvider().modelWaitTimeout
+            let outcome = await awaitBounded(limit: .seconds(limit)) { [transcriber] in
+                await transcriber.preload(modelPath: modelPath)
+            }
+            switch outcome {
+            case .cancelled:
+                continuation.finish(); return          // 取消不算失敗，不吐 .failed（fail-closed）
+            case .timedOut:
+                continuation.yield(.failed(
+                    reason: "模型仍在載入（已等 \(Int(limit.rounded())) 秒），這次聽寫取消。"
+                          + "載入會在背景繼續，稍後再試。"))
+                continuation.finish(); return
+            case .completed:
+                break
+            }
             if Task.isCancelled { continuation.finish(); return }
             // preload 是 best-effort（coordinator 內以 try? 吞掉錯誤），得回頭確認模型真的載起來了。
             // 少了這一關，載入失敗會被帶進 transcribe 觸發第二次載入＝再等一輪 ANE 編譯
