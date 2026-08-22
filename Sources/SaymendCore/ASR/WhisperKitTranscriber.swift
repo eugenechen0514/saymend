@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import WhisperKit
 
 /// 每個模型一個 actor（spec §3.1）：`WhisperKit` **不是 Sendable**，故於此 actor 的 async init
@@ -29,12 +30,24 @@ public actor WhisperKitModelActor {
     /// `download: false`＝一律不連網下載模型，複用磁碟既有的 CoreML 模型。
     /// `tokenizerFolder` 不指定＝交套件依模型自行解析（讀本機 HF 快取，已快取即離線）。
     ///
-    /// `verbose: true` ＋ `.info`：只吐載入階段的里程碑（各子模型耗時、總耗時），不含逐 buffer
-    /// 的除錯訊息。載入期間 CPU 幾乎為 0（工作在 CoreML／ANE 側），沒有這些訊息時
-    /// 「還在載」與「已經死了」在外部完全無法區分——這正是本次查錯耗掉大半時間的原因。
+    /// `verbose: true` ＋ **`.debug`**：載入期間的分階段里程碑（`Loading audio encoder`、
+    /// `Loaded text decoder in 104.21s`…）在套件裡是 `Logging.debug`，只有「開始載」與
+    /// 「全部載完」兩則是 `.info`。`Logging.log` 的守衛是 `level <= messageLevel`，
+    /// 所以設 `.info` 時 `.info(2) <= .debug(1)` 為 false——**分階段的訊息一則都收不到**。
+    /// issue #17 要的階段進度靠的就是那些訊息（見 `WhisperLoadLogParser`）。
+    ///
+    /// **等級只在載入期間停在 `.debug`**：`WhisperKit.init` 一開始就用這裡的值呼叫
+    /// `Logging.updateLogLevel`，載完由 `ModelLoadRun` 的收尾動作調回 `.info`
+    /// （見 `WhisperKitTranscriber.init`）。不這麼做的話，辨識期 `TextDecoder` 的
+    /// 逐 token 除錯訊息（`TextDecoder.swift:588/592/657`，都在 `:573` 那個 token 迴圈裡）
+    /// 會每個 token 灌一則進我們的 callback。
+    ///
+    /// 附帶一提，那幾則訊息裡的 `tokenizer.decode(...)` 是**現在就在付的成本**——
+    /// 字串插值在呼叫點就求值完畢，與 log 等級無關。改等級只影響 `log()` 內部的
+    /// map/join 與 callback 呼叫。
     static func modelConfig(modelFolder: URL) -> WhisperKitConfig {
         WhisperKitConfig(modelFolder: modelFolder.path,
-                         verbose: true, logLevel: .info,
+                         verbose: true, logLevel: .debug,
                          prewarm: false, load: true, download: false)
     }
 
@@ -132,15 +145,47 @@ public actor WhisperKitModelActor {
 public final class WhisperKitTranscriber: WhisperTranscribing {
     private let coordinator: ModelLoadCoordinator<WhisperKitModelActor>
     private let maxDuration: TimeInterval
+    private let tracker: ModelLoadProgressTracker
+    private let history: ModelLoadHistory
+
+    /// 載入期以外的 log 等級。載入時降到 `.debug` 才收得到分階段里程碑（見 `modelConfig`）。
+    private static let restingLogLevel: Logging.LogLevel = .info
 
     /// 安全網上限（秒）。串流不需要累積整段就能辨識，但套件的串流轉錄器要求樣本陣列
     /// 只增不減（見 `StreamFedAudioSource`），故音訊仍會線性成長，需要一個上限兜底。
-    public init(maxDuration: TimeInterval = 30 * 60) {
+    public init(maxDuration: TimeInterval = 30 * 60,
+                history: ModelLoadHistory = ModelLoadHistory()) {
         self.maxDuration = maxDuration
+        self.history = history
+
+        // 轉發到我們自己的 subsystem（issue #17）。裝了 callback 之後套件就**不再**寫系統
+        // logger（`Logging.log`：`if let callback { callback(m) } else { logger.log(...) }`），
+        // 不轉發等於把開發者查錯用的資料弄不見。
+        //
+        // 現況本來就查不到：實測距上次載入不到 24 小時，
+        // `log show --predicate 'category == "Argmax"' --last 24h --info --debug` 是 0 筆，
+        // 而同一個 process 的其他 debug 紀錄有 3868 筆。轉到我們的 subsystem 至少能撈得到。
+        let logger = Logger(subsystem: "io.saymend.app", category: "WhisperKit")
+        let tracker = ModelLoadProgressTracker(forward: { message in
+            logger.debug("\(message, privacy: .public)")
+        })
+        self.tracker = tracker
+        tracker.installAsWhisperKitLogSink()
+
+        let history = self.history
         coordinator = ModelLoadCoordinator<WhisperKitModelActor> { url in
-            try await WhisperKitModelActor(modelFolder: url)
+            try await ModelLoadRun.perform(
+                url: url, tracker: tracker, history: history,
+                onFinish: { Logging.updateLogLevel(Self.restingLogLevel) },
+                make: { try await WhisperKitModelActor(modelFolder: $0) })
         }
     }
+
+    /// 目前這一趟載入的階段進度；沒有可用的進度資料時 nil（見 `ModelLoadProgressTracker.snapshot`）。
+    public func loadProgress() async -> ModelLoadProgress? { tracker.snapshot() }
+
+    /// 這顆模型上次載入花了多久；沒有紀錄時 nil。
+    public func lastLoad(modelPath: URL) async -> CompletedLoad? { history.last(for: modelPath) }
 
     public func preload(modelPath: URL) async {
         await coordinator.preload(modelPath)

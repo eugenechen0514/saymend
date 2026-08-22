@@ -27,6 +27,19 @@ import WhisperKit
     #expect(c.load == true)        // 不 prewarm，但要真的載
 }
 
+/// **這條同時是「不要好心把它調回 .info」的護欄。**
+///
+/// 套件裡分階段的載入里程碑（`Loading audio encoder`、`Loaded text decoder in N.NNs`…）
+/// 全是 `Logging.debug`，只有「開始載」與「全部載完」兩則是 `.info`。
+/// `Logging.log` 的守衛是 `level <= messageLevel`，設 `.info` 時 `.info(2) <= .debug(1)`
+/// 為 false——分階段的訊息一則都收不到，issue #17 的階段進度就整個沒了，
+/// 而且**不會有任何編譯或執行期徵兆**，只是設定頁上少了三行字。
+@Test func modelConfigUsesDebugLogLevelSoStageMilestonesArrive() {
+    let c = WhisperKitModelActor.modelConfig(modelFolder: URL(filePath: "/m/large"))
+    #expect(c.verbose == true)
+    #expect(c.logLevel == .debug)
+}
+
 /// 離線承諾：不得連網下載模型。這條寫在設定頁上給使用者看，破了就是對使用者說謊。
 @Test func modelConfigNeverDownloads() {
     let c = WhisperKitModelActor.modelConfig(modelFolder: URL(filePath: "/m/large"))

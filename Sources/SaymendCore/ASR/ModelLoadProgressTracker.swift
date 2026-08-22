@@ -136,3 +136,25 @@ public final class ModelLoadProgressTracker: @unchecked Sendable {
         completed = nil
     }
 }
+
+
+/// 跑一趟載入並做完該做的紀錄（issue #17）。
+///
+/// 抽成泛型純函式**是為了測得到**：真實路徑要載一顆 3GB 模型才跑得動，而這裡的四件事
+/// （重置追蹤器、成功才寫歷史、無論成敗都調回 log 等級、失敗不留半筆）任何一件錯了，
+/// 都不會有編譯或執行期徵兆——只會讓使用者幾週後看到一個錯的「上次耗時」。
+public enum ModelLoadRun {
+    public static func perform<M>(url: URL,
+                                  tracker: ModelLoadProgressTracker,
+                                  history: ModelLoadHistory,
+                                  onFinish: @Sendable () -> Void,
+                                  make: @Sendable (URL) async throws -> M) async throws -> M {
+        tracker.beginLoad()
+        defer { onFinish() }                    // 擲錯也要跑：log 等級不能停在載入期的 .debug
+        let model = try await make(url)
+        // 沒收到總結訊息就沒有可信的耗時（套件升級改了字串時就會這樣），此時什麼都不寫——
+        // 寧可下次沒有參照，也不要一個編出來的參照。
+        if let done = tracker.completedLoad() { history.record(done, for: url) }
+        return model
+    }
+}

@@ -159,3 +159,105 @@ private final class MessageBox: @unchecked Sendable {
         #expect(box.all == ["Loading models...", "Running on Mac"])
     }
 }
+
+@Suite struct ModelLoadRunTests {
+    private func makeHistory() -> (ModelLoadHistory, () -> Void) {
+        let name = "io.saymend.tests.\(UUID().uuidString)"
+        let d = UserDefaults(suiteName: name)!
+        return (ModelLoadHistory(defaults: d), { d.removePersistentDomain(forName: name) })
+    }
+
+    private struct Boom: Error {}
+
+    @Test func recordsHistoryOnSuccess() async throws {
+        let (history, cleanup) = makeHistory(); defer { cleanup() }
+        let tracker = ModelLoadProgressTracker(now: Date.init)
+        let url = URL(filePath: "/m/a")
+        let got = try await ModelLoadRun.perform(url: url, tracker: tracker, history: history,
+                                                 onFinish: {}) { u in
+            tracker.ingest("Loading models...")
+            tracker.ingest("Loaded text decoder in 104.21s")
+            tracker.ingest("Loaded models for whisper size: large-v3 in 631.34s")
+            return u.lastPathComponent
+        }
+        #expect(got == "a")
+        #expect(history.last(for: url)?.total == 631.34)
+        #expect(history.last(for: url)?.stages[.textDecoder] == 104.21)
+    }
+
+    /// 載入失敗不得留下半筆紀錄——那會變成下一次的參照。
+    @Test func doesNotRecordHistoryWhenLoadThrows() async {
+        let (history, cleanup) = makeHistory(); defer { cleanup() }
+        let tracker = ModelLoadProgressTracker(now: Date.init)
+        let url = URL(filePath: "/m/a")
+        await #expect(throws: Boom.self) {
+            _ = try await ModelLoadRun.perform(url: url, tracker: tracker, history: history,
+                                               onFinish: {}) { _ -> String in
+                tracker.ingest("Loading models...")
+                tracker.ingest("Loaded text decoder in 104.21s")
+                throw Boom()
+            }
+        }
+        #expect(history.last(for: url) == nil)
+    }
+
+    /// 即使 log 已經吐出「全部載完」，只要載入最後擲錯就不得寫歷史。
+    ///
+    /// **輸入是合成的**：套件目前的總結訊息（`Core/WhisperKit.swift:441`）是 `loadModels()`
+    /// 的最後一行，之後沒有會擲錯的動作，所以真實序列走不到這個組合——上一條
+    /// `doesNotRecordHistoryWhenLoadThrows` 因此殺不掉「改用 defer 無條件寫」這個變異。
+    /// 但訊息順序是套件的內部細節：哪天總結移到 tokenizer 載入（會擲錯的那一步）之前，
+    /// 「載完了然後失敗」就成真。這條把「成功才寫」的意圖釘住，不倚賴套件目前的順序。
+    @Test func doesNotRecordHistoryWhenLoadThrowsAfterTheTotalArrived() async {
+        let (history, cleanup) = makeHistory(); defer { cleanup() }
+        let tracker = ModelLoadProgressTracker(now: Date.init)
+        let url = URL(filePath: "/m/a")
+        await #expect(throws: Boom.self) {
+            _ = try await ModelLoadRun.perform(url: url, tracker: tracker, history: history,
+                                               onFinish: {}) { _ -> String in
+                tracker.ingest("Loading models...")
+                tracker.ingest("Loaded models for whisper size: large-v3 in 631.34s")
+                throw Boom()
+            }
+        }
+        #expect(history.last(for: url) == nil)
+    }
+
+    /// 收尾動作（把 log 等級調回 .info）**擲錯也要跑**。
+    /// 少了它，一次失敗的載入就會讓辨識期一直停在 .debug，每個 token 灌一則訊息。
+    @Test func onFinishRunsOnBothSuccessAndFailure() async {
+        let (history, cleanup) = makeHistory(); defer { cleanup() }
+        let tracker = ModelLoadProgressTracker(now: Date.init)
+        let calls = Counter2()
+
+        _ = try? await ModelLoadRun.perform(url: URL(filePath: "/m/a"), tracker: tracker,
+                                            history: history,
+                                            onFinish: { calls.inc() }) { u in u.lastPathComponent }
+        #expect(calls.value == 1)
+
+        _ = try? await ModelLoadRun.perform(url: URL(filePath: "/m/b"), tracker: tracker,
+                                            history: history,
+                                            onFinish: { calls.inc() }) { _ -> String in throw Boom() }
+        #expect(calls.value == 2)
+    }
+
+    /// 開跑前要先重置——否則第二趟會把上一趟的成績當成自己的寫進歷史。
+    @Test func resetsTrackerBeforeLoading() async throws {
+        let (history, cleanup) = makeHistory(); defer { cleanup() }
+        let tracker = ModelLoadProgressTracker(now: Date.init)
+        tracker.ingest("Loading models...")
+        tracker.ingest("Loaded models for whisper size: 上一趟 in 999.0s")
+
+        let url = URL(filePath: "/m/a")
+        _ = try await ModelLoadRun.perform(url: url, tracker: tracker, history: history,
+                                           onFinish: {}) { u in u.lastPathComponent }
+        #expect(history.last(for: url) == nil, "這一趟沒有總結訊息，不得沿用上一趟的 999 秒")
+    }
+}
+
+private final class Counter2: @unchecked Sendable {
+    private let lock = NSLock()
+    private var v = 0
+    func inc() { lock.lock(); v += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return v }
+}

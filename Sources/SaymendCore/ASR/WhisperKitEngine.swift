@@ -16,6 +16,10 @@ public protocol WhisperTranscribing: Sendable {
     func state(modelPath: URL) async -> ModelLoadState
     /// 卸載目前模型，釋放記憶體。
     func unload() async
+    /// 目前這一趟載入的階段進度（issue #17）。只有真實的本機實作給得出來。
+    func loadProgress() async -> ModelLoadProgress?
+    /// 這顆模型上次載入花了多久（issue #17）。
+    func lastLoad(modelPath: URL) async -> CompletedLoad?
     /// **串流**辨識（issue #12）：吃麥克風音訊片段流，吐出辨識進度序列。
     /// 音訊格式轉換與累積由實作負責（本專案交給 `StreamFedAudioSource`）。
     /// 載入失敗擲 `WhisperLoadError`；長度超限與音訊轉換失敗擲 `WhisperStreamError`。
@@ -24,6 +28,13 @@ public protocol WhisperTranscribing: Sendable {
                     language: String,
                     promptPhrases: [String],
                     options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamEvent, Error>
+}
+
+/// 進度回報是**選配的**：給預設實作回 nil，測試假件與未來的其他實作都不必被迫實作它。
+/// 設定頁看到 nil 就退回純碼表——那正是套件升級改掉 log 字串時該有的降級行為。
+public extension WhisperTranscribing {
+    func loadProgress() async -> ModelLoadProgress? { nil }
+    func lastLoad(modelPath: URL) async -> CompletedLoad? { nil }
 }
 
 /// WhisperKit 本機引擎（issue #12）：**串流**辨識——邊聽邊出文字，一個聽寫階段
