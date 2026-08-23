@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 
 /// 模型載入失敗（spec §3.1）。與辨識期錯誤分型，讓引擎給對的失敗語彙。
 public struct WhisperLoadError: Error, Equatable {
@@ -56,6 +57,13 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
 
     /// 詞彙表偏置（spec §7）：與其他引擎吃同一個來源，交由實作 tokenize 成 promptTokens。
     public var contextualStrings: (@MainActor () -> [String])?
+
+    /// 等模型載入的結果要留下痕跡（issue #17）。這條路徑的三種結局在畫面上很短暫
+    /// （失敗提示 2.5 秒就淡掉），事後回查時沒有紀錄就只剩使用者的印象——
+    /// 而「印象」正是本票一開始查不動的原因。用 `.notice` 等級才會落地，`.info` 不會。
+    ///
+    /// **這幾行沒有測試覆蓋**：os_log 的輸出無法在單元測試裡攔截。不得宣稱它有測試。
+    private static let log = Logger(subsystem: "io.saymend.app", category: "ASR")
 
     private let stateLock = NSLock()
     private var pumpTask: Task<Void, Never>?
@@ -158,14 +166,16 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
             }
             switch outcome {
             case .cancelled:
+                Self.log.notice("等模型載入時被取消，這次聽寫結束（不算失敗）")
                 continuation.finish(); return          // 取消不算失敗，不吐 .failed（fail-closed）
             case .timedOut:
+                Self.log.notice("等模型載入逾時（上限 \(Int(limit.rounded()), privacy: .public) 秒），放棄這次聽寫；載入繼續在背景進行")
                 continuation.yield(.failed(
                     reason: "模型仍在載入（已等 \(Int(limit.rounded())) 秒），這次聽寫取消。"
                           + "載入會在背景繼續，稍後再試。"))
                 continuation.finish(); return
             case .completed:
-                break
+                Self.log.debug("模型已就緒，開始辨識")
             }
             if Task.isCancelled { continuation.finish(); return }
             // preload 是 best-effort（coordinator 內以 try? 吞掉錯誤），得回頭確認模型真的載起來了。
