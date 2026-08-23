@@ -50,10 +50,10 @@ import SaymendCore
                                   currentStageStartedAt: t0.addingTimeInterval(-265))
         let prev = CompletedLoad(total: 631, stages: [.audioEncoder: 527])
         #expect(ModelLoadStatusText.stageLine(.audioEncoder, progress: p, previous: prev, now: t0)
-                == "⟳ 音訊編碼器　4:25（上次 8:47）")
+                == "⟳ 音訊編碼器　4:25（最久 8:47）")
     }
 
-    /// 沒有上次紀錄就不附參照——**不得編造**。第一次載入顯示「（上次 0:00）」比不顯示更糟。
+    /// 沒有紀錄就不附參照——**不得編造**。第一次載入顯示「（最久 0:00）」比不顯示更糟。
     @Test func currentStageWithoutHistoryHasNoReference() {
         let p = ModelLoadProgress(finished: [], currentStage: .audioEncoder,
                                   currentStageStartedAt: t0.addingTimeInterval(-265))
@@ -77,6 +77,24 @@ import SaymendCore
         }
     }
 
+    /// 不到一秒要印 `<0:01` 而不是 `0:00`——暖快取的 tokenizer 實測 0.42 秒，
+    /// 印成「0:00」讀起來像沒有資料或壞掉，而它是一個真實量到的值。
+    @Test func subSecondDurationsDoNotRenderAsZero() {
+        #expect(ModelLoadStatusText.elapsed(0.42) == "<0:01")
+        #expect(ModelLoadStatusText.elapsed(0.999) == "<0:01")
+        #expect(ModelLoadStatusText.elapsed(0) == "0:00")        // 真的是 0 就印 0
+        #expect(ModelLoadStatusText.elapsed(1) == "0:01")
+    }
+
+    /// 實機驗收（2026-08-23）抓到的誤殺路徑：tiny 冷載入 16.88 秒，暖載入 0.56 秒。
+    /// 參照若取「最近一次」就是 0.56，門檻 1.7 秒——合法的冷載入從第 2 秒起一路示警。
+    /// 改成取「看過最久的一趟」（16.88）之後，門檻是 50.6 秒，17 秒的冷載入安全。
+    @Test func aColdReloadIsNotWarnedAgainstAWarmBaseline() {
+        #expect(!ModelLoadStatusText.shouldWarn(elapsed: 17, previousTotal: 16.88))
+        #expect(ModelLoadStatusText.shouldWarn(elapsed: 17, previousTotal: 0.56),
+                "這是改掉的舊行為，留著當對照：暖基準會把合法冷載入判成異常")
+    }
+
     // MARK: - 示警門檻
 
     /// 3 倍不是隨手訂的：實測同機同模型的冷載入散佈就有 2.4 倍（543s → 1297s），
@@ -94,7 +112,7 @@ import SaymendCore
         #expect(ModelLoadStatusText.shouldWarn(elapsed: 1801, previousTotal: nil))
     }
 
-    /// 上次是 0（不該發生，但 UserDefaults 什麼都可能被寫進去）不得讓門檻塌成 0，
+    /// 紀錄是 0（不該發生，但 UserDefaults 什麼都可能被寫進去）不得讓門檻塌成 0，
     /// 否則每一次載入從第一秒就在示警。
     @Test func zeroPreviousTotalFallsBackToTheFloor() {
         #expect(!ModelLoadStatusText.shouldWarn(elapsed: 60, previousTotal: 0))
@@ -105,6 +123,7 @@ import SaymendCore
     @Test func warningDoesNotClaimTheLoadIsDead() {
         let w = ModelLoadStatusText.warning(previousTotal: 527)
         #expect(w.contains("8:47"), "要附上參照數字：\(w)")
+        #expect(w.contains("最久"), "標籤要與實際存的東西一致（存的是最大值）：\(w)")
         #expect(w.contains("無法從 App 內中止"), "要說清楚為什麼卸載沒用：\(w)")
         #expect(!w.contains("已當機") && !w.contains("已死"), "不得斷言：\(w)")
     }

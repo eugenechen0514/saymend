@@ -10,6 +10,9 @@ enum ModelLoadStatusText {
     /// 示警倍數。**不是隨手訂的**：實測同一台 M4、同一顆 large-v3_turbo，冷載入量到
     /// 543s／631s／1297s——散佈本身就有 2.4 倍。門檻訂 2 倍會誤殺合法載入，而誤殺的代價
     /// （使用者認定模型壞了、從此不用離線引擎）比晚幾分鐘示警嚴重得多。
+    ///
+    /// 倍數的基準是「看過最久的一趟」而不是「最近一次」——見 `ModelLoadHistory`
+    /// 型別說明裡那段實機發現（暖載入會污染冷載入的參照）。
     static let warnMultiplier: Double = 3
 
     /// 沒有歷史紀錄時的絕對地板。**這個數字是猜的**——目前量到的最大值是 1297 秒
@@ -21,8 +24,13 @@ enum ModelLoadStatusText {
     ///
     /// 需要小時欄位是因為實測有一次載到 1297 秒，而那不是上界；超過一小時完全可能，
     /// 屆時「77:12」讀起來會讓人以為是秒數。負值（時鐘被往回調）夾到 0。
+    ///
+    /// **不到一秒印 `<0:01` 而不是 `0:00`**：暖快取的 tokenizer 實測 0.42 秒，
+    /// 印成「0:00」讀起來像是沒有資料或壞掉，而它其實是一個真實量到的值。
     static func elapsed(_ seconds: TimeInterval) -> String {
-        let total = Int(max(0, seconds))
+        let clamped = max(0, seconds)
+        if clamped > 0, clamped < 1 { return "<0:01" }
+        let total = Int(clamped)
         let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60)
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
@@ -42,8 +50,10 @@ enum ModelLoadStatusText {
         if progress?.currentStage == stage {
             let since = progress?.currentStageStartedAt ?? now
             var line = "⟳ \(stage.label)　\(elapsed(now.timeIntervalSince(since)))"
-            // 沒有上次紀錄就不附參照。第一次載入顯示「（上次 0:00）」比不顯示更糟。
-            if let ref = previous?.stages[stage] { line += "（上次 \(elapsed(ref))）" }
+            // 沒有紀錄就不附參照。第一次載入顯示「（最久 0:00）」比不顯示更糟。
+            // 標「最久」而不是「上次」是因為存的就是最大值（見 `ModelLoadHistory`）——
+            // 標錯字等於對使用者謊報這個數字的意義。
+            if let ref = previous?.stages[stage] { line += "（最久 \(elapsed(ref))）" }
             return line
         }
         return "· \(stage.label)"
@@ -65,7 +75,7 @@ enum ModelLoadStatusText {
     static func warning(previousTotal: TimeInterval?) -> String {
         let head: String
         if let p = previousTotal, p > 0 {
-            head = "已超過上次的 \(Int(warnMultiplier)) 倍（上次 \(elapsed(p))）。"
+            head = "已超過最久那次的 \(Int(warnMultiplier)) 倍（最久 \(elapsed(p))）。"
         } else {
             head = "已載入超過 \(Int(warnFloorWithoutHistory / 60)) 分鐘（這台機器還沒有可比對的紀錄）。"
         }

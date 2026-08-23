@@ -23,8 +23,8 @@ private func makeDefaults() -> (UserDefaults, () -> Void) {
         #expect(got?.stages[.audioEncoder] == 526.64)
     }
 
-    /// 沒有紀錄就是 nil。UI 靠這個決定「（上次 8:47）」要不要顯示——
-    /// 回一個 0 會讓第一次載入就顯示「上次 0:00」，那是編造出來的。
+    /// 沒有紀錄就是 nil。UI 靠這個決定「（最久 8:47）」要不要顯示——
+    /// 回一個 0 會讓第一次載入就顯示「最久 0:00」，那是編造出來的。
     @Test func noRecordYieldsNil() {
         let (d, cleanup) = makeDefaults(); defer { cleanup() }
         #expect(ModelLoadHistory(defaults: d).last(for: URL(filePath: "/models/never-loaded")) == nil)
@@ -52,7 +52,7 @@ private func makeDefaults() -> (UserDefaults, () -> Void) {
 
     /// **同一顆模型的不同寫法要落在同一筆。** 掃描器給的是 `…/model/`（尾斜線），
     /// 設定經 UserDefaults 來回一趟變成 `…/model`——與 `ModelLoadCoordinator` 的快取 key
-    /// 是同一個坑（見 `ModelPathKey`）。分成兩筆的後果是永遠讀不到上次的耗時。
+    /// 是同一個坑（見 `ModelPathKey`）。分成兩筆的後果是永遠讀不到耗時參照。
     @Test func trailingSlashSharesOneRecord() {
         let (d, cleanup) = makeDefaults(); defer { cleanup() }
         let h = ModelLoadHistory(defaults: d)
@@ -81,14 +81,47 @@ private func makeDefaults() -> (UserDefaults, () -> Void) {
         #expect(got?.stages == [.textDecoder: 1.5])
     }
 
-    /// 重新載入同一顆模型要覆寫，不是累積——參照永遠取最近一次。
-    @Test func recordingAgainOverwrites() {
+    /// **暖載入不得蓋掉冷載入的紀錄。**
+    ///
+    /// 這條來自實機驗收（2026-08-23）：tiny 冷載入 16.88 秒，之後每次暖載入只要 0.5 秒。
+    /// 原本的設計是「覆寫，參照取最近一次」，於是歷史被 0.56 蓋掉。下次 ANE 快取被回收而
+    /// 重新冷編譯時，示警門檻變成 `0.56 × 3 = 1.7 秒`——一趟完全合法的 17 秒冷載入會從
+    /// 第 2 秒起一路示警。暖載入污染冷載入的參照，正是本票最想避免的誤殺。
+    @Test func warmLoadDoesNotOverwriteAColdOne() {
+        let (d, cleanup) = makeDefaults(); defer { cleanup() }
+        let h = ModelLoadHistory(defaults: d)
+        let url = URL(filePath: "/models/tiny")
+        h.record(CompletedLoad(total: 16.88, stages: [.audioEncoder: 14.71, .textDecoder: 1.71]),
+                 for: url)                                            // 冷
+        h.record(CompletedLoad(total: 0.56, stages: [.audioEncoder: 0.06, .textDecoder: 0.07]),
+                 for: url)                                            // 暖
+        #expect(h.last(for: url)?.total == 16.88)
+        #expect(h.last(for: url)?.stages[.audioEncoder] == 14.71)
+        #expect(h.last(for: url)?.stages[.textDecoder] == 1.71)
+    }
+
+    /// 更慢的一趟要墊高紀錄——參照回答的是「這台機器上可能要多久」，
+    /// 而那個問題的答案是看過的最壞情況。
+    @Test func aSlowerLoadRaisesTheRecord() {
         let (d, cleanup) = makeDefaults(); defer { cleanup() }
         let h = ModelLoadHistory(defaults: d)
         let url = URL(filePath: "/models/m")
-        h.record(CompletedLoad(total: 100, stages: [.textDecoder: 50]), for: url)
-        h.record(CompletedLoad(total: 200, stages: [:]), for: url)
-        #expect(h.last(for: url)?.total == 200)
-        #expect(h.last(for: url)?.stages.isEmpty == true)
+        h.record(CompletedLoad(total: 543, stages: [.audioEncoder: 400]), for: url)
+        h.record(CompletedLoad(total: 1297, stages: [.audioEncoder: 1100]), for: url)
+        #expect(h.last(for: url)?.total == 1297)
+        #expect(h.last(for: url)?.stages[.audioEncoder] == 1100)
+    }
+
+    /// 逐**項**取最大值：某一趟少報了某個階段，不得把既有的那一格清掉。
+    /// 特徵擷取器就是這種情況——它那則訊息不帶耗時，永遠不會出現在新紀錄裡。
+    @Test func aStageMissingFromTheNewRunKeepsItsOldValue() {
+        let (d, cleanup) = makeDefaults(); defer { cleanup() }
+        let h = ModelLoadHistory(defaults: d)
+        let url = URL(filePath: "/models/m")
+        h.record(CompletedLoad(total: 10, stages: [.textDecoder: 5, .tokenizer: 1]), for: url)
+        h.record(CompletedLoad(total: 20, stages: [.textDecoder: 3]), for: url)
+        #expect(h.last(for: url)?.total == 20)
+        #expect(h.last(for: url)?.stages[.textDecoder] == 5)      // 舊的比較大，留著
+        #expect(h.last(for: url)?.stages[.tokenizer] == 1)        // 新的沒報，不得被清掉
     }
 }
