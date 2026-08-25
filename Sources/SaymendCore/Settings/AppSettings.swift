@@ -190,7 +190,12 @@ public final class AppSettings: @unchecked Sendable {
     /// （見 `awaitBounded`）。載入會繼續在背景跑完，下一次聽寫就能用。
     ///
     /// 預設 15 秒的依據不是量測而是使用情境：使用者正按著熱鍵站在那裡，冷載入
-    /// （實測 543～1297 秒）不可能在他還記得要講什麼的時間內完成；暖快取實測 2.26 秒。
+    /// （實測 543～1297 秒）不可能在他還記得要講什麼的時間內完成。
+    ///
+    /// **不要拿「暖快取只要 2.26 秒」來論證這個值。** 那個數字（`af6ae89`／#17 第一則留言）
+    /// **從未記錄量測條件**，而 2026-08-25 連續三趟實測（首次／卸載後重載／重啟 App 後重載）
+    /// 全部是 10～11 分鐘的完整重編，一趟都沒有重現它——見 #23。這個上限站得住腳的理由
+    /// 只有一個：使用者正按著熱鍵站在那裡，而十分鐘的載入無論如何等不到。
     /// 讀取防線比照 `readInt`：超界或型別不符**回落預設而非夾到邊界**——邊界是使用者
     /// 從未選過的值。
     public var whisperModelWaitTimeout: TimeInterval {
@@ -202,7 +207,7 @@ public final class AppSettings: @unchecked Sendable {
         set { defaults.set(newValue, forKey: K.whisperModelWaitTimeout) }
     }
 
-    /// 下限 5 秒：再短連暖快取（實測 2.26 秒）都可能來不及。
+    /// 下限 5 秒：留給「模型其實已經快好了」的情形一點餘裕，不至於一按就放棄。
     /// 上限 600 秒：超過十分鐘還按著熱鍵等，已經不是「等一下」而是該去做別的事了。
     public static let modelWaitTimeoutRange: ClosedRange<Double> = 5...600
 
