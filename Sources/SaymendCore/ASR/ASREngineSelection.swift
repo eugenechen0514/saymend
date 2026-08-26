@@ -41,7 +41,8 @@ public struct WhisperLocalConfig: Equatable, Sendable {
     /// **逾時只放棄這次聽寫，不中止載入**（也中止不了，見 `awaitBounded`）。
     /// 預設 15 秒的依據不是量測而是使用情境：使用者正按著熱鍵站在那裡，冷載入
     /// （實測 543～1297 秒）無論如何都不可能在他還記得要講什麼的時間內完成；
-    /// **不倚賴「暖快取很快」這個前提**——那個前提目前站不住（見 #23 與 `AppSettings` 對應說明）。
+    /// **不倚賴「暖快取很快」這個前提**：暖載入存在，但快取數分鐘後就被系統清除，
+    /// 正常使用情境下幾乎碰不到（見 #23 與 `AppSettings` 對應說明）。
     public var modelWaitTimeout: TimeInterval
 
     public init(selectedModelPath: URL?, extraScanRoots: [URL],
