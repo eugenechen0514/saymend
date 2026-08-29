@@ -18,7 +18,9 @@ struct SaymendApp: App {
                         tester: delegate.providerTester,
                         whisperLocalPreload: delegate.preloadWhisperLocal,
                         whisperLocalUnload: delegate.unloadWhisperLocal,
-                        whisperLocalState: { await delegate.whisperLocalState() })
+                        whisperLocalState: { await delegate.whisperLocalState() },
+                        whisperLocalProgress: { await delegate.whisperLocalProgress() },
+                        whisperLocalLastLoad: { await delegate.whisperLocalLastLoad() })
         }
     }
 }
@@ -100,6 +102,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// 設定頁輪詢用：目前選定模型的載入狀態。
     func whisperLocalState() async -> ModelLoadState {
         await whisperLocalEngine.state()
+    }
+
+    /// 設定頁輪詢用：這一趟載入的階段進度（issue #17）。給不出來就 nil，UI 退回純碼表。
+    func whisperLocalProgress() async -> ModelLoadProgress? {
+        await whisperLocalEngine.loadProgress()
+    }
+
+    /// 設定頁輪詢用：目前選定模型上次載入花了多久（issue #17）。
+    func whisperLocalLastLoad() async -> CompletedLoad? {
+        await whisperLocalEngine.lastLoad()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

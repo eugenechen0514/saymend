@@ -33,6 +33,15 @@ private actor Gate {
     }
 }
 
+/// 可控時鐘：測試自己決定「現在」，不睡真實時間
+private final class MutableClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var t: Date
+    init(_ t: Date) { self.t = t }
+    var now: @Sendable () -> Date { { self.lock.lock(); defer { self.lock.unlock() }; return self.t } }
+    func set(_ d: Date) { lock.lock(); t = d; lock.unlock() }
+}
+
 @Suite struct ModelLoadCoordinatorTests {
     /// REV #1：不同 key 的載入必須序列化——否則兩個 3GB 模型同時載入，峰值記憶體無上界
     @Test func differentKeysLoadSerially() async throws {
@@ -90,7 +99,7 @@ private actor Gate {
         let u = URL(filePath: "/m/a")
         let t = Task { try await co.model(for: u) }
         await entered.wait()
-        #expect(await co.state(for: u) == .loading)
+        #expect(await co.state(for: u).isLoading)
         await release.open()
         _ = try await t.value
         #expect(await co.state(for: u) == .loaded)
@@ -243,7 +252,7 @@ private actor Gate {
         }
 
         let stuck = Task { _ = try? await co.model(for: hang) }
-        while await co.state(for: hang) != .loading { await Task.yield() }
+        while !(await co.state(for: hang).isLoading) { await Task.yield() }
 
         await co.unload()
         #expect(await co.state(for: hang) == .idle)     // 卸載確實清掉了 in-flight 記錄
@@ -262,4 +271,104 @@ private actor Gate {
         _ = await stuck.value
         _ = await retry.value
     }
+
+    /// 載入中的狀態要帶得出「這一趟是什麼時候開始的」——設定頁靠它算已經過時間，
+    /// 而那是 issue #17 裡唯一不依賴 log 字串解析的資訊來源（字串解析壞掉時碼表仍要能走）。
+    @Test func loadingStateCarriesStartTime() async {
+        let start = Date(timeIntervalSince1970: 5000)
+        let gate = Gate()
+        let co = ModelLoadCoordinator<String>(now: { start }) { u in
+            await gate.wait()
+            return u.lastPathComponent
+        }
+        let u = URL(filePath: "/m/a")
+        let loading = Task { _ = try? await co.model(for: u) }
+        while await co.state(for: u) == .idle { await Task.yield() }
+
+        #expect(await co.state(for: u) == .loading(since: start))
+        await gate.open()
+        _ = await loading.value
+        #expect(await co.state(for: u) == .loaded)
+    }
+
+    /// 卸載後若同一個 key 已有新的載入接手，舊載入收工時不得把新的那筆 in-flight 記錄刪掉。
+    ///
+    /// 這條守衛（`defer` 裡的 `inFlight[key]?.task == task`）本來就在程式碼裡，但一直沒有
+    /// 測試守著——變異測試把條件拿掉仍全綠，是改 `.loading(since:)` 時順手發現的。
+    /// 誤刪的後果：狀態謊報 `.idle`，設定頁的「載入」按鈕重新亮起，使用者按下去就再開一份 3.2GB。
+    @Test func aFinishingLoadDoesNotEraseItsSuccessorAfterUnload() async {
+        let u = URL(filePath: "/m/a")
+        let gate1 = Gate(), gate2 = Gate()
+        let round = Counter()
+        let co = ModelLoadCoordinator<String>(queueGrace: .milliseconds(50)) { _ in
+            if await round.incGet() == 1 { await gate1.wait() } else { await gate2.wait() }
+            return "m"
+        }
+
+        let first = Task { _ = try? await co.model(for: u) }
+        while !(await co.state(for: u).isLoading) { await Task.yield() }
+
+        await co.unload()                       // 清掉 in-flight 記錄，但 first 仍在跑
+        let second = Task { _ = try? await co.model(for: u) }
+        while !(await co.state(for: u).isLoading) { await Task.yield() }
+
+        await gate1.open()                      // 舊的收工
+        _ = await first.value
+        #expect(await co.state(for: u).isLoading, "新的載入仍在途，狀態不得回到 idle")
+
+        await gate2.open()
+        _ = await second.value
+    }
+
+    /// 起始時刻要在載入**開始**那一刻定住，不是每次查詢才取現在。
+    ///
+    /// 取現在的話兩者在固定時鐘下看起來一樣，但實機上經過時間會永遠是 0 秒——
+    /// 畫面等於沒有碼表，而本票的整個前提就是使用者看不出它在不在動。
+    @Test func startTimeIsFrozenAtLoadStartNotReadAtQueryTime() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 1000))
+        let gate = Gate()
+        let co = ModelLoadCoordinator<String>(now: clock.now) { u in
+            await gate.wait()
+            return u.lastPathComponent
+        }
+        let u = URL(filePath: "/m/a")
+        let loading = Task { _ = try? await co.model(for: u) }
+        while await co.state(for: u) == .idle { await Task.yield() }
+
+        clock.set(Date(timeIntervalSince1970: 1600))     // 載入中，時鐘走了 10 分鐘
+        #expect(await co.state(for: u) == .loading(since: Date(timeIntervalSince1970: 1000)))
+
+        await gate.open()
+        _ = await loading.value
+    }
+
+    /// 第二趟載入要拿到新的起始時刻，不是留著上一趟的。
+    /// 沿用舊時戳的話，卸載後重載會在畫面上瞬間顯示成「已經載了十分鐘」。
+    @Test func reloadAfterUnloadGetsAFreshStartTime() async {
+        let t1 = Date(timeIntervalSince1970: 1000)
+        let t2 = Date(timeIntervalSince1970: 9000)
+        let clock = MutableClock(t1)
+        let gate1 = Gate(), gate2 = Gate()
+        let round = Counter()
+        let co = ModelLoadCoordinator<String>(now: clock.now) { u in
+            if await round.incGet() == 1 { await gate1.wait() } else { await gate2.wait() }
+            return u.lastPathComponent
+        }
+        let u = URL(filePath: "/m/a")
+
+        let first = Task { _ = try? await co.model(for: u) }
+        while await co.state(for: u) == .idle { await Task.yield() }
+        #expect(await co.state(for: u) == .loading(since: t1))
+        await gate1.open()
+        _ = await first.value
+
+        await co.unload()
+        clock.set(t2)
+        let second = Task { _ = try? await co.model(for: u) }
+        while await co.state(for: u) == .idle { await Task.yield() }
+        #expect(await co.state(for: u) == .loading(since: t2))
+        await gate2.open()
+        _ = await second.value
+    }
+
 }

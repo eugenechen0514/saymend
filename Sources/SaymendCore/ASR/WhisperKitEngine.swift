@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 
 /// 模型載入失敗（spec §3.1）。與辨識期錯誤分型，讓引擎給對的失敗語彙。
 public struct WhisperLoadError: Error, Equatable {
@@ -16,6 +17,10 @@ public protocol WhisperTranscribing: Sendable {
     func state(modelPath: URL) async -> ModelLoadState
     /// 卸載目前模型，釋放記憶體。
     func unload() async
+    /// 目前這一趟載入的階段進度（issue #17）。只有真實的本機實作給得出來。
+    func loadProgress() async -> ModelLoadProgress?
+    /// 這顆模型上次載入花了多久（issue #17）。
+    func lastLoad(modelPath: URL) async -> CompletedLoad?
     /// **串流**辨識（issue #12）：吃麥克風音訊片段流，吐出辨識進度序列。
     /// 音訊格式轉換與累積由實作負責（本專案交給 `StreamFedAudioSource`）。
     /// 載入失敗擲 `WhisperLoadError`；長度超限與音訊轉換失敗擲 `WhisperStreamError`。
@@ -24,6 +29,13 @@ public protocol WhisperTranscribing: Sendable {
                     language: String,
                     promptPhrases: [String],
                     options: WhisperStreamingOptions) -> AsyncThrowingStream<WhisperStreamEvent, Error>
+}
+
+/// 進度回報是**選配的**：給預設實作回 nil，測試假件與未來的其他實作都不必被迫實作它。
+/// 設定頁看到 nil 就退回純碼表——那正是套件升級改掉 log 字串時該有的降級行為。
+public extension WhisperTranscribing {
+    func loadProgress() async -> ModelLoadProgress? { nil }
+    func lastLoad(modelPath: URL) async -> CompletedLoad? { nil }
 }
 
 /// WhisperKit 本機引擎（issue #12）：**串流**辨識——邊聽邊出文字，一個聽寫階段
@@ -45,6 +57,13 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
 
     /// 詞彙表偏置（spec §7）：與其他引擎吃同一個來源，交由實作 tokenize 成 promptTokens。
     public var contextualStrings: (@MainActor () -> [String])?
+
+    /// 等模型載入的結果要留下痕跡（issue #17）。這條路徑的三種結局在畫面上很短暫
+    /// （失敗提示 2.5 秒就淡掉），事後回查時沒有紀錄就只剩使用者的印象——
+    /// 而「印象」正是本票一開始查不動的原因。用 `.notice` 等級才會落地，`.info` 不會。
+    ///
+    /// **這幾行沒有測試覆蓋**：os_log 的輸出無法在單元測試裡攔截。不得宣稱它有測試。
+    private static let log = Logger(subsystem: "io.saymend.app", category: "ASR")
 
     private let stateLock = NSLock()
     private var pumpTask: Task<Void, Never>?
@@ -79,6 +98,17 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
     /// 卸載已載入的模型，釋放記憶體。
     public func unload() async {
         await transcriber.unload()
+    }
+
+    /// 這一趟載入的階段進度（issue #17）。實作給不出來就 nil，設定頁退回純碼表。
+    public func loadProgress() async -> ModelLoadProgress? {
+        await transcriber.loadProgress()
+    }
+
+    /// 目前選定模型上次載入花了多久（issue #17）；未選模型＝nil。
+    public func lastLoad() async -> CompletedLoad? {
+        guard let path = configProvider().selectedModelPath else { return nil }
+        return await transcriber.lastLoad(modelPath: path)
     }
 
     public func start(audio: AsyncStream<AudioChunk>, localeIdentifier: String) -> AsyncStream<TranscriptEvent> {
@@ -124,7 +154,29 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
         // 可達數分鐘，全折進「辨識中…」會讓使用者以為當掉（實機回報）。
         if await transcriber.state(modelPath: modelPath) != .loaded {
             continuation.yield(.loadingModel)
-            await transcriber.preload(modelPath: modelPath)
+            // **等待要有上限（issue #17）。** 改之前這裡是裸的 `await preload`，沒有任何時限：
+            // 載入若掛住（實機發生過），整次聽寫就永遠掛在「載入模型中…」，連 Esc 都出不來
+            // ——`cancel()` 只設旗標，而 `await` 一個不返回的 Task 不是取消點。
+            //
+            // 中止「載入」做不到（ANE 是同步 XPC 等待），中止「這次聽寫的等待」做得到。
+            // 逾時之後載入繼續在背景跑完，下一次聽寫就能用。
+            let limit = configProvider().modelWaitTimeout
+            let outcome = await awaitBounded(limit: .seconds(limit)) { [transcriber] in
+                await transcriber.preload(modelPath: modelPath)
+            }
+            switch outcome {
+            case .cancelled:
+                Self.log.notice("等模型載入時被取消，這次聽寫結束（不算失敗）")
+                continuation.finish(); return          // 取消不算失敗，不吐 .failed（fail-closed）
+            case .timedOut:
+                Self.log.notice("等模型載入逾時（上限 \(Int(limit.rounded()), privacy: .public) 秒），放棄這次聽寫；載入繼續在背景進行")
+                continuation.yield(.failed(
+                    reason: "模型仍在載入（已等 \(Int(limit.rounded())) 秒），這次聽寫取消。"
+                          + "載入會在背景繼續，稍後再試。"))
+                continuation.finish(); return
+            case .completed:
+                Self.log.debug("模型已就緒，開始辨識")
+            }
             if Task.isCancelled { continuation.finish(); return }
             // preload 是 best-effort（coordinator 內以 try? 吞掉錯誤），得回頭確認模型真的載起來了。
             // 少了這一關，載入失敗會被帶進 transcribe 觸發第二次載入＝再等一輪 ANE 編譯

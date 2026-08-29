@@ -1,10 +1,46 @@
 import Foundation
 
+/// 模型路徑的正規化——「同一顆模型」的判準。
+///
+/// 最後那趟 `URL(filePath:)` 專治**目錄 URL 的尾斜線**：掃描器給的是 `…/model/`，
+/// 設定經 UserDefaults 來回一趟變成 `…/model`，而尾斜線的差異
+/// `resolvingSymlinksInPath()` 與 `standardizedFileURL` **都消不掉**。
+/// 少了這一步，同一個模型會落在兩個 key 上——large-v3-turbo 各佔 3.2GB。
+///
+/// 抽成公開型別是因為 `ModelLoadHistory`（issue #17）要用同一套判準：
+/// 兩邊各自實作遲早會分岔，屆時載入快取認得是同一顆、載入耗時的歷史卻認不得，
+/// 使用者會看到「上次耗時」在換一種寫法之後就憑空消失。
+public enum ModelPathKey {
+    public static func normalize(_ url: URL) -> URL {
+        URL(filePath: url.resolvingSymlinksInPath().standardizedFileURL.path)
+    }
+
+    /// 字典 key 用的字串形式。**用完整路徑而非 `lastPathComponent`**：
+    /// 不同根目錄下的同名模型是兩顆模型，共用一筆紀錄會讓慢機器量到的耗時
+    /// 被拿去當另一顆的參照。
+    public static func string(_ url: URL) -> String { normalize(url).path }
+}
+
 /// 模型載入狀態（供設定頁顯示與引擎決定要不要先報「載入模型中…」）。
-public enum ModelLoadState: Sendable {
+///
+/// **`Equatable` 必須顯式宣告**：`.loading` 帶了 associated value 之後，Swift 對
+/// 「所有 case 皆無 payload」的自動合成就不再適用（`TranscriptEvent` 與 `HUDState` 也都是顯式的）。
+public enum ModelLoadState: Equatable, Sendable {
     case idle       // 未載入（含已卸載）
-    case loading    // 載入中（首次含 ANE 編譯，可能數分鐘）
+    /// 載入中（首次含 ANE 編譯，可能數分鐘）。`since` 是**這一趟**載入開始的時刻。
+    ///
+    /// 起始時間放在狀態機而不是 `ModelLoadProgressTracker`（issue #17），是因為它是
+    /// 最基本的事實，不該依賴 log 字串解析。套件升級把訊息字串改掉時，階段進度會消失，
+    /// 而碼表仍要能走。
+    case loading(since: Date)
     case loaded     // 已在記憶體，辨識可立即開始
+
+    /// 「是不是在載入中」——不關心從何時開始的呼叫端用這個，
+    /// 免得為了 pattern match 把 `if case` 散得到處都是。
+    public var isLoading: Bool {
+        if case .loading = self { return true }
+        return false
+    }
 }
 
 /// 以路徑為 key 的 single-flight 模型載入（spec §3.1）。actor 序列化狀態，無鎖、無 TOCTOU。
@@ -23,7 +59,9 @@ public enum ModelLoadState: Sendable {
 public actor ModelLoadCoordinator<Model: Sendable> {
     private let loader: @Sendable (URL) async throws -> Model
     private var current: (url: URL, model: Model)?
-    private var inFlight: [URL: Task<Model, Error>] = [:]
+    /// 在途載入。**時戳與 task 綁在同一格**而不是另開一個字典：兩份分開存的話，
+    /// 只要有一條路徑忘了同步清除，狀態就會出現「不在載入卻有起始時刻」或反之。
+    private var inFlight: [URL: (task: Task<Model, Error>, since: Date)] = [:]
     /// 排隊鏈尾：新載入等它完成才開跑（同時最多一個 loader）
     private var chainTail: Task<Void, Never>?
     /// 卸載世代：unload 遞增。載入完成時世代不符＝這份結果已過期，不得寫回 current。
@@ -31,27 +69,23 @@ public actor ModelLoadCoordinator<Model: Sendable> {
 
     /// 卸載後等待舊排隊鏈的寬限期（見 `unload()`）。只在卸載後生效，正常排隊仍是無限期嚴格序列化。
     private let queueGrace: Duration
+    /// 可注入的時鐘（比照 `DictationController` 的 `now:` 慣例），讓「載入從何時開始」測得到。
+    private let now: @Sendable () -> Date
 
     public init(queueGrace: Duration = .seconds(60),
+                now: @escaping @Sendable () -> Date = Date.init,
                 loader: @escaping @Sendable (URL) async throws -> Model) {
         self.queueGrace = queueGrace
+        self.now = now
         self.loader = loader
     }
 
-    /// 快取 key 的正規化。
-    ///
-    /// 最後那趟 `URL(filePath:)` 專治**目錄 URL 的尾斜線**：掃描器給的是 `…/model/`，
-    /// 設定經 UserDefaults 來回一趟變成 `…/model`，而尾斜線的差異
-    /// `resolvingSymlinksInPath()` 與 `standardizedFileURL` **都消不掉**。
-    /// 少了這一步，同一個模型會落在兩個 key 上——large-v3-turbo 各佔 3.2GB。
-    private func cacheKey(_ url: URL) -> URL {
-        URL(filePath: url.resolvingSymlinksInPath().standardizedFileURL.path)
-    }
+    private func cacheKey(_ url: URL) -> URL { ModelPathKey.normalize(url) }
 
     public func state(for url: URL) -> ModelLoadState {
         let key = cacheKey(url)
         if let c = current, c.url == key { return .loaded }
-        if inFlight[key] != nil { return .loading }
+        if let f = inFlight[key] { return .loading(since: f.since) }
         return .idle
     }
 
@@ -73,7 +107,7 @@ public actor ModelLoadCoordinator<Model: Sendable> {
     public func unload() {
         epoch &+= 1
         current = nil
-        for (_, task) in inFlight { task.cancel() }
+        for (_, f) in inFlight { f.task.cancel() }
         inFlight.removeAll()
         if let old = chainTail {
             let grace = queueGrace
@@ -97,17 +131,17 @@ public actor ModelLoadCoordinator<Model: Sendable> {
         // symlink 與實體路徑是同一個模型，正規化後才當 key（REV #8）
         let key = cacheKey(url)
         if let c = current, c.url == key { return c.model }
-        if let t = inFlight[key] { return try await t.value }        // 併發請求共用同一次載入
+        if let f = inFlight[key] { return try await f.task.value }   // 併發請求共用同一次載入
         let predecessor = chainTail
         let startEpoch = epoch
         let task = Task { [loader] in
             await predecessor?.value                                 // 排隊：前一個載入結束才輪到自己
             return try await loader(key)
         }
-        inFlight[key] = task
+        inFlight[key] = (task, now())
         chainTail = Task { _ = try? await task.value }               // 成功或失敗都放行下一個
         // 只有自己還掛在該 key 上時才清：unload 後若已有新的載入接手，不可誤刪它
-        defer { if inFlight[key] == task { inFlight[key] = nil } }
+        defer { if inFlight[key]?.task == task { inFlight[key] = nil } }
         let m = try await task.value      // 擲錯 → defer 清 key、current 不變（不毒化）
         guard epoch == startEpoch else { return m }   // 中途被卸載：結果照給呼叫者，但不進快取
         current = (key, m)                // 淘汰舊模型；排隊使最後發起者最後寫入＝latest-wins
@@ -116,24 +150,4 @@ public actor ModelLoadCoordinator<Model: Sendable> {
 
     /// 背景預載（best-effort）：錯誤吞掉，由實際辨識時再擲出對應失敗。
     public func preload(_ url: URL) async { _ = try? await model(for: url) }
-}
-
-/// 一次性訊號：任一方先 `fire()` 就放行所有等待者，後續 `fire()` 無作用。
-/// 供 `awaitBounded` 把「等前置者」與「等計時器」兩條路併成一個可返回的等待點。
-private actor OneShotSignal {
-    private var fired = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func fire() {
-        guard !fired else { return }
-        fired = true
-        let w = waiters
-        waiters = []
-        w.forEach { $0.resume() }
-    }
-
-    func wait() async {
-        if fired { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
 }

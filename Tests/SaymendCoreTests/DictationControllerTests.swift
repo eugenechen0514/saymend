@@ -1910,6 +1910,29 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(c.phase != .idle)                        // 同樣只是顯示狀態，不動 session
 }
 
+/// **載入逾時要把「載入模型中…」從 HUD 上換掉。**
+///
+/// 這條來自實機驗收（2026-08-23）：使用者回報「按了熱鍵，5 秒後 HUD 還是卡在載入模型中」。
+/// 引擎端的有界等待有測試守著（`WhisperKitEngineTests.dictationGivesUpWhenModelLoadExceedsTheLimit`），
+/// 但「引擎吐了 .failed 之後 HUD 到底變成什麼」一直沒有測試——而 `.loadingModel` 在
+/// `HUDWindowController` 裡是**持久狀態**（不像 notice 會自動淡掉），少了這一步就會真的卡住。
+@MainActor
+@Test func loadTimeoutReplacesTheLoadingModelHUD() async {
+    let polisher = GatedIntentService()
+    let (c, _, _, _, _, hud) = makeController(polisher: polisher)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.loadingModel, at: 10.5)
+    #expect(hud.states.last == .loadingModel)
+
+    c.handleTranscript(.failed(reason: "模型仍在載入（已等 5 秒），這次聽寫取消。"), at: 15.5)
+    guard case .notice(let message)? = hud.states.last else {
+        Issue.record("預期以 notice 取代「載入模型中…」，實得 \(String(describing: hud.states.last))")
+        return
+    }
+    #expect(message.contains("仍在載入"), "訊息要說清楚是還在載入，不是辨識失敗：\(message)")
+    #expect(c.phase == .idle, "這次聽寫已放棄，相位要回 idle")
+}
+
 @MainActor
 @Test func streamEndAfterFailedIsIgnored() async {
     // failed 已封存 → phase idle → 隨後的 asrStreamEnded 被相位守衛冪等忽略、不進 lingering

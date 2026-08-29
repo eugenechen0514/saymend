@@ -30,8 +30,13 @@ private final class FakeStreamTranscriber: WhisperTranscribing, @unchecked Senda
         return body()
     }
 
+    /// 讓 preload 卡住不返回（模擬 ANE 載入掛死）。issue #17。
+    var preloadGate: (@Sendable () async -> Void)?
+
     func preload(modelPath: URL) async {
-        sync { preloadCount += 1; if preloadSucceeds { stateToReport = .loaded } }
+        let gate = sync { preloadCount += 1; return preloadGate }
+        await gate?()
+        sync { if preloadSucceeds { stateToReport = .loaded } }
     }
     func state(modelPath: URL) async -> ModelLoadState { sync { stateToReport } }
     func unload() async { sync { unloadCount += 1; stateToReport = .idle } }
@@ -107,10 +112,39 @@ private func drive(_ e: WhisperKitEngine) async -> [TranscriptEvent] {
 
 private func engine(_ f: any WhisperTranscribing,
                     path: URL? = URL(filePath: "/tmp/m"),
-                    options: WhisperStreamingOptions = WhisperStreamingOptions()) -> WhisperKitEngine {
+                    options: WhisperStreamingOptions = WhisperStreamingOptions(),
+                    waitTimeout: TimeInterval = 30) -> WhisperKitEngine {
     WhisperKitEngine(transcriber: f,
-                     configProvider: { WhisperLocalConfig(selectedModelPath: path, extraScanRoots: []) },
+                     configProvider: {
+                         WhisperLocalConfig(selectedModelPath: path, extraScanRoots: [],
+                                            modelWaitTimeout: waitTimeout)
+                     },
                      optionsProvider: { options })
+}
+
+/// 一次性閘門（async 版）：open 之前 wait 會掛住
+private actor TestGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func open() {
+        guard !opened else { return }
+        opened = true
+        let w = waiters; waiters = []
+        w.forEach { $0.resume() }
+    }
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
+/// 跨 Task 收事件
+private final class EventBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var v: [TranscriptEvent] = []
+    func append(_ e: TranscriptEvent) { lock.lock(); v.append(e); lock.unlock() }
+    var all: [TranscriptEvent] { lock.lock(); defer { lock.unlock() }; return v }
+    var hasFailure: Bool { all.contains { if case .failed = $0 { return true }; return false } }
 }
 
 private func finalizedTexts(_ evs: [TranscriptEvent]) -> [String] {
@@ -494,6 +528,80 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         #expect(!evs.contains(.transcribing))
         #expect(evs.last == .failed(reason: "模型載入失敗"))
         #expect(f.transcribeCount == 0)
+    }
+
+    // MARK: - 等模型載入要有上限（issue #17）
+    //
+    // 改之前 `await transcriber.preload(...)` 沒有任何時限：載入若掛住（實機發生過，
+    // ANE 的同步 XPC 等待不理會 Task.cancel()），整次聽寫就永遠掛在「載入模型中…」，
+    // 連 Esc 都出不來。中止載入做不到，中止「這次聽寫的等待」做得到。
+
+    @Test func dictationGivesUpWhenModelLoadExceedsTheLimit() async {
+        let f = FakeStreamTranscriber()
+        let gate = TestGate()
+        f.preloadGate = { await gate.wait() }
+        let evs = await drive(engine(f, waitTimeout: 0.05))
+        #expect(evs.contains(.loadingModel))
+        #expect(!evs.contains(.transcribing))
+        #expect(f.transcribeCount == 0)
+        guard case .failed(let reason)? = evs.last else {
+            Issue.record("預期以 .failed 收場，實得 \(evs)"); await gate.open(); return
+        }
+        #expect(reason.contains("仍在載入"), "訊息要說清楚是還在載入，不是辨識失敗：\(reason)")
+        await gate.open()                     // 收拾掛著的 continuation
+    }
+
+    /// **本票最重要的一條。** 誤殺合法的慢載入比不設逾時更糟——使用者會以為模型壞了，
+    /// 而實測同機同模型的冷載入就差 2.4 倍（543s／1297s），沒有「正常該多久」這種東西。
+    @Test func slowButLegitimateLoadIsNotKilled() async {
+        let f = FakeStreamTranscriber()
+        let gate = TestGate()
+        f.preloadGate = { await gate.wait() }
+        Task { try? await Task.sleep(for: .milliseconds(30)); await gate.open() }
+        let evs = await drive(engine(f, waitTimeout: 5))
+        #expect(evs.contains(.loadingModel))
+        #expect(evs.contains(.transcribing))
+        #expect(finalizedTexts(evs) == ["整段本機辨識結果"])
+    }
+
+    /// 逾時放棄的是**這次聽寫**，不是載入。載入繼續在背景跑完，下次聽寫就能用——
+    /// 這是刻意的：ANE 載入根本停不掉，假裝停得掉只會白白丟掉已經投入的十分鐘。
+    @Test func theLoadKeepsRunningAfterTheDictationGivesUp() async {
+        let f = FakeStreamTranscriber()
+        let gate = TestGate()
+        f.preloadGate = { await gate.wait() }
+        let evs = await drive(engine(f, waitTimeout: 0.05))
+        #expect(!evs.contains(.transcribing))          // 這次聽寫放棄了
+
+        await gate.open()                              // 載入這時才完成
+        while await f.state(modelPath: URL(filePath: "/tmp/m")) != .loaded {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(await f.state(modelPath: URL(filePath: "/tmp/m")) == .loaded)
+        #expect(f.preloadCount == 1)                   // 沒有重複發起
+    }
+
+    /// Esc 在載入中要出得來，且**不吐 .failed**——取消不算失敗（既有 fail-closed 紀律）。
+    /// 改之前這是做不到的：cancel() 只設旗標，而 `await preload` 不是取消點。
+    @Test func escapeDuringModelLoadEndsStreamWithoutFailure() async {
+        let f = FakeStreamTranscriber()
+        let gate = TestGate()
+        f.preloadGate = { await gate.wait() }
+        let e = engine(f, waitTimeout: 30)             // 上限拉長，確定不是逾時造成的
+        let (st, c) = AsyncStream.makeStream(of: AudioChunk.self)
+        c.yield(chunk16k())
+        let box = EventBox()
+        let consume = Task {
+            for await ev in e.start(audio: st, localeIdentifier: "zh-TW") { box.append(ev) }
+        }
+        while !box.all.contains(.loadingModel) { try? await Task.sleep(for: .milliseconds(1)) }
+
+        e.cancel()
+        _ = await consume.value                        // 沒修好的話這裡會永遠掛住
+        #expect(!box.hasFailure, "取消不是失敗，不得吐 .failed：\(box.all)")
+        #expect(f.transcribeCount == 0)
+        c.finish()
+        await gate.open()
     }
 
     @Test func engineStateFollowsTranscriber() async {
