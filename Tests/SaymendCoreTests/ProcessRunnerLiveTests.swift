@@ -10,6 +10,26 @@ private func tempDir() throws -> URL {
     return u
 }
 
+@Test func liveReapWaitReturnsWhenInjectedWaiterNeverDoes() async throws {
+    // 先讓真 process 走到 Foundation 回報不再執行，但刻意不呼叫 waitUntilExit；這正是 flake 的狀態。
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = ["-c", "exit 7"]
+    try process.run()
+    while process.isRunning { try? await Task.sleep(for: .milliseconds(10)) }
+
+    // 不靠偶發重現 notification 未派送：注入永不 fire 的 waiter，直接釘住呼叫端的上限。
+    // 若 awaitReap 拿掉 awaitBounded，這個測試會永久停在 neverFired.wait()。
+    let neverFired = OneShotSignal()
+    let start = ContinuousClock.now
+    let outcome = await LiveProcessRunner.awaitReap(limit: .milliseconds(50)) {
+        await neverFired.wait()
+    }
+    #expect(outcome == .timedOut)
+    #expect(ContinuousClock.now - start < .seconds(1))
+    #expect(process.terminationStatus == 7) // isRunning == false 已足夠，不以 waiter 返回為前提
+}
+
 @Test func livePipesDrainConcurrentlyWithoutDeadlock() async throws {
     // stdout 與 stderr 各 1.2MB；未並行排空會塞滿 64KB pipe 而死鎖（→ 被 30s timeout 殺掉、測試失敗而非卡死）
     let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }

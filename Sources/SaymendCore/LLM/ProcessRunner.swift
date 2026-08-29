@@ -59,8 +59,23 @@ public struct LiveProcessRunner: ProcessRunner {
         await Task.detached { (try? handle.readToEnd()) ?? Data() }.value
     }
 
+    /// 正常路徑開始收屍時 `isRunning` 已是 false，本來應立刻返回；1 秒已是 20ms 輪詢粒度的
+    /// 50 倍，足夠吸收 executor 排程延遲，也不會讓 Foundation 通知未派送時變成多秒卡頓。
+    ///
+    /// `terminationStatus` 在 process 還在跑時會丟 `NSInvalidArgumentException`，但 Foundation
+    /// 的 contract 明確以 `isRunning == false` 作為可安全讀取的條件，並不要求
+    /// `waitUntilExit()` 已返回。因此正常路徑即使放棄收屍等待，`run()` 仍可讀 status；
+    /// 逾時路徑則會先丟 `.timedOut`，根本不讀 status。
+    @discardableResult
+    static func awaitReap(
+        limit: Duration = .seconds(1),
+        waiter: @escaping @Sendable () async -> Void
+    ) async -> BoundedWaitOutcome {
+        await awaitBounded(limit: limit, work: waiter)
+    }
+
     /// 輪詢等待（M3 教訓：輪詢是天然重試引擎；20ms 粒度對秒級 timeout 足夠）。
-    /// 逾時：terminate（SIGTERM）→ 500ms 寬限 → SIGKILL；一律 waitUntilExit 收屍後才回。
+    /// 逾時：terminate（SIGTERM）→ 500ms 寬限 → SIGKILL；兩條路徑的收屍都另有 1 秒上限。
     private static func waitOrKill(_ p: Process, timeout: TimeInterval) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now + .seconds(timeout)
@@ -72,12 +87,16 @@ public struct LiveProcessRunner: ProcessRunner {
                     try? await Task.sleep(for: .milliseconds(20))
                 }
                 if p.isRunning { kill(p.processIdentifier, SIGKILL) }
-                await Task.detached { p.waitUntilExit() }.value
+                await Self.awaitReap {
+                    await Task.detached { p.waitUntilExit() }.value
+                }
                 return true
             }
             try? await Task.sleep(for: .milliseconds(20))
         }
-        await Task.detached { p.waitUntilExit() }.value
+        await Self.awaitReap {
+            await Task.detached { p.waitUntilExit() }.value
+        }
         return false
     }
 }
