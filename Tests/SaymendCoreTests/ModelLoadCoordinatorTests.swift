@@ -61,24 +61,30 @@ private final class MutableClock: @unchecked Sendable {
     /// REV #1：最後發起的載入才是 current——慢的過期 preload 完成後不得覆寫較新的選擇
     @Test func laterLoadWinsTheCache() async throws {
         let ct = Counter()
-        let entered = Gate(), release = Gate()
+        let aEntered = Gate(), releaseA = Gate(), releaseB = Gate()
+        let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
         let co = ModelLoadCoordinator<String> { u in
             await ct.inc()
-            if u.lastPathComponent == "a" { await entered.open(); await release.wait() }
+            if u.lastPathComponent == "a" {
+                await aEntered.open(); await releaseA.wait()
+            } else if u.lastPathComponent == "b" {
+                await releaseB.wait()
+            }
             return u.lastPathComponent
         }
-        let ta = Task { try await co.model(for: URL(filePath: "/m/a")) }
-        await entered.wait()                                   // a 已進 loader 且卡住
-        let tb = Task { try await co.model(for: URL(filePath: "/m/b")) }
-        // 給 b 足夠時間進 coordinator。序列化前 b 會在此期間「插隊載完」並成為 current，
-        // 接著 a 才慢慢完成並把 current 蓋回 a（正是本測試要擋的過期覆寫）；序列化後 b 只會排隊。
-        // 不能改等「b 的 loader 進入」當同步點——序列化後那要等 a 先完成，會死結。
-        try? await Task.sleep(nanoseconds: 60_000_000)
-        await release.open()
-        _ = try await ta.value
+        let ta = Task { try await co.model(for: a) }
+        await aEntered.wait()                                  // a 已進 loader 且卡住
+        let tb = Task { try await co.model(for: b) }
+        // `.loading` 就是既有的 enqueue seam：model(for:) 連續寫完 inFlight／chainTail 後，
+        // 才在 task.value 首次 suspension；actor 能回答 state 時，b 必已完整排進鏈上。
+        while !(await co.state(for: b).isLoading) { await Task.yield() }
+        await releaseA.open()
+        _ = try await ta.value                                 // 保證 a 已完成 cache write-back
+        await releaseB.open()                                  // 再讓 b 完成，固定 latest-wins 順序
         _ = try await tb.value
-        _ = try await co.model(for: URL(filePath: "/m/b"))      // b 後完成＝current，不得重載
-        #expect(await ct.v == 2)
+        _ = try await co.model(for: b)                         // b 後完成＝current，不得重載
+        let loadCount = await ct.v
+        #expect(loadCount == 2)
     }
 
     // MARK: - 載入狀態與卸載（M9 追加：首次 ANE 編譯很久，UI 要能如實顯示與釋放）
