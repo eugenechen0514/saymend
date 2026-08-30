@@ -61,14 +61,12 @@ private final class MutableClock: @unchecked Sendable {
     /// REV #1：最後發起的載入才是 current——慢的過期 preload 完成後不得覆寫較新的選擇
     @Test func laterLoadWinsTheCache() async throws {
         let ct = Counter()
-        let aEntered = Gate(), releaseA = Gate(), releaseB = Gate()
+        let aEntered = Gate(), releaseA = Gate()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
         let co = ModelLoadCoordinator<String> { u in
             await ct.inc()
             if u.lastPathComponent == "a" {
                 await aEntered.open(); await releaseA.wait()
-            } else if u.lastPathComponent == "b" {
-                await releaseB.wait()
             }
             return u.lastPathComponent
         }
@@ -77,10 +75,29 @@ private final class MutableClock: @unchecked Sendable {
         let tb = Task { try await co.model(for: b) }
         // `.loading` 就是既有的 enqueue seam：model(for:) 連續寫完 inFlight／chainTail 後，
         // 才在 task.value 首次 suspension；actor 能回答 state 時，b 必已完整排進鏈上。
-        while !(await co.state(for: b).isLoading) { await Task.yield() }
-        await releaseA.open()
-        _ = try await ta.value                                 // 保證 a 已完成 cache write-back
-        await releaseB.open()                                  // 再讓 b 完成，固定 latest-wins 順序
+        let deadline = ContinuousClock.now + .seconds(1)
+        var bReachedCoordinator = false
+        while ContinuousClock.now < deadline {
+            let state = await co.state(for: b)
+            if state.isLoading { bReachedCoordinator = true; break }
+            if state == .loaded {
+                // predecessor 被拿掉時，b 會在仍卡住的 a 前面載完；這就是本測試要擋的舊風險。
+                Issue.record("b 越過尚未完成的 a，提前成為 current")
+                bReachedCoordinator = true
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        guard bReachedCoordinator else {
+            Issue.record("等 b enqueue 逾時（1 秒）")
+            // timeout 只負責讓測試紅；所有 Gate／Task 仍要清場，不能留下 SwiftPM build lock。
+            await releaseA.open()
+            _ = await ta.result
+            _ = await tb.result
+            return
+        }
+        await releaseA.open()                                  // correct：a 完成後 b 才能進 loader
+        _ = try await ta.value
         _ = try await tb.value
         _ = try await co.model(for: b)                         // b 後完成＝current，不得重載
         let loadCount = await ct.v
