@@ -15,26 +15,36 @@ import SaymendCore
     }
 
     /// 不只找 opaque tree 裡的任意 String：該字串必須位在真正的 `Text` storage，
-    /// 且祖先不能有 SwiftUI `_HiddenModifier`。因此 `.id(text)` metadata 與 `.hidden()` 都不算。
-    @MainActor @Test func streamingControlsContainVisibleTradeoffText() {
+    /// 且祖先不能有 SwiftUI `_HiddenModifier`。這個 seam 精確守 `.id(text)` 與 `.hidden()`，
+    /// 不宣稱取代 screenshot test 判斷 opacity、遮擋等一般像素可見性。
+    @MainActor @Test func streamingControlsContainUnhiddenTradeoffText() {
         let suite = "stream-copy-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = AppSettings(defaults: defaults, secrets: InMemorySecretStore())
 
         let controls = GeneralSettingsTab(settings: settings).streamBehaviorControls
-        #expect(visibleTextStrings(in: controls).contains(StreamingSettingsText.requiredSegmentsTradeoff))
+        #expect(unhiddenTextStrings(in: controls).contains(StreamingSettingsText.requiredSegmentsTradeoff))
+
+        // hidden sibling 的 generic type 會出現在共同 container 名稱裡，但不得把 visible sibling 誤殺。
+        let oracle = VStack { Text("visible sibling"); Text("hidden sibling").hidden() }
+        #expect(unhiddenTextStrings(in: oracle).contains("visible sibling"))
+        #expect(!unhiddenTextStrings(in: oracle).contains("hidden sibling"))
     }
 
-    private func visibleTextStrings(in value: Any,
-                                    hiddenByAncestor: Bool = false,
-                                    depth: Int = 0) -> [String] {
+    private func unhiddenTextStrings(in value: Any,
+                                     hiddenByAncestor: Bool = false,
+                                     depth: Int = 0) -> [String] {
         guard depth < 40 else { return [] }
-        let typeName = String(reflecting: Swift.type(of: value))
-        let hidden = hiddenByAncestor || typeName.contains("_HiddenModifier")
+        let mirror = Mirror(reflecting: value)
+        let directlyHidden = mirror.children.contains {
+            $0.label == "modifier"
+                && String(reflecting: Swift.type(of: $0.value)) == "SwiftUI._HiddenModifier"
+        }
+        let hidden = hiddenByAncestor || directlyHidden
         if value is Text { return hidden ? [] : embeddedStrings(in: value) }
-        return Mirror(reflecting: value).children.flatMap {
-            visibleTextStrings(in: $0.value, hiddenByAncestor: hidden, depth: depth + 1)
+        return mirror.children.flatMap {
+            unhiddenTextStrings(in: $0.value, hiddenByAncestor: hidden, depth: depth + 1)
         }
     }
 
