@@ -17,19 +17,26 @@ import SaymendCore
     /// 不只找 opaque tree 裡的任意 String：該字串必須位在真正的 `Text` storage，
     /// 且祖先不能有 SwiftUI `_HiddenModifier`。這個 seam 精確守 `.id(text)` 與 `.hidden()`，
     /// 不宣稱取代 screenshot test 判斷 opacity、遮擋等一般像素可見性。
-    @MainActor @Test func streamingControlsContainUnhiddenTradeoffText() {
+    @MainActor @Test func streamAdvancedSectionContainsUnhiddenTradeoffText() {
         let suite = "stream-copy-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = AppSettings(defaults: defaults, secrets: InMemorySecretStore())
+        let tab = GeneralSettingsTab(settings: settings)
 
-        let controls = GeneralSettingsTab(settings: settings).streamBehaviorControls
-        #expect(unhiddenTextStrings(in: controls).contains(StreamingSettingsText.requiredSegmentsTradeoff))
+        // 從含真正 call site 的 DisclosureGroup subtree 進入；不能只測被插入的 child。
+        let section = tab.streamAdvancedSection
+        #expect(unhiddenTextStrings(in: section).contains(StreamingSettingsText.requiredSegmentsTradeoff))
+
+        // 若真正 call site 寫成 `streamBehaviorControls.hidden()`，oracle 必須把文案排除。
+        let hiddenAtCallSite = Group { tab.streamBehaviorControls.hidden() }
+        #expect(!unhiddenTextStrings(in: hiddenAtCallSite)
+            .contains(StreamingSettingsText.requiredSegmentsTradeoff))
 
         // hidden sibling 的 generic type 會出現在共同 container 名稱裡，但不得把 visible sibling 誤殺。
-        let oracle = VStack { Text("visible sibling"); Text("hidden sibling").hidden() }
-        #expect(unhiddenTextStrings(in: oracle).contains("visible sibling"))
-        #expect(!unhiddenTextStrings(in: oracle).contains("hidden sibling"))
+        let siblingOracle = VStack { Text("visible sibling"); Text("hidden sibling").hidden() }
+        #expect(unhiddenTextStrings(in: siblingOracle).contains("visible sibling"))
+        #expect(!unhiddenTextStrings(in: siblingOracle).contains("hidden sibling"))
     }
 
     private func unhiddenTextStrings(in value: Any,

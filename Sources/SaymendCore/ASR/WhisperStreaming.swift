@@ -103,7 +103,8 @@ public extension WhisperStreamingOptions {
     // 比照 `AppSettings.timeoutRange` 的做法。UI 的 Stepper 另外把使用者輸入
     // 限制在同一組範圍內，兩道防線各守一端。
 
-    /// 下界為 1：0 表示連正在講的那一段都立刻定稿，等於把必然會被改寫的文字直接上屏。
+    /// 下界為 1：0 表示不保留任何尾端片段供後文修正，會過早鎖定辨識結果；
+    /// 錯誤一旦進入 confirmed，後續 ASR 就不再修改。
     static let requiredSegmentsRange: ClosedRange<Int> = 1...10
     /// 相對能量本身就被套件夾在 0…1，門檻超出此區間即恆真或恆假。
     static let silenceThresholdRange: ClosedRange<Float> = 0...1

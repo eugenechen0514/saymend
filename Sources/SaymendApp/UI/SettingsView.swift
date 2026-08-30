@@ -330,7 +330,7 @@ struct GeneralSettingsTab: View {
     ///
     /// **無語音機率門檻不在此列**：WhisperKit 此版把 `noSpeechProb` 寫死為 0、其判斷式恆為假，
     /// 那顆旋鈕調了不會有任何反應。暴露一個沒反應的旋鈕比不給更糟——使用者會因此不信任整頁設定。
-    @ViewBuilder private var streamAdvancedSection: some View {
+    @ViewBuilder var streamAdvancedSection: some View {
         Section {
             DisclosureGroup("進階：串流參數", isExpanded: $showStreamAdvanced) {
                 streamBehaviorControls
