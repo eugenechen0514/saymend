@@ -343,7 +343,7 @@ struct GeneralSettingsTab: View {
     }
 
     /// 串流行為 5 項。說明一律寫「調它會怎樣」——只寫參數名稱的話，使用者無從得知該往哪個方向調。
-    @ViewBuilder private var streamBehaviorControls: some View {
+    @ViewBuilder var streamBehaviorControls: some View {
         Stepper(value: $streamRequiredSegments, in: WhisperStreamingOptions.requiredSegmentsRange) {
             Text("定稿所需片段數：\(streamRequiredSegments)"
                  + "（套件預設 \(WhisperStreamingOptions.packageDefault.requiredSegmentsForConfirmation)）")
