@@ -330,7 +330,7 @@ struct GeneralSettingsTab: View {
     ///
     /// **無語音機率門檻不在此列**：WhisperKit 此版把 `noSpeechProb` 寫死為 0、其判斷式恆為假，
     /// 那顆旋鈕調了不會有任何反應。暴露一個沒反應的旋鈕比不給更糟——使用者會因此不信任整頁設定。
-    @ViewBuilder private var streamAdvancedSection: some View {
+    @ViewBuilder var streamAdvancedSection: some View {
         Section {
             DisclosureGroup("進階：串流參數", isExpanded: $showStreamAdvanced) {
                 streamBehaviorControls
@@ -343,12 +343,12 @@ struct GeneralSettingsTab: View {
     }
 
     /// 串流行為 5 項。說明一律寫「調它會怎樣」——只寫參數名稱的話，使用者無從得知該往哪個方向調。
-    @ViewBuilder private var streamBehaviorControls: some View {
+    @ViewBuilder var streamBehaviorControls: some View {
         Stepper(value: $streamRequiredSegments, in: WhisperStreamingOptions.requiredSegmentsRange) {
             Text("定稿所需片段數：\(streamRequiredSegments)"
                  + "（套件預設 \(WhisperStreamingOptions.packageDefault.requiredSegmentsForConfirmation)）")
         }
-        paramNote("留幾段話先不定稿。調小＝文字更快變成不再改動的定稿，代價是講到一半的字先上屏後又被改掉；調大＝上屏慢但改動少。這是即時感與穩定度的主旋鈕。")
+        paramNote(StreamingSettingsText.requiredSegmentsTradeoff)
 
         Stepper(value: $streamSilenceThreshold,
                 in: Self.doubleRange(WhisperStreamingOptions.silenceThresholdRange), step: 0.05) {

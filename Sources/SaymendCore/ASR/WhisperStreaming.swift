@@ -35,8 +35,9 @@ public struct WhisperStreamProgress: Equatable, Sendable {
 /// **不含無語音機率門檻**：WhisperKit 1.0.0 的 `noSpeechProb` 寫死為 0、
 /// 其判斷式恆為假，該參數完全不作用。暴露一個調了沒反應的旋鈕比不給更糟。
 public struct WhisperStreamingOptions: Equatable, Sendable {
-    /// 幾段之後才把文字視為定稿。**即時感 vs 穩定度的主旋鈕**：
-    /// 調小＝文字更快定稿但會反覆修改；調大＝穩定但延遲高。
+    /// 保留幾個尾端片段供後文修正。**即時感 vs 穩定度的主旋鈕**：
+    /// 多片段時調小＝較快定稿，但錯誤可能較早鎖定；調大＝保留更多後文、較穩定但延遲較高。
+    /// 單片段短句不論設 1 或 2，都會留在未定稿區等串流收尾。
     public var requiredSegmentsForConfirmation: Int
     /// 語音活動偵測的靜音能量門檻。環境吵調高、講話小聲調低。
     public var silenceThreshold: Float
@@ -102,7 +103,8 @@ public extension WhisperStreamingOptions {
     // 比照 `AppSettings.timeoutRange` 的做法。UI 的 Stepper 另外把使用者輸入
     // 限制在同一組範圍內，兩道防線各守一端。
 
-    /// 下界為 1：0 表示連正在講的那一段都立刻定稿，等於把必然會被改寫的文字直接上屏。
+    /// 下界為 1：0 表示不保留任何尾端片段供後文修正，會過早鎖定辨識結果；
+    /// 錯誤一旦進入 confirmed，後續 ASR 就不再修改。
     static let requiredSegmentsRange: ClosedRange<Int> = 1...10
     /// 相對能量本身就被套件夾在 0…1，門檻超出此區間即恆真或恆假。
     static let silenceThresholdRange: ClosedRange<Float> = 0...1
