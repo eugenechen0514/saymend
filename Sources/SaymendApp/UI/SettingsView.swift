@@ -348,7 +348,7 @@ struct GeneralSettingsTab: View {
             Text("定稿所需片段數：\(streamRequiredSegments)"
                  + "（套件預設 \(WhisperStreamingOptions.packageDefault.requiredSegmentsForConfirmation)）")
         }
-        paramNote("留幾段話先不定稿。調小＝文字更快變成不再改動的定稿，代價是講到一半的字先上屏後又被改掉；調大＝上屏慢但改動少。這是即時感與穩定度的主旋鈕。")
+        paramNote(StreamingSettingsText.requiredSegmentsTradeoff)
 
         Stepper(value: $streamSilenceThreshold,
                 in: Self.doubleRange(WhisperStreamingOptions.silenceThresholdRange), step: 0.05) {
