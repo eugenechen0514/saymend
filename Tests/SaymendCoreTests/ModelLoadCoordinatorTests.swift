@@ -61,24 +61,254 @@ private final class MutableClock: @unchecked Sendable {
     /// REV #1：最後發起的載入才是 current——慢的過期 preload 完成後不得覆寫較新的選擇
     @Test func laterLoadWinsTheCache() async throws {
         let ct = Counter()
-        let entered = Gate(), release = Gate()
-        let co = ModelLoadCoordinator<String> { u in
+        let aEntered = Gate(), releaseALoader = Gate(), releaseAWriteBack = Gate()
+        let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
+        let co = ModelLoadCoordinator<String>(testHooks: .init(beforeCacheWrite: { u in
+            if u == a { await releaseAWriteBack.wait() }
+        })) { u in
             await ct.inc()
-            if u.lastPathComponent == "a" { await entered.open(); await release.wait() }
+            if u == a {
+                await aEntered.open(); await releaseALoader.wait()
+            }
             return u.lastPathComponent
         }
-        let ta = Task { try await co.model(for: URL(filePath: "/m/a")) }
-        await entered.wait()                                   // a 已進 loader 且卡住
-        let tb = Task { try await co.model(for: URL(filePath: "/m/b")) }
-        // 給 b 足夠時間進 coordinator。序列化前 b 會在此期間「插隊載完」並成為 current，
-        // 接著 a 才慢慢完成並把 current 蓋回 a（正是本測試要擋的過期覆寫）；序列化後 b 只會排隊。
-        // 不能改等「b 的 loader 進入」當同步點——序列化後那要等 a 先完成，會死結。
-        try? await Task.sleep(nanoseconds: 60_000_000)
-        await release.open()
+        let ta = Task { try await co.model(for: a) }
+        let aStart = await awaitBounded(limit: .seconds(1)) { await aEntered.wait() }
+        guard aStart == .completed else {
+            Issue.record("a loader 未在 1 秒內進入")
+            await releaseALoader.open(); await releaseAWriteBack.open(); ta.cancel()
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await ta.result }
+            return
+        }
+        let tb = Task { try await co.model(for: b) }
+        // `.loading` 就是既有的 enqueue seam：model(for:) 連續寫完 inFlight／chainTail 後，
+        // 才在 task.value 首次 suspension；actor 能回答 state 時，b 必已完整排進鏈上。
+        let deadline = ContinuousClock.now + .seconds(1)
+        var bReachedCoordinator = false
+        while ContinuousClock.now < deadline {
+            let state = await co.state(for: b)
+            if state.isLoading {
+                if await ct.v > 1 { Issue.record("b loader 在 a 完成前就開始，破壞不同-key 序列化") }
+                bReachedCoordinator = true
+                break
+            }
+            if state == .loaded {
+                // predecessor 被拿掉時，b 會在仍卡住的 a 前面載完；這就是本測試要擋的舊風險。
+                Issue.record("b 越過尚未完成的 a，提前成為 current")
+                bReachedCoordinator = true
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        guard bReachedCoordinator else {
+            Issue.record("等 b enqueue 逾時（1 秒）")
+            // timeout 只負責讓測試紅；所有 Gate／Task 仍要清場，不能留下 SwiftPM build lock。
+            await releaseALoader.open(); await releaseAWriteBack.open()
+            ta.cancel(); tb.cancel()
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await ta.result }
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await tb.result }
+            return
+        }
+        await releaseALoader.open()                            // a loader 完成，chainTail 可放行 b
+        let bCompletion = await awaitBounded(limit: .seconds(1)) { _ = await tb.result }
+        guard bCompletion == .completed else {
+            Issue.record("b loader 放行後 1 秒內未完成 cache write-back")
+            await releaseAWriteBack.open()
+            ta.cancel(); tb.cancel()
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await ta.result }
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await tb.result }
+            return
+        }
+        _ = try await tb.value                                 // b 先完成 cache write-back
+        await releaseAWriteBack.open()                         // 再讓 stale a 嘗試 write-back
+        let aCompletion = await awaitBounded(limit: .seconds(1)) { _ = await ta.result }
+        guard aCompletion == .completed else {
+            Issue.record("a write-back gate 放行後 1 秒內未返回")
+            ta.cancel(); return
+        }
         _ = try await ta.value
-        _ = try await tb.value
-        _ = try await co.model(for: URL(filePath: "/m/b"))      // b 後完成＝current，不得重載
-        #expect(await ct.v == 2)
+        _ = try await co.model(for: b)                         // current 應仍為 b，不得重載
+        let loadCount = await ct.v
+        #expect(loadCount == 2)
+    }
+
+    /// 即使沒有 overlapping loader，較晚 request 也必須取代既有 current；不能變成先完成者永久勝出。
+    @Test func laterRequestReplacesEarlierCurrent() async throws {
+        let ct = Counter()
+        let co = ModelLoadCoordinator<String> { u in await ct.inc(); return u.lastPathComponent }
+        let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
+        _ = try await co.model(for: a)
+        _ = try await co.model(for: b)
+        _ = try await co.model(for: b)
+        let loadCount = await ct.v
+        #expect(loadCount == 2)
+    }
+
+    /// 同-key joiner 尚未恢復時，creator 也要原子完成 current／inFlight transition。
+    /// 否則兩者之間會短暫同為 nil，第三個 request 便重開一份 3GB loader。
+    @Test func sharedFlightCompletionBecomesCacheAtomically() async throws {
+        let loads = Counter()
+        let entered = Gate(), releaseLoader = Gate(), joined = Gate()
+        let releaseJoiner = Gate(), creatorReturned = Gate()
+        let u = URL(filePath: "/m/a")
+        let co = ModelLoadCoordinator<String>(testHooks: .init(didJoinFlight: { key in
+            if key == u { await joined.open(); await releaseJoiner.wait() }
+        })) { key in
+            await loads.inc(); await entered.open(); await releaseLoader.wait()
+            return key.lastPathComponent
+        }
+
+        let creator = Task {
+            let model = try await co.model(for: u); await creatorReturned.open(); return model
+        }
+        let enteredOutcome = await awaitBounded(limit: .seconds(1)) { await entered.wait() }
+        guard enteredOutcome == .completed else {
+            Issue.record("creator loader 未在 1 秒內進入")
+            await releaseLoader.open(); creator.cancel()
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await creator.result }
+            return
+        }
+        let joiner = Task { try await co.model(for: u) }
+        let joinOutcome = await awaitBounded(limit: .seconds(1)) { await joined.wait() }
+        guard joinOutcome == .completed else {
+            Issue.record("第二個 request 未在 1 秒內 join shared flight")
+            await releaseLoader.open(); await releaseJoiner.open()
+            creator.cancel(); joiner.cancel()
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await creator.result }
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await joiner.result }
+            return
+        }
+
+        await releaseLoader.open()
+        let completion = await awaitBounded(limit: .seconds(1)) { await creatorReturned.wait() }
+        guard completion == .completed else {
+            Issue.record("creator 未能原子完成 shared flight 的 cache transition")
+            await releaseJoiner.open(); creator.cancel(); joiner.cancel()
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await creator.result }
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await joiner.result }
+            return
+        }
+        _ = try await co.model(for: u)             // joiner 仍卡在 hook；此時必須已是 cache hit
+        #expect(await loads.v == 1)
+        #expect(await co.state(for: u) == .loaded)
+
+        await releaseJoiner.open()
+        _ = try await creator.value; _ = try await joiner.value
+    }
+
+    /// A/B 持續交替時，每個已完成 flight 都要先被採用；cache hit 不得讓 in-flight 結果飢餓。
+    @Test func alternatingDifferentKeyTrafficStillAdoptsEveryCompletedFlight() async throws {
+        let rounds = 20
+        let loads = Counter()
+        let entered = (0..<rounds).map { _ in Gate() }
+        let releases = (0..<rounds).map { _ in Gate() }
+        let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
+        let co = ModelLoadCoordinator<String> { key in
+            let ordinal = await loads.incGet()
+            if ordinal > 1 {
+                let round = ordinal - 2
+                guard round < rounds else { return key.lastPathComponent }
+                await entered[round].open(); await releases[round].wait()
+            }
+            return key.lastPathComponent
+        }
+
+        _ = try await co.model(for: a)
+        var currentKey = a
+        for round in 0..<rounds {
+            let target = currentKey == a ? b : a
+            let loading = Task { try await co.model(for: target) }
+            let didEnter = await awaitBounded(limit: .seconds(1)) { await entered[round].wait() }
+            guard didEnter == .completed else {
+                Issue.record("第 \(round + 1) 個交替 loader 未在 1 秒內進入")
+                for gate in releases { await gate.open() }
+                loading.cancel()
+                _ = await awaitBounded(limit: .seconds(1)) { _ = await loading.result }
+                return
+            }
+            _ = try await co.model(for: currentKey)     // 較晚 cache access 沒有 supersede 權
+            await releases[round].open()
+            _ = try await loading.value
+            guard await co.state(for: target) == .loaded else {
+                Issue.record("第 \(round + 1) 個已完成 loader 未被採用")
+                return
+            }
+            currentKey = target
+        }
+        #expect(await loads.v == rounds + 1)
+    }
+
+    /// 已取消的舊 cache access 必須 fail fast，不能影響正在載入的新選擇。
+    @Test func cancelledCacheHitCannotSupersedeInFlightSelection() async throws {
+        let loads = Counter(), bEntered = Gate(), releaseB = Gate(), invokeCancelled = Gate()
+        let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
+        let co = ModelLoadCoordinator<String> { key in
+            await loads.inc()
+            if key == b { await bEntered.open(); await releaseB.wait() }
+            return key.lastPathComponent
+        }
+        _ = try await co.model(for: a)                           // current = a
+        let loadingB = Task { try await co.model(for: b) }
+        let entered = await awaitBounded(limit: .seconds(1)) { await bEntered.wait() }
+        guard entered == .completed else {
+            Issue.record("b loader 未在 1 秒內進入")
+            await releaseB.open(); loadingB.cancel()
+            _ = await awaitBounded(limit: .seconds(1)) { _ = await loadingB.result }
+            return
+        }
+
+        let obsoleteA = Task { () -> Bool in
+            await invokeCancelled.wait()
+            do {
+                _ = try await co.model(for: a)
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }
+        obsoleteA.cancel()
+        await invokeCancelled.open()                             // 確認 cancel 在 actor call 前發生
+        #expect(await obsoleteA.value, "已取消 caller 應擲 CancellationError")
+
+        await releaseB.open()
+        _ = try await loadingB.value
+        #expect(await co.state(for: b) == .loaded)
+        _ = try await co.model(for: b)
+        #expect(await loads.v == 2)
+    }
+
+    /// issue #35：Settings 的 selection intent 尚未進 coordinator；外層 preload cancel 不會撤銷已建 flight。
+    @Test func appStyleSelectionBackToCachedModelKeepsItCurrent() async {
+        await withKnownIssue("issue #35：選回 cached A 尚無 desired-key seam") {
+            let loads = Counter(), bEntered = Gate(), releaseB = Gate()
+            let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
+            let co = ModelLoadCoordinator<String> { key in
+                await loads.inc()
+                if key == b { await bEntered.open(); await releaseB.wait() }
+                return key.lastPathComponent
+            }
+
+            _ = try? await co.model(for: a)                     // current = A
+            let obsoleteB = Task { await co.preload(b) }        // App 的舊 preload wrapper
+            let entered = await awaitBounded(limit: .seconds(1)) { await bEntered.wait() }
+            guard entered == .completed else {
+                Issue.record("B loader 未在 1 秒內進入")
+                await releaseB.open(); obsoleteB.cancel()
+                _ = await awaitBounded(limit: .seconds(1)) { _ = await obsoleteB.result }
+                return
+            }
+            obsoleteB.cancel()                                  // flight 已建立後才 cancel wrapper
+            await co.preload(a)                                 // 新 selection A 恰好 cache hit
+            await releaseB.open()
+            _ = await obsoleteB.value
+
+            #expect(await co.state(for: a) == .loaded)
+            #expect(await co.state(for: b) == .idle)
+            _ = try? await co.model(for: a)
+            #expect(await loads.v == 2)
+        }
     }
 
     // MARK: - 載入狀態與卸載（M9 追加：首次 ANE 編譯很久，UI 要能如實顯示與釋放）
@@ -293,8 +523,8 @@ private final class MutableClock: @unchecked Sendable {
 
     /// 卸載後若同一個 key 已有新的載入接手，舊載入收工時不得把新的那筆 in-flight 記錄刪掉。
     ///
-    /// 這條守衛（`defer` 裡的 `inFlight[key]?.task == task`）本來就在程式碼裡，但一直沒有
-    /// 測試守著——變異測試把條件拿掉仍全綠，是改 `.loading(since:)` 時順手發現的。
+    /// 這條守衛現在位於 `finishFlight`／`clearFlight` 的 task identity 檢查；少了它，
+    /// 舊 flight 完成時會清掉 unload 後接手的 successor。
     /// 誤刪的後果：狀態謊報 `.idle`，設定頁的「載入」按鈕重新亮起，使用者按下去就再開一份 3.2GB。
     @Test func aFinishingLoadDoesNotEraseItsSuccessorAfterUnload() async {
         let u = URL(filePath: "/m/a")
