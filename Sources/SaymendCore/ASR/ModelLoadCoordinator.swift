@@ -55,6 +55,11 @@ public enum ModelLoadState: Equatable, Sendable {
 ///   避免多次切換模型累積數個 3GB pipe 而 OOM。
 /// - **失敗不毒化**：in-flight 擲錯時只清除仍對應同一 task 的 entry，下次呼叫會重新載入。
 ///
+/// **已知邊界（issue #35）**：generation 表達的是 loader flight 建立順序，不是 Settings selection
+/// intent。選回已 cached 的 A 不會建立新 flight；若舊 B flight 已建立，取消外層 preload wrapper
+/// 不會傳入其 unstructured task，B 完成後仍可淘汰 A。這需要另設 desired-key／selection API，
+/// 不在本模組目前「cache access 與 flight adoption」契約內。
+///
 /// 泛型 `Model: Sendable`：真實情境為 `WhisperKitModelActor`（actor 即 Sendable，可安全跨界回傳）；
 /// 單測以 `Model = String` ＋計數 loader 驗行為，不需 WhisperKit。
 public actor ModelLoadCoordinator<Model: Sendable> {

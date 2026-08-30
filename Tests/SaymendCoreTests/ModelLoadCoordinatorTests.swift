@@ -279,6 +279,38 @@ private final class MutableClock: @unchecked Sendable {
         #expect(await loads.v == 2)
     }
 
+    /// issue #35：Settings 的 selection intent 尚未進 coordinator；外層 preload cancel 不會撤銷已建 flight。
+    @Test func appStyleSelectionBackToCachedModelKeepsItCurrent() async {
+        await withKnownIssue("issue #35：選回 cached A 尚無 desired-key seam") {
+            let loads = Counter(), bEntered = Gate(), releaseB = Gate()
+            let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
+            let co = ModelLoadCoordinator<String> { key in
+                await loads.inc()
+                if key == b { await bEntered.open(); await releaseB.wait() }
+                return key.lastPathComponent
+            }
+
+            _ = try? await co.model(for: a)                     // current = A
+            let obsoleteB = Task { await co.preload(b) }        // App 的舊 preload wrapper
+            let entered = await awaitBounded(limit: .seconds(1)) { await bEntered.wait() }
+            guard entered == .completed else {
+                Issue.record("B loader 未在 1 秒內進入")
+                await releaseB.open(); obsoleteB.cancel()
+                _ = await awaitBounded(limit: .seconds(1)) { _ = await obsoleteB.result }
+                return
+            }
+            obsoleteB.cancel()                                  // flight 已建立後才 cancel wrapper
+            await co.preload(a)                                 // 新 selection A 恰好 cache hit
+            await releaseB.open()
+            _ = await obsoleteB.value
+
+            #expect(await co.state(for: a) == .loaded)
+            #expect(await co.state(for: b) == .idle)
+            _ = try? await co.model(for: a)
+            #expect(await loads.v == 2)
+        }
+    }
+
     // MARK: - 載入狀態與卸載（M9 追加：首次 ANE 編譯很久，UI 要能如實顯示與釋放）
 
     @Test func stateIsLoadedAfterLoad() async throws {
