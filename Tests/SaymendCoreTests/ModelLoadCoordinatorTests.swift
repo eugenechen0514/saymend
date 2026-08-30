@@ -87,7 +87,11 @@ private final class MutableClock: @unchecked Sendable {
         var bReachedCoordinator = false
         while ContinuousClock.now < deadline {
             let state = await co.state(for: b)
-            if state.isLoading { bReachedCoordinator = true; break }
+            if state.isLoading {
+                if await ct.v > 1 { Issue.record("b loader 在 a 完成前就開始，破壞不同-key 序列化") }
+                bReachedCoordinator = true
+                break
+            }
             if state == .loaded {
                 // predecessor 被拿掉時，b 會在仍卡住的 a 前面載完；這就是本測試要擋的舊風險。
                 Issue.record("b 越過尚未完成的 a，提前成為 current")
@@ -140,7 +144,7 @@ private final class MutableClock: @unchecked Sendable {
         #expect(loadCount == 2)
     }
 
-    /// 最新同-key caller 尚未恢復時，creator 也要能代它原子完成 current／inFlight transition。
+    /// 同-key joiner 尚未恢復時，creator 也要原子完成 current／inFlight transition。
     /// 否則兩者之間會短暫同為 nil，第三個 request 便重開一份 3GB loader。
     @Test func sharedFlightCompletionBecomesCacheAtomically() async throws {
         let loads = Counter()
@@ -178,13 +182,13 @@ private final class MutableClock: @unchecked Sendable {
         await releaseLoader.open()
         let completion = await awaitBounded(limit: .seconds(1)) { await creatorReturned.wait() }
         guard completion == .completed else {
-            Issue.record("creator 未能代 latest joiner 原子完成 cache transition")
+            Issue.record("creator 未能原子完成 shared flight 的 cache transition")
             await releaseJoiner.open(); creator.cancel(); joiner.cancel()
             _ = await awaitBounded(limit: .seconds(1)) { _ = await creator.result }
             _ = await awaitBounded(limit: .seconds(1)) { _ = await joiner.result }
             return
         }
-        _ = try await co.model(for: u)             // latest joiner 仍卡在 hook；此時必須已是 cache hit
+        _ = try await co.model(for: u)             // joiner 仍卡在 hook；此時必須已是 cache hit
         #expect(await loads.v == 1)
         #expect(await co.state(for: u) == .loaded)
 
@@ -192,9 +196,51 @@ private final class MutableClock: @unchecked Sendable {
         _ = try await creator.value; _ = try await joiner.value
     }
 
-    /// 較新的 cache-hit request 也要使較舊不同-key flight 失效，不能讓背景 preload 晚到蓋掉 current。
-    @Test func cacheHitInvalidatesOlderDifferentKeyFlight() async throws {
-        let loads = Counter(), bEntered = Gate(), releaseB = Gate()
+    /// A/B 持續交替時，每個已完成 flight 都要先被採用；cache hit 不得讓 in-flight 結果飢餓。
+    @Test func alternatingDifferentKeyTrafficStillAdoptsEveryCompletedFlight() async throws {
+        let rounds = 20
+        let loads = Counter()
+        let entered = (0..<rounds).map { _ in Gate() }
+        let releases = (0..<rounds).map { _ in Gate() }
+        let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
+        let co = ModelLoadCoordinator<String> { key in
+            let ordinal = await loads.incGet()
+            if ordinal > 1 {
+                let round = ordinal - 2
+                guard round < rounds else { return key.lastPathComponent }
+                await entered[round].open(); await releases[round].wait()
+            }
+            return key.lastPathComponent
+        }
+
+        _ = try await co.model(for: a)
+        var currentKey = a
+        for round in 0..<rounds {
+            let target = currentKey == a ? b : a
+            let loading = Task { try await co.model(for: target) }
+            let didEnter = await awaitBounded(limit: .seconds(1)) { await entered[round].wait() }
+            guard didEnter == .completed else {
+                Issue.record("第 \(round + 1) 個交替 loader 未在 1 秒內進入")
+                for gate in releases { await gate.open() }
+                loading.cancel()
+                _ = await awaitBounded(limit: .seconds(1)) { _ = await loading.result }
+                return
+            }
+            _ = try await co.model(for: currentKey)     // 較晚 cache access 沒有 supersede 權
+            await releases[round].open()
+            _ = try await loading.value
+            guard await co.state(for: target) == .loaded else {
+                Issue.record("第 \(round + 1) 個已完成 loader 未被採用")
+                return
+            }
+            currentKey = target
+        }
+        #expect(await loads.v == rounds + 1)
+    }
+
+    /// 已取消的舊 cache access 必須 fail fast，不能影響正在載入的新選擇。
+    @Test func cancelledCacheHitCannotSupersedeInFlightSelection() async throws {
+        let loads = Counter(), bEntered = Gate(), releaseB = Gate(), invokeCancelled = Gate()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
         let co = ModelLoadCoordinator<String> { key in
             await loads.inc()
@@ -210,10 +256,26 @@ private final class MutableClock: @unchecked Sendable {
             _ = await awaitBounded(limit: .seconds(1)) { _ = await loadingB.result }
             return
         }
-        _ = try await co.model(for: a)                           // cache hit 是最新 request
+
+        let obsoleteA = Task { () -> Bool in
+            await invokeCancelled.wait()
+            do {
+                _ = try await co.model(for: a)
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }
+        obsoleteA.cancel()
+        await invokeCancelled.open()                             // 確認 cancel 在 actor call 前發生
+        #expect(await obsoleteA.value, "已取消 caller 應擲 CancellationError")
+
         await releaseB.open()
-        _ = try await loadingB.value                             // stale b 只回 caller，不得寫 current
-        _ = try await co.model(for: a)
+        _ = try await loadingB.value
+        #expect(await co.state(for: b) == .loaded)
+        _ = try await co.model(for: b)
         #expect(await loads.v == 2)
     }
 

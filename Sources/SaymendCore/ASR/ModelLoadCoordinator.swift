@@ -48,9 +48,9 @@ public enum ModelLoadState: Equatable, Sendable {
 /// - **single-flight**：同一模型的並行請求共用同一個 in-flight `Task`，不重複建立 3GB 模型。
 /// - **序列化重載**：不同 key 的載入也一律排隊，同時最多一個 loader 在跑。否則使用者連點兩個
 ///   模型時兩份 3GB 會同時載入＝峰值記憶體無上界；排隊後峰值壓到「1 個載入中 ＋ 1 個快取」。
-/// - **最後請求勝出**：每個 `model(for:)` request 都取得遞增 generation，只有仍是最新的 request
-///   能寫入 current。不能只靠 loader 排隊：loader task 完成會先放行下一個 loader，但舊 request
-///   的 actor continuation 可能更晚才 write-back，反而蓋掉較新的模型（issue #34）。
+/// - **最後載入勝出**：每個新 flight 取得遞增 generation；完成結果只能取代更舊的 cache。
+///   cache hit 與 shared-flight join 只讀既有工作，不取得 supersede 權。如此既擋住舊 continuation
+///   晚到覆寫新模型，也不會被不同-key 持續 request 餓死、反覆丟棄已完成的 3GB 載入（issue #34）。
 /// - **有界快取**：只保留最近載入的一個模型——載入新 key 即淘汰舊的，讓 ARC 釋放記憶體，
 ///   避免多次切換模型累積數個 3GB pipe 而 OOM。
 /// - **失敗不毒化**：in-flight 擲錯時只清除仍對應同一 task 的 entry，下次呼叫會重新載入。
@@ -58,7 +58,8 @@ public enum ModelLoadState: Equatable, Sendable {
 /// 泛型 `Model: Sendable`：真實情境為 `WhisperKitModelActor`（actor 即 Sendable，可安全跨界回傳）；
 /// 單測以 `Model = String` ＋計數 loader 驗行為，不需 WhisperKit。
 public actor ModelLoadCoordinator<Model: Sendable> {
-    /// 只供 `@testable` 固定 shared-flight 與 write-back interleaving；production initializer 不接收。
+    /// 依 convention 只供本檔測試固定 interleaving；internal 並非 access-control 保證。
+    /// Public initializer 會設 nil，但每個 instance 仍付出一個 optional field 與 completion branch。
     struct TestHooks: Sendable {
         let didJoinFlight: @Sendable (URL) async -> Void
         let beforeCacheWrite: @Sendable (URL) async -> Void
@@ -70,18 +71,22 @@ public actor ModelLoadCoordinator<Model: Sendable> {
         }
     }
 
+    private struct Flight {
+        let task: Task<Model, Error>
+        let since: Date
+        let generation: Int
+        let epoch: Int
+    }
+
     private let loader: @Sendable (URL) async throws -> Model
-    private var current: (url: URL, model: Model)?
-    /// 在途載入。generation 是同一 shared task 最新 request 的 ownership；epoch 是 task 建立世代。
-    private var inFlight: [URL: (
-        task: Task<Model, Error>, since: Date, generation: Int, epoch: Int
-    )] = [:]
+    private var current: (url: URL, model: Model, generation: Int)?
+    private var inFlight: [URL: Flight] = [:]
     /// 排隊鏈尾：新載入等它完成才開跑（同時最多一個 loader）
     private var chainTail: Task<Void, Never>?
     /// 卸載世代：unload 遞增。載入完成時世代不符＝這份結果已過期，不得寫回 current。
     private var epoch = 0
-    /// 同一 unload epoch 內的 request 世代。每次 `model(for:)` 都遞增；只有最新 request 可寫 cache。
-    private var requestGeneration = 0
+    /// 只在真的建立新 loader flight 時遞增；cache hit／join 不得奪走 write ownership。
+    private var loadGeneration = 0
 
     /// 卸載後等待舊排隊鏈的寬限期（見 `unload()`）。只在卸載後生效，正常排隊仍是無限期嚴格序列化。
     private let queueGrace: Duration
@@ -98,7 +103,7 @@ public actor ModelLoadCoordinator<Model: Sendable> {
         self.loader = loader
     }
 
-    /// 只供 `@testable` 測試；不把 interleaving hooks 擴成 public API。
+    /// 依 convention 僅測試呼叫；`internal` 仍允許同 module production source 使用，非硬性隔離。
     init(queueGrace: Duration = .seconds(60),
          now: @escaping @Sendable () -> Date = Date.init,
          testHooks: TestHooks,
@@ -149,15 +154,12 @@ public actor ModelLoadCoordinator<Model: Sendable> {
     }
 
     public func model(for url: URL) async throws -> Model {
+        // 已取消的舊 preload／caller 沒有 supersede 權；在碰任何 actor state 前 fail fast。
+        try Task.checkCancellation()
         // symlink 與實體路徑是同一個模型，正規化後才當 key（REV #8）
         let key = cacheKey(url)
-        requestGeneration &+= 1
-        let generation = requestGeneration
         if let c = current, c.url == key { return c.model }
-        if var flight = inFlight[key] {
-            // shared task 的 cache ownership 跟著最新同-key request 走；不依賴最新 caller 先恢復。
-            flight.generation = generation
-            inFlight[key] = flight
+        if let flight = inFlight[key] {
             await testHooks?.didJoinFlight(key)
             do {
                 let m = try await flight.task.value
@@ -169,12 +171,14 @@ public actor ModelLoadCoordinator<Model: Sendable> {
                 throw error
             }
         }
+        loadGeneration &+= 1
+        let generation = loadGeneration
         let predecessor = chainTail
         let task = Task { [loader] in
             await predecessor?.value                                 // 排隊：前一個載入結束才輪到自己
             return try await loader(key)
         }
-        inFlight[key] = (task, now(), generation, epoch)
+        inFlight[key] = Flight(task: task, since: now(), generation: generation, epoch: epoch)
         chainTail = Task { _ = try? await task.value }               // 成功或失敗都放行下一個
         do {
             let m = try await task.value
@@ -191,9 +195,10 @@ public actor ModelLoadCoordinator<Model: Sendable> {
     private func finishFlight(_ task: Task<Model, Error>, model: Model, for key: URL) {
         guard let flight = inFlight[key], flight.task == task else { return }
         inFlight[key] = nil
-        // unload epoch 與 request generation 正交：前者擋卸載前結果，後者擋同 epoch 舊 request。
-        guard epoch == flight.epoch, requestGeneration == flight.generation else { return }
-        current = (key, model)
+        guard epoch == flight.epoch else { return }
+        // 新 flight 可以取代舊 cache；較舊 continuation 晚到時不得倒退 generation。
+        if let current, current.generation > flight.generation { return }
+        current = (key, model, flight.generation)
     }
 
     /// 失敗只清自己的 flight；unload 後若已有 successor 接手，不得誤刪。
