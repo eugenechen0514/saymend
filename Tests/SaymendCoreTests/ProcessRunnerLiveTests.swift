@@ -70,6 +70,28 @@ private actor ExitWaitSpy {
     ])
 }
 
+@Test func liveIgnoredSIGTERMIsKilledAndReapedByExitEvent() async throws {
+    let process = Process()
+    let ready = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = ["-c", "trap '' TERM; printf ready; while :; do :; done"]
+    process.standardOutput = ready
+    let signal = LiveProcessRunner.installTerminationHandler(on: process)
+    try process.run()
+    defer { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+
+    // 先等 shell 明確回報 trap 已安裝，再開始 budget；否則 SIGTERM 可能贏在 trap 前造成假綠。
+    let handshake = try ready.fileHandleForReading.read(upToCount: 5)
+    #expect(handshake == Data("ready".utf8))
+
+    let outcome = await LiveProcessRunner.waitOrKill(
+        process, exitSignal: signal, timeout: 0.05)
+    #expect(outcome == .timedOut)
+    let exit = await LiveProcessRunner.awaitExit(limit: .seconds(1), signal: signal)
+    #expect(exit == .exited(.init(status: SIGKILL)))
+    #expect(!process.isRunning)
+}
+
 @Test func livePipesDrainConcurrentlyWithoutDeadlock() async throws {
     // stdout 與 stderr 各 1.2MB；未並行排空會塞滿 64KB pipe 而死鎖（→ 被 30s timeout 殺掉、測試失敗而非卡死）
     let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
