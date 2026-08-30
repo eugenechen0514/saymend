@@ -111,20 +111,12 @@ public actor ModelLoadCoordinator<Model: Sendable> {
         inFlight.removeAll()
         if let old = chainTail {
             let grace = queueGrace
-            chainTail = Task { await Self.awaitBounded(old, grace: grace) }
+            // `chainTail` 是不會被取消的內部 barrier；unload 只取消真正的 loader。
+            // 因此共用 helper 多出的 `.cancelled` 路徑不會提早放行下一次載入。
+            chainTail = Task {
+                _ = await awaitBounded(limit: grace) { await old.value }
+            }
         }
-    }
-
-    /// 等 `task` 完成，但最多等 `grace`。時限到就返回，不再理會它。
-    ///
-    /// 不用 `withTaskGroup`：group 在 closure 返回時會隱式等待所有子任務，而
-    /// `await task.value` **不理會取消**——前置者永不返回時那個子任務也永遠不結束，
-    /// group 於是卡在原地，等於沒有時限。
-    private static func awaitBounded(_ task: Task<Void, Never>, grace: Duration) async {
-        let signal = OneShotSignal()
-        Task { await task.value; await signal.fire() }
-        Task { try? await Task.sleep(for: grace); await signal.fire() }   // 保證訊號一定會響
-        await signal.wait()
     }
 
     public func model(for url: URL) async throws -> Model {
