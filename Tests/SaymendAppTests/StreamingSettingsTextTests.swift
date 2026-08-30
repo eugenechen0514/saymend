@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 import SaymendCore
 @testable import SaymendApp
@@ -13,21 +14,35 @@ import SaymendCore
             + "只切成一個片段的短句，設 1 或 2 都會等到結束。")
     }
 
-    /// 不只測孤立常數：直接展開實際的串流控制 view，確認 SettingsView 的 call site
-    /// 確實把這段文案交給 SwiftUI。Mirror 只用來讀 opaque `some View` 內的 Text storage。
-    @MainActor @Test func streamingControlsIncludeTheTradeoffNote() {
+    /// 不只找 opaque tree 裡的任意 String：該字串必須位在真正的 `Text` storage，
+    /// 且祖先不能有 SwiftUI `_HiddenModifier`。因此 `.id(text)` metadata 與 `.hidden()` 都不算。
+    @MainActor @Test func streamingControlsContainVisibleTradeoffText() {
         let suite = "stream-copy-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = AppSettings(defaults: defaults, secrets: InMemorySecretStore())
 
         let controls = GeneralSettingsTab(settings: settings).streamBehaviorControls
-        #expect(strings(in: controls).contains(StreamingSettingsText.requiredSegmentsTradeoff))
+        #expect(visibleTextStrings(in: controls).contains(StreamingSettingsText.requiredSegmentsTradeoff))
     }
 
-    private func strings(in value: Any, depth: Int = 0) -> [String] {
-        guard depth < 30 else { return [] }
+    private func visibleTextStrings(in value: Any,
+                                    hiddenByAncestor: Bool = false,
+                                    depth: Int = 0) -> [String] {
+        guard depth < 40 else { return [] }
+        let typeName = String(reflecting: Swift.type(of: value))
+        let hidden = hiddenByAncestor || typeName.contains("_HiddenModifier")
+        if value is Text { return hidden ? [] : embeddedStrings(in: value) }
+        return Mirror(reflecting: value).children.flatMap {
+            visibleTextStrings(in: $0.value, hiddenByAncestor: hidden, depth: depth + 1)
+        }
+    }
+
+    private func embeddedStrings(in value: Any, depth: Int = 0) -> [String] {
+        guard depth < 20 else { return [] }
         if let string = value as? String { return [string] }
-        return Mirror(reflecting: value).children.flatMap { strings(in: $0.value, depth: depth + 1) }
+        return Mirror(reflecting: value).children.flatMap {
+            embeddedStrings(in: $0.value, depth: depth + 1)
+        }
     }
 }
