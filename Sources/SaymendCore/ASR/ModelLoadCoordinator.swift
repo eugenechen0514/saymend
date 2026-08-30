@@ -48,35 +48,64 @@ public enum ModelLoadState: Equatable, Sendable {
 /// - **single-flight**：同一模型的並行請求共用同一個 in-flight `Task`，不重複建立 3GB 模型。
 /// - **序列化重載**：不同 key 的載入也一律排隊，同時最多一個 loader 在跑。否則使用者連點兩個
 ///   模型時兩份 3GB 會同時載入＝峰值記憶體無上界；排隊後峰值壓到「1 個載入中 ＋ 1 個快取」。
-///   排隊亦使完成順序＝發起順序，於是**最後發起的載入才會成為 current**——慢的過期 preload
-///   不會後來居上把使用者剛選的模型蓋掉。
+/// - **最後請求勝出**：每個 `model(for:)` request 都取得遞增 generation，只有仍是最新的 request
+///   能寫入 current。不能只靠 loader 排隊：loader task 完成會先放行下一個 loader，但舊 request
+///   的 actor continuation 可能更晚才 write-back，反而蓋掉較新的模型（issue #34）。
 /// - **有界快取**：只保留最近載入的一個模型——載入新 key 即淘汰舊的，讓 ARC 釋放記憶體，
 ///   避免多次切換模型累積數個 3GB pipe 而 OOM。
-/// - **失敗不毒化**：in-flight 擲錯時以 `defer` 清掉該 key，下次呼叫會重新載入。
+/// - **失敗不毒化**：in-flight 擲錯時只清除仍對應同一 task 的 entry，下次呼叫會重新載入。
 ///
 /// 泛型 `Model: Sendable`：真實情境為 `WhisperKitModelActor`（actor 即 Sendable，可安全跨界回傳）；
 /// 單測以 `Model = String` ＋計數 loader 驗行為，不需 WhisperKit。
 public actor ModelLoadCoordinator<Model: Sendable> {
+    /// 只供 `@testable` 固定 shared-flight 與 write-back interleaving；production initializer 不接收。
+    struct TestHooks: Sendable {
+        let didJoinFlight: @Sendable (URL) async -> Void
+        let beforeCacheWrite: @Sendable (URL) async -> Void
+
+        init(didJoinFlight: @escaping @Sendable (URL) async -> Void = { _ in },
+             beforeCacheWrite: @escaping @Sendable (URL) async -> Void = { _ in }) {
+            self.didJoinFlight = didJoinFlight
+            self.beforeCacheWrite = beforeCacheWrite
+        }
+    }
+
     private let loader: @Sendable (URL) async throws -> Model
     private var current: (url: URL, model: Model)?
-    /// 在途載入。**時戳與 task 綁在同一格**而不是另開一個字典：兩份分開存的話，
-    /// 只要有一條路徑忘了同步清除，狀態就會出現「不在載入卻有起始時刻」或反之。
-    private var inFlight: [URL: (task: Task<Model, Error>, since: Date)] = [:]
+    /// 在途載入。generation 是同一 shared task 最新 request 的 ownership；epoch 是 task 建立世代。
+    private var inFlight: [URL: (
+        task: Task<Model, Error>, since: Date, generation: Int, epoch: Int
+    )] = [:]
     /// 排隊鏈尾：新載入等它完成才開跑（同時最多一個 loader）
     private var chainTail: Task<Void, Never>?
     /// 卸載世代：unload 遞增。載入完成時世代不符＝這份結果已過期，不得寫回 current。
     private var epoch = 0
+    /// 同一 unload epoch 內的 request 世代。每次 `model(for:)` 都遞增；只有最新 request 可寫 cache。
+    private var requestGeneration = 0
 
     /// 卸載後等待舊排隊鏈的寬限期（見 `unload()`）。只在卸載後生效，正常排隊仍是無限期嚴格序列化。
     private let queueGrace: Duration
     /// 可注入的時鐘（比照 `DictationController` 的 `now:` 慣例），讓「載入從何時開始」測得到。
     private let now: @Sendable () -> Date
+    private let testHooks: TestHooks?
 
     public init(queueGrace: Duration = .seconds(60),
                 now: @escaping @Sendable () -> Date = Date.init,
                 loader: @escaping @Sendable (URL) async throws -> Model) {
         self.queueGrace = queueGrace
         self.now = now
+        self.testHooks = nil
+        self.loader = loader
+    }
+
+    /// 只供 `@testable` 測試；不把 interleaving hooks 擴成 public API。
+    init(queueGrace: Duration = .seconds(60),
+         now: @escaping @Sendable () -> Date = Date.init,
+         testHooks: TestHooks,
+         loader: @escaping @Sendable (URL) async throws -> Model) {
+        self.queueGrace = queueGrace
+        self.now = now
+        self.testHooks = testHooks
         self.loader = loader
     }
 
@@ -122,22 +151,54 @@ public actor ModelLoadCoordinator<Model: Sendable> {
     public func model(for url: URL) async throws -> Model {
         // symlink 與實體路徑是同一個模型，正規化後才當 key（REV #8）
         let key = cacheKey(url)
+        requestGeneration &+= 1
+        let generation = requestGeneration
         if let c = current, c.url == key { return c.model }
-        if let f = inFlight[key] { return try await f.task.value }   // 併發請求共用同一次載入
+        if var flight = inFlight[key] {
+            // shared task 的 cache ownership 跟著最新同-key request 走；不依賴最新 caller 先恢復。
+            flight.generation = generation
+            inFlight[key] = flight
+            await testHooks?.didJoinFlight(key)
+            do {
+                let m = try await flight.task.value
+                await testHooks?.beforeCacheWrite(key)
+                finishFlight(flight.task, model: m, for: key)
+                return m
+            } catch {
+                clearFlight(flight.task, for: key)
+                throw error
+            }
+        }
         let predecessor = chainTail
-        let startEpoch = epoch
         let task = Task { [loader] in
             await predecessor?.value                                 // 排隊：前一個載入結束才輪到自己
             return try await loader(key)
         }
-        inFlight[key] = (task, now())
+        inFlight[key] = (task, now(), generation, epoch)
         chainTail = Task { _ = try? await task.value }               // 成功或失敗都放行下一個
-        // 只有自己還掛在該 key 上時才清：unload 後若已有新的載入接手，不可誤刪它
-        defer { if inFlight[key]?.task == task { inFlight[key] = nil } }
-        let m = try await task.value      // 擲錯 → defer 清 key、current 不變（不毒化）
-        guard epoch == startEpoch else { return m }   // 中途被卸載：結果照給呼叫者，但不進快取
-        current = (key, m)                // 淘汰舊模型；排隊使最後發起者最後寫入＝latest-wins
-        return m
+        do {
+            let m = try await task.value
+            await testHooks?.beforeCacheWrite(key)
+            finishFlight(task, model: m, for: key)
+            return m
+        } catch {
+            clearFlight(task, for: key)
+            throw error
+        }
+    }
+
+    /// 同一 actor turn 內完成 cache commit 與 inFlight 清除，不露出「兩者皆 nil」的重載窗口。
+    private func finishFlight(_ task: Task<Model, Error>, model: Model, for key: URL) {
+        guard let flight = inFlight[key], flight.task == task else { return }
+        inFlight[key] = nil
+        // unload epoch 與 request generation 正交：前者擋卸載前結果，後者擋同 epoch 舊 request。
+        guard epoch == flight.epoch, requestGeneration == flight.generation else { return }
+        current = (key, model)
+    }
+
+    /// 失敗只清自己的 flight；unload 後若已有 successor 接手，不得誤刪。
+    private func clearFlight(_ task: Task<Model, Error>, for key: URL) {
+        if inFlight[key]?.task == task { inFlight[key] = nil }
     }
 
     /// 背景預載（best-effort）：錯誤吞掉，由實際辨識時再擲出對應失敗。
