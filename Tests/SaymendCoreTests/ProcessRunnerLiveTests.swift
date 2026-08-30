@@ -10,6 +10,61 @@ private func tempDir() throws -> URL {
     return u
 }
 
+private actor ReapCallSpy {
+    private var limits: [Duration] = []
+    func record(limit: Duration) { limits.append(limit) }
+    func snapshot() -> [Duration] { limits }
+}
+
+@Test func liveReapWaitReturnsWhenInjectedWaiterNeverDoes() async throws {
+    // 先建立 sample 顯示的前置狀態：Foundation 已回報不再執行，但尚未呼叫 waitUntilExit。
+    // notification 未派送本身無法隨需重現，下面以永不返回的 waiter deterministic 模擬。
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = ["-c", "exit 7"]
+    try process.run()
+    while process.isRunning { try? await Task.sleep(for: .milliseconds(10)) }
+
+    // 注入永不 fire 的 waiter，直接釘住呼叫端的上限。
+    // 若 awaitReap 拿掉 awaitBounded，這個測試會永久停在 neverFired.wait()。
+    let neverFired = OneShotSignal()
+    let start = ContinuousClock.now
+    let outcome = await LiveProcessRunner.awaitReap(limit: .milliseconds(50)) {
+        await neverFired.wait()
+    }
+    #expect(outcome == .timedOut)
+    #expect(ContinuousClock.now - start < .seconds(1))
+    #expect(process.terminationStatus == 7) // isRunning == false 已足夠，不以 waiter 返回為前提
+}
+
+@Test func liveWaitOrKillRoutesBothReapCallSitesThroughBoundedHook() async throws {
+    let spy = ReapCallSpy()
+    let reap: LiveProcessRunner.ReapWait = { limit, _ in
+        await spy.record(limit: limit)
+        return .completed
+    }
+
+    let normal = Process()
+    normal.executableURL = URL(fileURLWithPath: "/bin/sh")
+    normal.arguments = ["-c", "exit 0"]
+    try normal.run()
+    let normalTimedOut = await LiveProcessRunner.waitOrKill(normal, timeout: 2, reap: reap)
+    #expect(!normalTimedOut)
+    let callsAfterNormalExit = await spy.snapshot()
+    #expect(callsAfterNormalExit == [.seconds(1)])
+
+    let timeout = Process()
+    timeout.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    timeout.arguments = ["60"]
+    try timeout.run()
+    defer { if timeout.isRunning { kill(timeout.processIdentifier, SIGKILL) } }
+    let didTimeOut = await LiveProcessRunner.waitOrKill(timeout, timeout: 0.05, reap: reap)
+    #expect(didTimeOut)
+
+    let callsAfterBothPaths = await spy.snapshot()
+    #expect(callsAfterBothPaths == [.seconds(1), .seconds(1)])
+}
+
 @Test func livePipesDrainConcurrentlyWithoutDeadlock() async throws {
     // stdout 與 stderr 各 1.2MB；未並行排空會塞滿 64KB pipe 而死鎖（→ 被 30s timeout 殺掉、測試失敗而非卡死）
     let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }

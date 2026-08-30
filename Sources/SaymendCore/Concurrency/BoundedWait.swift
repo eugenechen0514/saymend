@@ -33,8 +33,8 @@ enum BoundedWaitOutcome: Equatable, Sendable {
 
 /// 等 `work` 完成、等時限到、等自己被取消，誰先到就返回。
 ///
-/// **不中止 `work`。** 呼叫端要的是自己能走，不是把對方殺掉——本專案唯一的使用者是
-/// 「等本機模型載入」，而那是 CoreML／ANE 的**同步 XPC 等待**：實機對卡住的 process 取
+/// **不中止 `work`。** 呼叫端要的是自己能走，不是把對方殺掉——這個工具最初為
+/// 「等本機模型載入」加入，而那是 CoreML／ANE 的**同步 XPC 等待**：實機對卡住的 process 取
 /// `sample`，920 個取樣全部停在
 /// `MLModel loadContentsOfURL → … → -[_ANEClient doLoadModel:] →`
 /// `__NSXPCCONNECTION_IS_WAITING_FOR_A_SYNCHRONOUS_REPLY__ → mach_msg2_trap`。
