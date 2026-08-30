@@ -32,7 +32,11 @@ public struct LiveProcessRunner: ProcessRunner {
         process.standardOutput = outPipe
         process.standardError = errPipe
 
+        // terminationHandler 必須在 run() 前安裝，才能讓 launch-to-exit 全程只有這一個
+        // event-driven ownership；快速結束的 child 即使在 run() 返回前退出也不會漏訊號。
+        let exitSignal = Self.installTerminationHandler(on: process)
         do { try process.run() } catch {
+            process.terminationHandler = nil
             throw ProcessRunnerError.spawnFailed(String(describing: error))
         }
         // stdin 寫入後關閉——子程序才收得到 EOF（claude --print 讀 stdin 到 EOF）
@@ -43,86 +47,139 @@ public struct LiveProcessRunner: ProcessRunner {
         async let outData = Self.drain(outPipe.fileHandleForReading)
         async let errData = Self.drain(errPipe.fileHandleForReading)
 
-        let timedOut = await Self.waitOrKill(process, timeout: timeout)
+        let completion = await Self.waitOrKill(process, exitSignal: exitSignal, timeout: timeout)
         let out = await outData
         let err = await errData
-        if timedOut { throw ProcessRunnerError.timedOut }
-        let code = process.terminationStatus
-        guard code == 0 else {
-            throw ProcessRunnerError.nonZeroExit(code: code,
+        guard case .exited(let exit) = completion else { throw ProcessRunnerError.timedOut }
+        guard exit.status == 0 else {
+            throw ProcessRunnerError.nonZeroExit(code: exit.status,
                                                  stderrSummary: String(decoding: err.prefix(500), as: UTF8.self))
         }
         return String(decoding: out, as: UTF8.self)
     }
 
-    /// FileHandle.readToEnd 是阻塞呼叫——放 detached task，不佔 cooperative pool。
+    /// `FileHandle.readToEnd()` 仍是 blocking drain，故暫放 detached task 以維持兩條 pipe 並行。
+    /// 它與舊 `waitUntilExit()` 同屬阻塞 global executor 的技術債，但 event-driven pipe I/O
+    /// 會同時改動 FD ownership／EOF／取消語意；issue #26 已記錄，這次不和收屍 lifecycle 混改。
     private static func drain(_ handle: FileHandle) async -> Data {
         await Task.detached { (try? handle.readToEnd()) ?? Data() }.value
     }
 
-    typealias ReapWait = @Sendable (
-        _ limit: Duration,
-        _ waiter: @escaping @Sendable () async -> Void
-    ) async -> BoundedWaitOutcome
+    struct ExitEvent: Equatable, Sendable {
+        let status: Int32
+    }
 
+    enum ExitWaitOutcome: Equatable, Sendable {
+        case exited(ExitEvent)
+        case timedOut
+    }
+
+    /// `terminationHandler` 的 callback context 未定義，不能假設它在 Swift actor 或特定 queue。
+    /// callback 與 timer 在同一把 lock 下決定第一個完成者；resume 一律在 lock 外執行。
+    final class ExitSignal: @unchecked Sendable {
+        private let lock = NSLock()
+        private var event: ExitEvent?
+        private var waiters: [UUID: CheckedContinuation<ExitWaitOutcome, Never>] = [:]
+
+        func finish(_ value: ExitEvent) {
+            lock.lock()
+            guard event == nil else { lock.unlock(); return }
+            event = value
+            let pending = Array(waiters.values)
+            waiters = [:]
+            lock.unlock()
+            pending.forEach { $0.resume(returning: .exited(value)) }
+        }
+
+        func wait(limit: Duration) async -> ExitWaitOutcome {
+            await withCheckedContinuation { continuation in
+                let id = UUID()
+                lock.lock()
+                if let event {
+                    lock.unlock()
+                    continuation.resume(returning: .exited(event))
+                    return
+                }
+                waiters[id] = continuation
+                lock.unlock()
+
+                // 每個 waiter 自己的有限 timer 會把 continuation 從字典移除再 resume。
+                // callback 永遠不來時也不會形成 signal → continuation → task → signal 的永久環。
+                Task {
+                    try? await Task.sleep(for: limit)
+                    self.timeOut(id)
+                }
+            }
+        }
+
+        private func timeOut(_ id: UUID) {
+            lock.lock()
+            let continuation = waiters.removeValue(forKey: id)
+            lock.unlock()
+            continuation?.resume(returning: .timedOut)
+        }
+    }
+
+    typealias WaitOrKillOutcome = ExitWaitOutcome
+
+    typealias ExitWait = @Sendable (
+        _ limit: Duration,
+        _ signal: ExitSignal
+    ) async -> ExitWaitOutcome
+
+    private static let terminationGrace: Duration = .milliseconds(500)
     private static let reapLimit: Duration = .seconds(1)
     private static let log = Logger(subsystem: "io.saymend.app", category: "ProcessRunner")
 
-    /// 正常路徑開始收屍時 `isRunning` 已是 false，本來應立刻返回；1 秒已是 20ms 輪詢粒度的
-    /// 50 倍，足夠吸收 executor 排程延遲，也不會讓 Foundation 通知未派送時變成多秒卡頓。
-    ///
-    /// `terminationStatus` 在 process 還在跑時會丟 `NSInvalidArgumentException`，但 Foundation
-    /// 的 contract 明確以 `isRunning == false` 作為可安全讀取的條件，並不要求
-    /// `waitUntilExit()` 已返回。因此正常路徑即使放棄收屍等待，`run()` 仍可讀 status；
-    /// 逾時路徑則會先丟 `.timedOut`，根本不讀 status。
-    ///
-    /// 這是止住呼叫端的有界等待，不是根治：`awaitBounded` 不會中止 `waiter`。若
-    /// `waitUntilExit()` 永遠收不到 notification，逾時後那個 detached task 仍會永久佔住一條
-    /// global executor 執行緒並保留 Process／pipe。terminationHandler 必須提前到 `run()` 前安裝，
-    /// 並改寫 launch-to-exit 的 ownership；這個 hotfix 先保留已驗證的 `isRunning` 輪詢與既有
-    /// process lifecycle，至少以 error log 讓每次外洩可追。
-    static func awaitReap(
-        limit: Duration,
-        waiter: @escaping @Sendable () async -> Void
-    ) async -> BoundedWaitOutcome {
-        await awaitBounded(limit: limit, work: waiter)
+    /// Foundation 明定 handler 在底層 process 結束時才呼叫。`terminationStatus` 因此只在
+    /// handler 內 snapshot，等 snapshot 完成後才發布事件；其他路徑不再碰 status，也不再把
+    /// `isRunning == false` 當作「status 已同步」的替代證明。
+    static func installTerminationHandler(on process: Process) -> ExitSignal {
+        let signal = ExitSignal()
+        process.terminationHandler = { finished in
+            signal.finish(ExitEvent(status: finished.terminationStatus))
+        }
+        return signal
     }
 
-    /// 輪詢等待（M3 教訓：輪詢是天然重試引擎；20ms 粒度對秒級 timeout 足夠）。
-    /// 逾時：terminate（SIGTERM）→ 500ms 寬限 → SIGKILL；兩條路徑的收屍都另有 1 秒上限。
+    /// 等 event-driven termination callback，但不讓 callback delivery 問題重新拖死呼叫端。
+    /// timer 與 callback 直接在 `ExitSignal` 內仲裁並移除 loser；不建立 blocking waiter，
+    /// 也不把 timeout 後的 suspension task 永久留在記憶體。
+    static func awaitExit(limit: Duration, signal: ExitSignal) async -> ExitWaitOutcome {
+        await signal.wait(limit: limit)
+    }
+
+    /// 等 termination event；execution budget 到期後送 SIGTERM，500ms 仍未退出才送 SIGKILL。
+    /// 正常與 timeout／SIGKILL 路徑都只接受 handler 發布的 exit event 作為「已收屍」證據。
     static func waitOrKill(
-        _ p: Process,
+        _ process: Process,
+        exitSignal: ExitSignal,
         timeout: TimeInterval,
-        reap: @escaping ReapWait = { limit, waiter in
-            await LiveProcessRunner.awaitReap(limit: limit, waiter: waiter)
+        wait: @escaping ExitWait = { limit, signal in
+            await LiveProcessRunner.awaitExit(limit: limit, signal: signal)
         }
-    ) async -> Bool {
-        let clock = ContinuousClock()
-        let deadline = clock.now + .seconds(timeout)
-        while p.isRunning {
-            if clock.now >= deadline {
-                p.terminate()
-                let grace = clock.now + .milliseconds(500)
-                while p.isRunning && clock.now < grace {
-                    try? await Task.sleep(for: .milliseconds(20))
-                }
-                if p.isRunning { kill(p.processIdentifier, SIGKILL) }
-                let outcome = await reap(Self.reapLimit) {
-                    await Task.detached { p.waitUntilExit() }.value
-                }
-                if outcome == .timedOut {
-                    Self.log.error("逾時終止後等 process 收屍逾時（SIGKILL 路徑，pid \(p.processIdentifier, privacy: .public)，上限 \(Self.reapLimit.components.seconds, privacy: .public) 秒）")
-                }
-                return true
-            }
-            try? await Task.sleep(for: .milliseconds(20))
+    ) async -> WaitOrKillOutcome {
+        switch await wait(.seconds(timeout), exitSignal) {
+        case .exited(let event):
+            return .exited(event)
+        case .timedOut:
+            break
         }
-        let outcome = await reap(Self.reapLimit) {
-            await Task.detached { p.waitUntilExit() }.value
+
+        // callback 與 deadline 可同時到；isRunning 只用來避免對已退出 pid 多送 signal，
+        // 不再拿來判定 status 是否可讀。
+        if process.isRunning { process.terminate() }
+        switch await wait(Self.terminationGrace, exitSignal) {
+        case .exited:
+            return .timedOut
+        case .timedOut:
+            break
         }
-        if outcome == .timedOut {
-            Self.log.error("正常結束後等 process 收屍逾時（pid \(p.processIdentifier, privacy: .public)，上限 \(Self.reapLimit.components.seconds, privacy: .public) 秒）")
+
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        if case .timedOut = await wait(Self.reapLimit, exitSignal) {
+            Self.log.error("SIGKILL 後等 terminationHandler 回報逾時（pid \(process.processIdentifier, privacy: .public)，上限 \(Self.reapLimit.components.seconds, privacy: .public) 秒）")
         }
-        return false
+        return .timedOut
     }
 }

@@ -10,59 +10,64 @@ private func tempDir() throws -> URL {
     return u
 }
 
-private actor ReapCallSpy {
+private actor ExitWaitSpy {
+    private var outcomes: [LiveProcessRunner.ExitWaitOutcome]
     private var limits: [Duration] = []
-    func record(limit: Duration) { limits.append(limit) }
+
+    init(outcomes: [LiveProcessRunner.ExitWaitOutcome]) { self.outcomes = outcomes }
+
+    func next(limit: Duration) -> LiveProcessRunner.ExitWaitOutcome {
+        limits.append(limit)
+        return outcomes.isEmpty ? .timedOut : outcomes.removeFirst()
+    }
+
     func snapshot() -> [Duration] { limits }
 }
 
-@Test func liveReapWaitReturnsWhenInjectedWaiterNeverDoes() async throws {
-    // 先建立 sample 顯示的前置狀態：Foundation 已回報不再執行，但尚未呼叫 waitUntilExit。
-    // notification 未派送本身無法隨需重現，下面以永不返回的 waiter deterministic 模擬。
+@Test func liveExitEventWaitReturnsWhenHandlerNeverFires() async {
+    // deterministic 模擬 callback delivery 壞掉：waiter 只 suspension，不會像 waitUntilExit()
+    // 永久佔住 executor thread；呼叫端仍須在自己的上限內返回。
+    let signal = LiveProcessRunner.ExitSignal()
+    let start = ContinuousClock.now
+    let outcome = await LiveProcessRunner.awaitExit(limit: .milliseconds(50), signal: signal)
+    #expect(outcome == .timedOut)
+    #expect(ContinuousClock.now - start < .seconds(1))
+}
+
+@Test func liveTerminationHandlerPublishesStatusWithoutWaitUntilExit() async throws {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/sh")
     process.arguments = ["-c", "exit 7"]
+    let signal = LiveProcessRunner.installTerminationHandler(on: process)
     try process.run()
-    while process.isRunning { try? await Task.sleep(for: .milliseconds(10)) }
 
-    // 注入永不 fire 的 waiter，直接釘住呼叫端的上限。
-    // 若 awaitReap 拿掉 awaitBounded，這個測試會永久停在 neverFired.wait()。
-    let neverFired = OneShotSignal()
-    let start = ContinuousClock.now
-    let outcome = await LiveProcessRunner.awaitReap(limit: .milliseconds(50)) {
-        await neverFired.wait()
-    }
-    #expect(outcome == .timedOut)
-    #expect(ContinuousClock.now - start < .seconds(1))
-    #expect(process.terminationStatus == 7) // isRunning == false 已足夠，不以 waiter 返回為前提
+    let outcome = await LiveProcessRunner.awaitExit(limit: .seconds(1), signal: signal)
+    #expect(outcome == .exited(.init(status: 7)))
 }
 
-@Test func liveWaitOrKillRoutesBothReapCallSitesThroughBoundedHook() async throws {
-    let spy = ReapCallSpy()
-    let reap: LiveProcessRunner.ReapWait = { limit, _ in
-        await spy.record(limit: limit)
-        return .completed
-    }
+@Test func liveWaitOrKillRoutesNormalAndTimeoutPathsThroughExitHook() async {
+    // 第一個 outcome 走正常結束；後三個依序走 execution timeout、TERM grace timeout、
+    // SIGKILL 後收到 exit event。用未 launch 的 Process 避免 spy 測試真的送 signal。
+    let spy = ExitWaitSpy(outcomes: [
+        .exited(.init(status: 0)),
+        .timedOut, .timedOut, .exited(.init(status: SIGKILL)),
+    ])
+    let wait: LiveProcessRunner.ExitWait = { limit, _ in await spy.next(limit: limit) }
 
-    let normal = Process()
-    normal.executableURL = URL(fileURLWithPath: "/bin/sh")
-    normal.arguments = ["-c", "exit 0"]
-    try normal.run()
-    let normalTimedOut = await LiveProcessRunner.waitOrKill(normal, timeout: 2, reap: reap)
-    #expect(!normalTimedOut)
+    let normal = await LiveProcessRunner.waitOrKill(
+        Process(), exitSignal: .init(), timeout: 2, wait: wait)
+    #expect(normal == .exited(.init(status: 0)))
     let callsAfterNormalExit = await spy.snapshot()
-    #expect(callsAfterNormalExit == [.seconds(1)])
+    #expect(callsAfterNormalExit == [.seconds(2)])
 
-    let timeout = Process()
-    timeout.executableURL = URL(fileURLWithPath: "/bin/sleep")
-    timeout.arguments = ["60"]
-    try timeout.run()
-    defer { if timeout.isRunning { kill(timeout.processIdentifier, SIGKILL) } }
-    let didTimeOut = await LiveProcessRunner.waitOrKill(timeout, timeout: 0.05, reap: reap)
-    #expect(didTimeOut)
-
+    let timeout = await LiveProcessRunner.waitOrKill(
+        Process(), exitSignal: .init(), timeout: 2, wait: wait)
+    #expect(timeout == .timedOut)
     let callsAfterBothPaths = await spy.snapshot()
-    #expect(callsAfterBothPaths == [.seconds(1), .seconds(1)])
+    #expect(callsAfterBothPaths == [
+        .seconds(2),
+        .seconds(2), .milliseconds(500), .seconds(1),
+    ])
 }
 
 @Test func livePipesDrainConcurrentlyWithoutDeadlock() async throws {
