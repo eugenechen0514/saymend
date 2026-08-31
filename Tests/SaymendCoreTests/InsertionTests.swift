@@ -232,6 +232,20 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     #expect(key.ops == [.insert("指令")])                   // 全程零鍵盤事件（跨通道競態消滅）
 }
 
+@Test func replaceSessionKeystrokeFailureRestoresOriginal() throws {
+    let (c, key, paste) = makeCoordinator()
+    try c.insertFinalized("改一下")
+    let command = c.snapshotAndBeginNext()
+    key.failInsertsRemaining = 1
+    paste.failInsertsRemaining = 1
+
+    #expect(throws: InserterError.replaceFailedRestored) {
+        _ = try c.replaceSession(commandSnapshot: command, expectedSessionText: "首句。",
+                                 with: "首句改。", axAnchor: nil)
+    }
+    #expect(key.ops == [.insert("改一下"), .delete(3), .delete(3), .insert("首句。")])
+}
+
 @Test func replaceSessionAXMismatchAborts() throws {
     let key = RecordingInserter(); let paste = RecordingInserter()
     let ax = FakeRangeReplacer(); ax.verifyResult = .mismatch
