@@ -149,11 +149,12 @@ import Testing
     #expect(key.ops == [.delete(5)])              // keepRaw 不是 polished；兩段 raw 都要退
 }
 
-/// 四種設定組合共用同一個 frozen＋已潤飾情境；每個 `@Test` 各守一格矩陣，
-/// 避免 parameterized output 只顯示一個名稱而看不出漏了哪個組合。
+/// 四種設定組合各跑 non-frozen 與 frozen 兩次。如此把任一 setting 硬編成常數時，
+/// 恰有該 setting 相反值的兩格會紅；不會因 frozen gate 先短路而讓 polished 軸少一半鑑別力。
 @MainActor
-private func frozenEscapeOps(retractPolished: Bool,
-                             retractFrozen: Bool) async -> [RecordingInserter.Op] {
+private func escapeOps(retractPolished: Bool,
+                       retractFrozen: Bool,
+                       freeze: Bool) async -> [RecordingInserter.Op] {
     let polisher = GatedIntentService()
     polisher.outcome = .newContent("您好。")
     let (c, _, _, key, _, _) = makeController(polisher: polisher)
@@ -163,9 +164,11 @@ private func frozenEscapeOps(retractPolished: Bool,
     c.handleTranscript(.finalized("呃那個你好"), at: 11.0)
     c.tick(at: 12.6)
     await c.lastIntentTask?.value
-    c.handleTranscript(.finalized("尾巴"), at: 13.0) // 同時帶一段尚未潤飾 raw，四格才都有可觀察差異
-    c.userActivityDetected(at: 13.2)
-    #expect(c.ledger.frozen)
+    c.handleTranscript(.finalized("尾巴"), at: 13.0) // settled polish 3 + 尚未潤飾 raw 2
+    if freeze {
+        c.userActivityDetected(at: 13.2)
+        #expect(c.ledger.frozen)
+    }
     key.ops.removeAll()
     c.escapePressed()
     #expect(!c.ledger.isActive)
@@ -173,19 +176,23 @@ private func frozenEscapeOps(retractPolished: Bool,
 }
 
 @MainActor @Test func frozenEscapeKeepsEverythingWhenBothSettingsAreOff() async {
-    #expect(await frozenEscapeOps(retractPolished: false, retractFrozen: false).isEmpty)
+    #expect(await escapeOps(retractPolished: false, retractFrozen: false, freeze: false) == [.delete(2)])
+    #expect(await escapeOps(retractPolished: false, retractFrozen: false, freeze: true).isEmpty)
 }
 
 @MainActor @Test func frozenEscapeStillKeepsEverythingWhenOnlyPolishedRetractionIsOn() async {
-    #expect(await frozenEscapeOps(retractPolished: true, retractFrozen: false).isEmpty)
+    #expect(await escapeOps(retractPolished: true, retractFrozen: false, freeze: false) == [.delete(5)])
+    #expect(await escapeOps(retractPolished: true, retractFrozen: false, freeze: true).isEmpty)
 }
 
 @MainActor @Test func frozenEscapeKeepsPolishWhenOnlyFrozenRetractionIsOn() async {
-    #expect(await frozenEscapeOps(retractPolished: false, retractFrozen: true) == [.delete(2)])
+    #expect(await escapeOps(retractPolished: false, retractFrozen: true, freeze: false) == [.delete(2)])
+    #expect(await escapeOps(retractPolished: false, retractFrozen: true, freeze: true) == [.delete(2)])
 }
 
 @MainActor @Test func frozenEscapeRetractsPolishWhenBothSettingsAreOn() async {
-    #expect(await frozenEscapeOps(retractPolished: true, retractFrozen: true) == [.delete(5)])
+    #expect(await escapeOps(retractPolished: true, retractFrozen: true, freeze: false) == [.delete(5)])
+    #expect(await escapeOps(retractPolished: true, retractFrozen: true, freeze: true) == [.delete(5)])
 }
 
 @MainActor
