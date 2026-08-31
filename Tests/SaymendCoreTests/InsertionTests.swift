@@ -5,31 +5,42 @@ final class RecordingInserter: TextInserter {
     enum Op: Equatable { case insert(String), delete(Int) }
     var ops: [Op] = []
     var failInsertsRemaining = 0
+    var failDeletesRemaining = 0
     func insert(_ text: String) throws {
         if failInsertsRemaining > 0 { failInsertsRemaining -= 1; throw InserterError.postFailed }
         ops.append(.insert(text))
     }
-    func deleteBackward(count: Int) throws { ops.append(.delete(count)) }
+    func deleteBackward(count: Int) throws {
+        if failDeletesRemaining > 0 { failDeletesRemaining -= 1; throw InserterError.postFailed }
+        ops.append(.delete(count))
+    }
 }
 
 final class FakeRangeReplacer: SessionRangeReplacing {
+    static let defaultFieldIdentity = defaultTestFieldIdentity
+    var focusedFieldIdentity: FieldIdentity? = defaultFieldIdentity
     var verifyResult: RangeReplaceResult = .replaced
     var replaceResult: RangeReplaceResult = .replaced
-    private(set) var verifyCalls: [(location: Int, expected: String)] = []
-    private(set) var calls: [(location: Int, expected: String, new: String)] = []
+    private(set) var verifyCalls: [(fieldIdentity: FieldIdentity, location: Int, expected: String)] = []
+    private(set) var calls: [(fieldIdentity: FieldIdentity, location: Int, expected: String, new: String)] = []
     /// 保留游標的替換單獨記帳——與 calls 混在一起就無法斷言「走的是新路徑而非舊路徑」
-    private(set) var preservingCaretCalls: [(location: Int, expected: String, new: String)] = []
-    func verifyRange(location: Int, expected: String) -> RangeReplaceResult {
-        verifyCalls.append((location, expected))
+    private(set) var preservingCaretCalls: [(fieldIdentity: FieldIdentity, location: Int,
+                                              expected: String, new: String)] = []
+    func verifyRange(fieldIdentity: FieldIdentity, location: Int, expected: String) -> RangeReplaceResult {
+        verifyCalls.append((fieldIdentity, location, expected))
+        if fieldIdentity != focusedFieldIdentity { return .mismatch }
         return verifyResult
     }
-    func replaceVerifiedRange(location: Int, expected: String, with newText: String) -> RangeReplaceResult {
-        calls.append((location, expected, newText))
+    func replaceVerifiedRange(fieldIdentity: FieldIdentity, location: Int,
+                              expected: String, with newText: String) -> RangeReplaceResult {
+        calls.append((fieldIdentity, location, expected, newText))
+        if fieldIdentity != focusedFieldIdentity { return .mismatch }
         return replaceResult
     }
-    func replaceVerifiedRangePreservingCaret(location: Int, expected: String,
-                                             with newText: String) -> RangeReplaceResult {
-        preservingCaretCalls.append((location, expected, newText))
+    func replaceVerifiedRangePreservingCaret(fieldIdentity: FieldIdentity, location: Int,
+                                             expected: String, with newText: String) -> RangeReplaceResult {
+        preservingCaretCalls.append((fieldIdentity, location, expected, newText))
+        if fieldIdentity != focusedFieldIdentity { return .mismatch }
         return replaceResult
     }
 }
@@ -102,6 +113,84 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     #expect(c.currentUtteranceLength == 0)
 }
 
+@Test func retractSessionWithoutAXFailsClosedEvenForSuffix() {
+    let (c, key, paste) = makeCoordinator()
+    let outcome = c.retractSession(expectedScreenText: "保留。👨‍👩‍👧‍👦",
+                                   to: "保留。", axAnchor: nil, fieldIdentity: nil)
+    #expect(outcome == .fieldMismatch)
+    #expect(key.ops.isEmpty && paste.ops.isEmpty) // whole-session Esc 不因「只是 suffix」例外盲退
+}
+
+@Test func retractSessionUsesOneVerifiedAXReplacement() throws {
+    let key = RecordingInserter(), paste = RecordingInserter(), ax = FakeRangeReplacer()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
+    let outcome = c.retractSession(expectedScreenText: "本階段全文", to: "", axAnchor: 42,
+                                       fieldIdentity: FakeRangeReplacer.defaultFieldIdentity)
+    #expect(outcome == .retracted)
+    #expect(ax.verifyCalls.count == 1 && ax.calls.count == 1)
+    #expect(ax.verifyCalls[0].location == 42 && ax.verifyCalls[0].expected == "本階段全文")
+    #expect(ax.calls[0].location == 42 && ax.calls[0].expected == "本階段全文" && ax.calls[0].new == "")
+    #expect(key.ops.isEmpty)                       // AX 與 keystroke 不混用
+}
+
+@Test func retractSessionFailsClosedWhenPreviouslyAvailableAXBecomesUnsupported() throws {
+    let key = RecordingInserter(), paste = RecordingInserter(), ax = FakeRangeReplacer()
+    ax.verifyResult = .unsupported
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
+    let outcome = c.retractSession(expectedScreenText: "保留。尾巴", to: "保留。", axAnchor: 7,
+                                       fieldIdentity: FakeRangeReplacer.defaultFieldIdentity)
+    #expect(outcome == .fieldMismatch)
+    #expect(ax.calls.isEmpty)
+    #expect(key.ops.isEmpty && paste.ops.isEmpty)  // 起點曾有 AX、現在不可驗證：不得盲退 wrong field
+}
+
+@Test func retractSessionStopsAfterAXSecondStepFailure() throws {
+    let key = RecordingInserter(), paste = RecordingInserter(), ax = FakeRangeReplacer()
+    ax.replaceResult = .mismatch
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
+    let outcome = c.retractSession(expectedScreenText: "本階段", to: "", axAnchor: 7,
+                                       fieldIdentity: FakeRangeReplacer.defaultFieldIdentity)
+    #expect(outcome == .fieldMismatch)
+    #expect(ax.calls.count == 1)
+    #expect(key.ops.isEmpty && paste.ops.isEmpty)   // AX 可能留活選取，禁止 keystroke 收尾
+}
+
+@Test func retractSessionWithoutAXFailsClosedForNonPrefixBaseline() {
+    let (c, key, paste) = makeCoordinator()
+    let outcome = c.retractSession(expectedScreenText: "改寫後", to: "原選取",
+                                   axAnchor: nil, fieldIdentity: nil)
+    #expect(outcome == .fieldMismatch)
+    #expect(key.ops.isEmpty && paste.ops.isEmpty)
+}
+
+@Test func retractSessionMissingIdentityFailsClosed() {
+    let key = RecordingInserter(), paste = RecordingInserter(), ax = FakeRangeReplacer()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
+    let outcome = c.retractSession(expectedScreenText: "原始好。", to: "好。",
+                                   axAnchor: 0, fieldIdentity: nil)
+    #expect(outcome == .fieldMismatch)
+    #expect(ax.verifyCalls.isEmpty && key.ops.isEmpty && paste.ops.isEmpty)
+}
+
+@Test func retractSessionMissingAnchorFailsClosed() {
+    let key = RecordingInserter(), paste = RecordingInserter(), ax = FakeRangeReplacer()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
+    let outcome = c.retractSession(expectedScreenText: "原始好。", to: "好。", axAnchor: nil,
+                                   fieldIdentity: FakeRangeReplacer.defaultFieldIdentity)
+    #expect(outcome == .fieldMismatch)
+    #expect(ax.verifyCalls.isEmpty && key.ops.isEmpty && paste.ops.isEmpty)
+}
+
+@Test func retractSessionStopsWhenAXTextNoLongerMatches() throws {
+    let key = RecordingInserter(), paste = RecordingInserter(), ax = FakeRangeReplacer()
+    ax.verifyResult = .mismatch
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
+    let outcome = c.retractSession(expectedScreenText: "程式以為的全文", to: "", axAnchor: 7,
+                                       fieldIdentity: FakeRangeReplacer.defaultFieldIdentity)
+    #expect(outcome == .fieldMismatch)
+    #expect(ax.calls.isEmpty && key.ops.isEmpty && paste.ops.isEmpty) // 使用者外改後分毫不碰
+}
+
 @Test func chunkerRespectsGraphemesAndUTF16Limit() {
     let chunks = TypingChunker.chunks(of: "a👨‍👩‍👧‍👦b中文def", maxUTF16: 12)
     #expect(chunks.joined() == "a👨‍👩‍👧‍👦b中文def")
@@ -133,7 +222,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 6)
     try c.insertFinalized("指令")
     let snap = c.snapshotAndBeginNext()
-    let out = try c.replaceSession(commandSnapshot: snap, expectedSessionText: "舊文", with: "新文", axAnchor: 42)
+    let out = try c.replaceSession(commandSnapshot: snap, expectedSessionText: "舊文", with: "新文", axAnchor: 42,
+                                   fieldIdentity: defaultTestFieldIdentity)
     #expect(out == .replaced)
     #expect(ax.verifyCalls.count == 1)                      // 先驗證
     #expect(ax.calls.count == 1)                            // 再替換
@@ -142,19 +232,35 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     #expect(key.ops == [.insert("指令")])                   // 全程零鍵盤事件（跨通道競態消滅）
 }
 
+@Test func replaceSessionKeystrokeFailureRestoresOriginal() throws {
+    let (c, key, paste) = makeCoordinator()
+    try c.insertFinalized("改一下")
+    let command = c.snapshotAndBeginNext()
+    key.failInsertsRemaining = 1
+    paste.failInsertsRemaining = 1
+
+    #expect(throws: InserterError.replaceFailedRestored) {
+        _ = try c.replaceSession(commandSnapshot: command, expectedSessionText: "首句。",
+                                 with: "首句改。", axAnchor: nil)
+    }
+    #expect(key.ops == [.insert("改一下"), .delete(3), .delete(3), .insert("首句。")])
+}
+
 @Test func replaceSessionAXMismatchAborts() throws {
     let key = RecordingInserter(); let paste = RecordingInserter()
     let ax = FakeRangeReplacer(); ax.verifyResult = .mismatch
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 6)
     try c.insertFinalized("指令")
     let snap = c.snapshotAndBeginNext()
-    let out = try c.replaceSession(commandSnapshot: snap, expectedSessionText: "舊文", with: "新文", axAnchor: 42)
+    let out = try c.replaceSession(commandSnapshot: snap, expectedSessionText: "舊文", with: "新文", axAnchor: 42,
+                                   fieldIdentity: defaultTestFieldIdentity)
     #expect(out == .fieldMismatch)                          // 欄位被外力改過：不得亂改
     #expect(key.ops == [.insert("指令")])                   // mismatch 時分毫未動（連指令話語都不退）
     #expect(!key.ops.contains(.insert("新文")))
 }
 
-@Test func replaceSessionAXUnsupportedFallsBackToKeystroke() throws {
+@Test func replaceSessionWithoutIdentityKeepsLegacyKeystrokeFallback() throws {
+    // 低階 API 相容性；production controller 的 session-bound call 一律帶 identity 並 fail closed。
     let key = RecordingInserter(); let paste = RecordingInserter()
     let ax = FakeRangeReplacer(); ax.verifyResult = .unsupported
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 100)
@@ -173,7 +279,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 100)
     try c.insertFinalized("指令")
     let snap = c.snapshotAndBeginNext()
-    let out = try c.replaceSession(commandSnapshot: snap, expectedSessionText: "舊文", with: "新文", axAnchor: 1)
+    let out = try c.replaceSession(commandSnapshot: snap, expectedSessionText: "舊文", with: "新文", axAnchor: 1,
+                                   fieldIdentity: defaultTestFieldIdentity)
     #expect(out == .fieldMismatch)
     #expect(key.ops == [.insert("指令")])                   // 除最初插入外，零 keystroke 收尾
 }
@@ -242,7 +349,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     let key = RecordingInserter(), paste = RecordingInserter()
     let ax = FakeRangeReplacer()
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
-    let outcome = c.replaceSelection(location: 7, expected: "原選取", with: "改寫後")
+    let outcome = c.replaceSelection(location: 7, expected: "原選取", with: "改寫後",
+                                     fieldIdentity: defaultTestFieldIdentity)
     #expect(outcome == .replaced)
     #expect(ax.calls.count == 1)
     #expect(ax.calls[0].location == 7 && ax.calls[0].expected == "原選取" && ax.calls[0].new == "改寫後")
@@ -254,7 +362,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     let ax = FakeRangeReplacer()
     ax.verifyResult = .mismatch                        // 選取已變
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
-    #expect(c.replaceSelection(location: 7, expected: "原選取", with: "改寫後") == .selectionChanged)
+    #expect(c.replaceSelection(location: 7, expected: "原選取", with: "改寫後",
+                               fieldIdentity: defaultTestFieldIdentity) == .selectionChanged)
     #expect(ax.calls.isEmpty && key.ops.isEmpty && paste.ops.isEmpty)
 }
 
@@ -270,7 +379,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     let ax = FakeRangeReplacer()
     ax.replaceResult = .mismatch                       // verify 過、replace 失敗（兩步間變動）
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
-    #expect(c.replaceSelection(location: 7, expected: "原選取", with: "改寫後") == .selectionChanged)
+    #expect(c.replaceSelection(location: 7, expected: "原選取", with: "改寫後",
+                               fieldIdentity: defaultTestFieldIdentity) == .selectionChanged)
     #expect(key.ops.isEmpty && paste.ops.isEmpty)      // AX 可能留下活選取，keystroke 會把它吃掉
 }
 
@@ -279,7 +389,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     let ax = FakeRangeReplacer()
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
     let snapBefore = c.snapshotAndBeginNext()          // counter 快照
-    _ = c.replaceSelection(location: 0, expected: "a", with: "b")
+    _ = c.replaceSelection(location: 0, expected: "a", with: "b",
+                           fieldIdentity: defaultTestFieldIdentity)
     #expect(try c.replaceTail(snapBefore, with: "x") == false)   // 尾端已前進
 }
 
@@ -315,7 +426,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     try c.insertFinalized("指令")
     let snap = c.snapshotAndBeginNext()
     let outcome = try c.replaceSession(commandSnapshot: snap, expectedSessionText: "全文",
-                                       with: "新全文", axAnchor: 0)
+                                       with: "新全文", axAnchor: 0,
+                                       fieldIdentity: defaultTestFieldIdentity)
     #expect(outcome == .fieldMismatch)
     #expect(key.ops == [.insert("指令")])              // 除最初插入外，零 keystroke 收尾
 }
@@ -333,7 +445,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     try c.insertFinalized("第二段")                     // 尾端前進 → 正常 replaceTail 已不可用
     #expect(try !c.replaceTail(snap, with: "第一段。"))   // 前提：確實走不了快路徑
 
-    let outcome = c.replaceStaleTail(snap, at: 40, with: "第一段。")
+    let outcome = c.replaceStaleTail(snap, at: 40, with: "第一段。",
+                                     fieldIdentity: defaultTestFieldIdentity)
     #expect(outcome == .replaced)
     #expect(ax.preservingCaretCalls.count == 1)
     #expect(ax.preservingCaretCalls[0].location == 40)
@@ -351,7 +464,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
 
-    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .mismatch)
+    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。",
+                               fieldIdentity: defaultTestFieldIdentity) == .mismatch)
     #expect(ax.preservingCaretCalls.isEmpty)             // 鐵律：校驗不過就一個字都不准寫
 }
 
@@ -370,7 +484,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 100)
     try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
-    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .mismatch)
+    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。",
+                               fieldIdentity: defaultTestFieldIdentity) == .mismatch)
 }
 
 @Test func staleTailRejectsEmptySnapshotWithoutTouchingTheField() throws {
@@ -381,7 +496,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     let empty = c.currentTailSnapshot()                  // text 為空、counter 為現值
     #expect(empty.text.isEmpty)
 
-    #expect(c.replaceStaleTail(empty, at: 40, with: "憑空出現的字") == .mismatch)
+    #expect(c.replaceStaleTail(empty, at: 40, with: "憑空出現的字",
+                               fieldIdentity: defaultTestFieldIdentity) == .mismatch)
     #expect(ax.verifyCalls.isEmpty)                      // 連校驗都不該發出
     #expect(ax.preservingCaretCalls.isEmpty)
 }
@@ -396,7 +512,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
 
-    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .unsupported)
+    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。",
+                               fieldIdentity: defaultTestFieldIdentity) == .unsupported)
     #expect(ax.preservingCaretCalls.isEmpty)
 }
 
@@ -411,7 +528,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     try c.insertFinalized("第二段")
     let second = c.snapshotAndBeginNext()                // 第二段仍在尾端
 
-    #expect(c.replaceStaleTail(first, at: 40, with: "第一段。") == .replaced)
+    #expect(c.replaceStaleTail(first, at: 40, with: "第一段。",
+                               fieldIdentity: defaultTestFieldIdentity) == .replaced)
 
     // 回收完第一段之後，第二段照樣要能走正常的尾端路徑
     #expect(try c.replaceTail(second, with: "第二段。"))

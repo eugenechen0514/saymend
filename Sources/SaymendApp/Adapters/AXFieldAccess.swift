@@ -2,6 +2,24 @@ import AppKit
 import ApplicationServices
 import SaymendCore
 
+/// Session-bound AX element registry。FieldIdentity 是 opaque token；真正 identity 以 CFEqual
+/// 比較保留的 AXUIElement，不能用 CFHash（hash collision 會把同 App 的另一欄誤認為原欄）。
+final class AXFieldRegistry {
+    private let registry = FieldIdentityRegistry<AXUIElement>(areEqual: { CFEqual($0, $1) })
+
+    func identity(for element: AXUIElement) -> FieldIdentity {
+        registry.identity(for: element)
+    }
+
+    func matches(_ identity: FieldIdentity, element: AXUIElement) -> Bool {
+        registry.matches(identity, element: element)
+    }
+
+    func release(_ identity: FieldIdentity?) {
+        registry.release(identity)
+    }
+}
+
 /// AX 聚焦欄位存取（規格 §4.6 AXInserter／§4.7 AXReader 的 M2 子集；§5.3 secure field 偵測）。
 /// 與熱鍵共用「輔助使用」權限；range 一律 UTF-16 單位（AX 慣例）。
 enum AXFieldAccess {
@@ -137,15 +155,18 @@ enum AXFieldAccess {
 /// 聚焦欄位快照：secure 偵測＋游標錨位（UTF-16）
 final class AXFieldReader: FieldContextProviding {
     private let profiles: (any AppProfileStore)?
+    private let registry: AXFieldRegistry
     private let clipboardFallback = ClipboardSelectionReader()
 
-    init(profiles: (any AppProfileStore)? = nil) {
+    init(profiles: (any AppProfileStore)? = nil, registry: AXFieldRegistry) {
         self.profiles = profiles
+        self.registry = registry
     }
 
     func snapshot() -> FieldContext {
         guard let element = AXFieldAccess.focusedElement() else { return FieldContext() }
-        var context = FieldContext(hasFocusedElement: true)
+        var context = FieldContext(hasFocusedElement: true,
+                                   fieldIdentity: registry.identity(for: element))
         var subroleRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef) == .success,
            let subrole = subroleRef as? String, subrole == (kAXSecureTextFieldSubrole as String) {
@@ -188,25 +209,37 @@ final class AXFieldReader: FieldContextProviding {
         }
         return context
     }
+
+    func releaseFieldIdentity(_ identity: FieldIdentity?) {
+        registry.release(identity)
+    }
 }
 
 /// AX 範圍替換：讀值校驗 → 設 AXSelectedTextRange → 設 AXSelectedText。
 final class AXInserter: SessionRangeReplacing {
-    func verifyRange(location: Int, expected: String) -> RangeReplaceResult {
-        guard let element = AXFieldAccess.focusedElement(),
-              let value = AXFieldAccess.stringValue(of: element) else {
-            return .unsupported
-        }
+    private let registry: AXFieldRegistry
+
+    init(registry: AXFieldRegistry) {
+        self.registry = registry
+    }
+    func verifyRange(fieldIdentity: FieldIdentity, location: Int,
+                     expected: String) -> RangeReplaceResult {
+        guard let element = AXFieldAccess.focusedElement() else { return .unsupported }
+        guard matches(fieldIdentity, element: element) else { return .mismatch }
+        guard let value = AXFieldAccess.stringValue(of: element) else { return .unsupported }
         return Self.rangeMatches(value: value, location: location, expected: expected)
     }
 
-    func replaceVerifiedRange(location: Int, expected: String, with newText: String) -> RangeReplaceResult {
-        replace(location: location, expected: expected, with: newText, caret: .collapseToNewEnd)
+    func replaceVerifiedRange(fieldIdentity: FieldIdentity, location: Int,
+                              expected: String, with newText: String) -> RangeReplaceResult {
+        replace(fieldIdentity: fieldIdentity, location: location, expected: expected,
+                with: newText, caret: .collapseToNewEnd)
     }
 
-    func replaceVerifiedRangePreservingCaret(location: Int, expected: String,
-                                             with newText: String) -> RangeReplaceResult {
-        replace(location: location, expected: expected, with: newText, caret: .preserve)
+    func replaceVerifiedRangePreservingCaret(fieldIdentity: FieldIdentity, location: Int,
+                                             expected: String, with newText: String) -> RangeReplaceResult {
+        replace(fieldIdentity: fieldIdentity, location: location, expected: expected,
+                with: newText, caret: .preserve)
     }
 
     /// 替換後游標怎麼放。兩種模式共用同一套「讀值校驗→設範圍→設文字」，
@@ -216,12 +249,12 @@ final class AXInserter: SessionRangeReplacing {
         case preserve           // 中段改寫：把原游標放回同一個相對位置
     }
 
-    private func replace(location: Int, expected: String, with newText: String,
+    private func replace(fieldIdentity: FieldIdentity, location: Int,
+                         expected: String, with newText: String,
                          caret policy: CaretPolicy) -> RangeReplaceResult {
-        guard let element = AXFieldAccess.focusedElement(),
-              let value = AXFieldAccess.stringValue(of: element) else {
-            return .unsupported
-        }
+        guard let element = AXFieldAccess.focusedElement() else { return .unsupported }
+        guard matches(fieldIdentity, element: element) else { return .mismatch }
+        guard let value = AXFieldAccess.stringValue(of: element) else { return .unsupported }
         let check = Self.rangeMatches(value: value, location: location, expected: expected)
         guard check == .replaced else { return check }
 
@@ -259,6 +292,10 @@ final class AXInserter: SessionRangeReplacing {
         } ?? (location + newText.utf16.count)
         Self.setCaret(element, to: target)
         return .replaced
+    }
+
+    private func matches(_ expected: FieldIdentity, element: AXUIElement) -> Bool {
+        registry.matches(expected, element: element)
     }
 
     private static func caretLocation(of element: AXUIElement) -> Int? {

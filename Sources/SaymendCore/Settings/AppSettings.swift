@@ -55,6 +55,9 @@ public final class AppSettings: @unchecked Sendable {
         static let historyEnabled = "historyEnabled"
         static let historyRetentionDays = "historyRetentionDays"
         static let ocrContextEnabled = "ocrContextEnabled"
+        // Esc 退回本次聽寫（issue #21）。key 是 persistence 契約，測試以字面值釘住。
+        static let escapeRetractsPolishedText = "escapeRetractsPolishedText"
+        static let escapeRetractsFrozenSession = "escapeRetractsFrozenSession"
         static let defaultCoreModeID = "defaultCoreModeID"
         static let providerKind = "providerKind"
         static let cliPathOverride = "claudeCLIPathOverride"
@@ -333,6 +336,29 @@ public final class AppSettings: @unchecked Sendable {
     public var historyEnabled: Bool {
         get { defaults.object(forKey: K.historyEnabled) as? Bool ?? true }
         set { defaults.set(newValue, forKey: K.historyEnabled) }
+    }
+
+    /// Esc 是否連已落定的潤飾結果一起退掉（issue #21）。預設開：取消的心智模型是
+    /// 「這次不算」；若預設保留已潤飾部分，仍會留下使用者必須手動清掉的半截文字。
+    public var escapeRetractsPolishedText: Bool {
+        get { readBool(K.escapeRetractsPolishedText, default: true) }
+        set { defaults.set(newValue, forKey: K.escapeRetractsPolishedText) }
+    }
+
+    /// 凍結後是否仍允許 Esc 退字（issue #21）。預設關：凍結的正常契約是使用者動手後
+    /// 程式不再改欄位；開啟者明確接受退格可能連自己剛輸入的內容一起刪掉、且無法復原。
+    public var escapeRetractsFrozenSession: Bool {
+        get { readBool(K.escapeRetractsFrozenSession, default: false) }
+        set { defaults.set(newValue, forKey: K.escapeRetractsFrozenSession) }
+    }
+
+    /// UserDefaults 會把 `Int` bridge 成 `NSNumber`，直接 `as? Bool` 會把 1 誤收為 true。
+    /// 先核對 Core Foundation type ID，才能真的做到「型別錯誤回落預設」。
+    private func readBool(_ key: String, default defaultValue: Bool) -> Bool {
+        guard let object = defaults.object(forKey: key),
+              CFGetTypeID(object as CFTypeRef) == CFBooleanGetTypeID(),
+              let value = object as? Bool else { return defaultValue }
+        return value
     }
 
     /// OCR 螢幕語境備援開關（規格 §4.7）。預設關（opt-in）：螢幕擷取最具侵入性，

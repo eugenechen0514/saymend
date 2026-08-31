@@ -14,6 +14,12 @@ public final class InsertionCoordinator {
         case fieldMismatch     // AX 校驗不符（外力改動欄位）：放棄且呼叫端應凍結
     }
 
+    /// Esc 全聽寫階段退回。沒有 tailAdvanced：呼叫端提供的是按下 Esc 當下完整欄位鏡像。
+    public enum SessionRetractionOutcome: Equatable {
+        case retracted
+        case fieldMismatch
+    }
+
     /// 過期尾端回收結果（M10-C）。與另外兩個 outcome 型別分開：語意不同——
     /// 這條路徑失敗時原文完好留在螢幕上，呼叫端只需保留原文並說明原因，不必凍結、也無需急救。
     public enum StaleTailOutcome: Equatable {
@@ -66,7 +72,33 @@ public final class InsertionCoordinator {
         currentUtteranceText = ""
     }
 
-    /// finalized 片段上屏。主 inserter 失敗時換另一個（規格 §5.2 逐層降級）。
+    /// Production raw finalized：以 session 起始 AX identity＋目前完整 session 文字做 verified
+    /// replacement，將 raw 原子追加至原 field。事前 snapshot＋global CGEvent 有 TOCTOU，不能替代此 primitive。
+    public func insertFinalizedVerified(_ text: String,
+                                        expectedScreenText: String,
+                                        axAnchor: Int?,
+                                        fieldIdentity: FieldIdentity?) -> SessionRetractionOutcome {
+        guard !text.isEmpty else { return .retracted }
+        guard let ax = rangeReplacer, let anchor = axAnchor, let fieldIdentity else {
+            return .fieldMismatch
+        }
+        switch ax.verifyRange(fieldIdentity: fieldIdentity, location: anchor,
+                              expected: expectedScreenText) {
+        case .unsupported, .mismatch:
+            return .fieldMismatch
+        case .replaced:
+            guard ax.replaceVerifiedRange(fieldIdentity: fieldIdentity, location: anchor,
+                                          expected: expectedScreenText,
+                                          with: expectedScreenText + text) == .replaced else {
+                return .fieldMismatch
+            }
+            currentUtteranceText += text
+            insertCounter += 1
+            return .retracted
+        }
+    }
+
+    /// 低階／舊測試 finalized primitive；production controller 只在明示 test hook 下使用。
     public func insertFinalized(_ text: String) throws {
         guard !text.isEmpty else { return }
         try insertWithFallback(text)
@@ -103,13 +135,15 @@ public final class InsertionCoordinator {
     /// 選取範圍替換（規格 §3.6）：AX 專屬——選取在欄位中段，keystroke 退格重打不適用。
     /// 校驗不符或兩步間變動一律放棄（selectionChanged）：AX 失敗可能留下活選取，
     /// 任何 keystroke 收尾都會把選取吃掉（同 M2 終審「兩通道不混用」finding）。
-    public func replaceSelection(location: Int, expected: String, with newText: String) -> SelectionReplaceOutcome {
-        guard let ax = rangeReplacer else { return .unsupported }
-        switch ax.verifyRange(location: location, expected: expected) {
+    public func replaceSelection(location: Int, expected: String, with newText: String,
+                                 fieldIdentity: FieldIdentity? = nil) -> SelectionReplaceOutcome {
+        guard let ax = rangeReplacer, let fieldIdentity else { return .unsupported }
+        switch ax.verifyRange(fieldIdentity: fieldIdentity, location: location, expected: expected) {
         case .unsupported: return .unsupported
         case .mismatch: return .selectionChanged
         case .replaced:
-            if ax.replaceVerifiedRange(location: location, expected: expected, with: newText) == .replaced {
+            if ax.replaceVerifiedRange(fieldIdentity: fieldIdentity, location: location,
+                                       expected: expected, with: newText) == .replaced {
                 insertCounter += 1
                 currentUtteranceText = ""
                 return .replaced
@@ -126,15 +160,17 @@ public final class InsertionCoordinator {
     /// 對不上而被迫也走這條慢路徑——它們其實仍在尾端，正常的 replaceTail 就能處理。
     public func replaceStaleTail(_ snap: UtteranceSnapshot,
                                  at location: Int,
-                                 with newText: String) -> StaleTailOutcome {
-        guard let ax = rangeReplacer else { return .unsupported }
+                                 with newText: String,
+                                 fieldIdentity: FieldIdentity? = nil) -> StaleTailOutcome {
+        guard let ax = rangeReplacer, let fieldIdentity else { return .unsupported }
         // 零長度快照沒有可校驗的錨——那樣的「替換」等於在算出來的位置盲插，寧可放棄
         guard !snap.text.isEmpty else { return .mismatch }
-        switch ax.verifyRange(location: location, expected: snap.text) {
+        switch ax.verifyRange(fieldIdentity: fieldIdentity, location: location, expected: snap.text) {
         case .unsupported: return .unsupported
         case .mismatch:    return .mismatch
         case .replaced:
-            if ax.replaceVerifiedRangePreservingCaret(location: location,
+            if ax.replaceVerifiedRangePreservingCaret(fieldIdentity: fieldIdentity,
+                                                      location: location,
                                                       expected: snap.text,
                                                       with: newText) == .replaced {
                 return .replaced
@@ -150,8 +186,29 @@ public final class InsertionCoordinator {
         return snap
     }
 
-    /// 以潤飾後文字替換快照的 utterance（尾端未前進才執行）。
-    /// 失敗回復（鐵律）：刪除成功但補插失敗→重打原文；再失敗→丟 lostText。
+    /// Controller 的 session-bound tail polish：counter、原 AX element identity 與 raw 文字
+    /// 三者都通過才一次替換；缺 AX/identity 絕不退回 global keystroke。
+    public func replaceTailVerified(_ snap: UtteranceSnapshot,
+                                    at location: Int,
+                                    with newText: String,
+                                    fieldIdentity: FieldIdentity?) -> SessionReplaceOutcome {
+        guard snap.counter == insertCounter else { return .tailAdvanced }
+        guard let ax = rangeReplacer, let fieldIdentity else { return .fieldMismatch }
+        switch ax.verifyRange(fieldIdentity: fieldIdentity, location: location, expected: snap.text) {
+        case .unsupported, .mismatch:
+            return .fieldMismatch
+        case .replaced:
+            guard ax.replaceVerifiedRange(fieldIdentity: fieldIdentity, location: location,
+                                          expected: snap.text, with: newText) == .replaced else {
+                return .fieldMismatch
+            }
+            insertCounter += 1
+            return .replaced
+        }
+    }
+
+    /// 低階／既有測試用 tail primitive。它只認 counter、不綁 field identity；session controller
+    /// 不得拿它做非同步 polish 或 whole-session Esc。
     public func replaceTail(_ snap: UtteranceSnapshot, with newText: String) throws -> Bool {
         guard snap.counter == insertCounter else { return false }
         try deleteAndRetype(expectedLength: snap.length, originalText: snap.text, newText: newText)
@@ -163,22 +220,27 @@ public final class InsertionCoordinator {
     public func replaceSession(commandSnapshot: UtteranceSnapshot,
                                expectedSessionText: String,
                                with newText: String,
-                               axAnchor: Int?) throws -> SessionReplaceOutcome {
+                               axAnchor: Int?,
+                               fieldIdentity: FieldIdentity? = nil) throws -> SessionReplaceOutcome {
         guard commandSnapshot.counter == insertCounter else { return .tailAdvanced }
         // AX 優先：把「session 全文＋緊隨其後的指令話語」視為單一範圍，一次驗證、一次替換成 newText，
         // 全程不發任何鍵盤事件——CGEvent（事件佇列）與 AX（mach port）是兩條通道，目標 App 忙碌時
         // 服務順序無保證：若混用，遲到的退格可能改吃剛替換完的新文字（終審 finding）。
         // mismatch 或兩步間變動一律中止（AX 動過欄位後不得再落 keystroke）；
         // 只有 unsupported（AX 從未動過欄位）才走 keystroke 全套。
-        if let ax = rangeReplacer, let anchor = axAnchor {
+        if fieldIdentity != nil && (rangeReplacer == nil || axAnchor == nil) {
+            return .fieldMismatch
+        }
+        if let ax = rangeReplacer, let anchor = axAnchor, let fieldIdentity {
             let combined = expectedSessionText + commandSnapshot.text
-            switch ax.verifyRange(location: anchor, expected: combined) {
+            switch ax.verifyRange(fieldIdentity: fieldIdentity, location: anchor, expected: combined) {
             case .mismatch:
                 return .fieldMismatch
             case .unsupported:
-                break   // 全程退 keystroke 路徑
+                return .fieldMismatch // 進入 AX branch 代表有 identity；session-bound write 不退 global keystroke
             case .replaced:   // ＝驗證通過
-                if ax.replaceVerifiedRange(location: anchor, expected: combined, with: newText) == .replaced {
+                if ax.replaceVerifiedRange(fieldIdentity: fieldIdentity, location: anchor,
+                                           expected: combined, with: newText) == .replaced {
                     insertCounter += 1
                     return .replaced
                 }
@@ -198,7 +260,42 @@ public final class InsertionCoordinator {
         return .replaced
     }
 
-    /// Esc：退格清掉目前 utterance 已上屏的文字。
+    /// Esc：以 session 起始 AX element identity＋完整文字做單一 verified replacement（issue #21）。
+    /// Whole-session deletion 絕不退回 keystroke：CGEvent 只送往目前 focus，無法證明刪的是原欄位；
+    /// 缺 AX／anchor／identity 或任何一步校驗失敗都 fail closed。
+    public func retractSession(expectedScreenText: String,
+                               to retainedText: String,
+                               axAnchor: Int?,
+                               fieldIdentity: FieldIdentity?) -> SessionRetractionOutcome {
+        guard expectedScreenText != retainedText else {
+            currentUtteranceText = ""
+            return .retracted
+        }
+        guard let ax = rangeReplacer, let anchor = axAnchor, let fieldIdentity else {
+            return .fieldMismatch
+        }
+        switch ax.verifyRange(fieldIdentity: fieldIdentity, location: anchor,
+                              expected: expectedScreenText) {
+        case .unsupported, .mismatch:
+            return .fieldMismatch
+        case .replaced:
+            guard ax.replaceVerifiedRange(fieldIdentity: fieldIdentity, location: anchor,
+                                          expected: expectedScreenText,
+                                          with: retainedText) == .replaced else {
+                return .fieldMismatch
+            }
+            currentUtteranceText = ""
+            insertCounter += 1
+            return .retracted
+        }
+    }
+
+    /// frozen opt-in 只能在可綁定原 AX field 的情況退字；無 AX／無 identity 時 fail closed。
+    public func canVerifySessionRange(axAnchor: Int?, fieldIdentity: FieldIdentity?) -> Bool {
+        rangeReplacer != nil && axAnchor != nil && fieldIdentity != nil
+    }
+
+    /// 舊的 utterance 級 primitive；保留給直接單元測試與非 session 呼叫端。
     public func discardCurrentUtterance() throws {
         let count = currentUtteranceText.count
         if count > 0 {

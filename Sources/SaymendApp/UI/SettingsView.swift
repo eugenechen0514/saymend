@@ -199,14 +199,7 @@ struct GeneralSettingsTab: View {
 
     private var generalForm: some View {
         Form {
-            Section("聽寫") {
-                Picker("聽寫熱鍵", selection: $hotkey) {
-                    ForEach(HotkeyChoice.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                }
-                Picker("輸出語系", selection: $language) {
-                    ForEach(OutputLanguage.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                }
-            }
+            dictationSettingsSection
             asrEngineSection
             whisperLocalSection
             Section("LLM Provider") {
@@ -272,6 +265,28 @@ struct GeneralSettingsTab: View {
         .onChange(of: oaiEdit) { _, v in settings.oaiEditTimeout = v }
         .onChange(of: cliPolish) { _, v in settings.cliPolishTimeout = v }
         .onChange(of: cliEdit) { _, v in settings.cliEditTimeout = v }
+    }
+
+    /// 聽寫基本設定與 Esc 退回邊界（issue #21）。兩段風險說明必須是實際可見的 `Text`；
+    /// `StreamingSettingsTextTests` 從完整 `GeneralSettingsTab.body` 展開到這個 Form call site，
+    /// 不能只建構最內層 child。
+    @ViewBuilder private var dictationSettingsSection: some View {
+        Section("聽寫") {
+            Picker("聽寫熱鍵", selection: $hotkey) {
+                ForEach(HotkeyChoice.allCases, id: \.self) { Text($0.displayName).tag($0) }
+            }
+            Picker("輸出語系", selection: $language) {
+                ForEach(OutputLanguage.allCases, id: \.self) { Text($0.displayName).tag($0) }
+            }
+            escapeRetractionControl(.polishedText)
+            escapeRetractionControl(.frozenSession)
+        }
+    }
+
+    @ViewBuilder private func escapeRetractionControl(_ option: EscapeRetractionSetting) -> some View {
+        Toggle(option.title, isOn: option.binding(to: settings))
+        Text(option.explanation)
+            .font(.caption).foregroundStyle(.secondary)
     }
 
     /// 語音辨識引擎單選與 Whisper 遠端設定（M8 spec §6.2）。
