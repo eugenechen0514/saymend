@@ -268,7 +268,8 @@ struct GeneralSettingsTab: View {
     }
 
     /// 聽寫基本設定與 Esc 退回邊界（issue #21）。兩段風險說明必須是實際可見的 `Text`；
-    /// `StreamingSettingsTextTests` 從 `generalForm` 這個真正 call site 檢查，不能只測本 child。
+    /// `StreamingSettingsTextTests` 從完整 `GeneralSettingsTab.body` 展開到這個 Form call site，
+    /// 不能只建構最內層 child。
     @ViewBuilder private var dictationSettingsSection: some View {
         Section("聽寫") {
             Picker("聽寫熱鍵", selection: $hotkey) {
