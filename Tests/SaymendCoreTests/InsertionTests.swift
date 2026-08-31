@@ -5,11 +5,15 @@ final class RecordingInserter: TextInserter {
     enum Op: Equatable { case insert(String), delete(Int) }
     var ops: [Op] = []
     var failInsertsRemaining = 0
+    var failDeletesRemaining = 0
     func insert(_ text: String) throws {
         if failInsertsRemaining > 0 { failInsertsRemaining -= 1; throw InserterError.postFailed }
         ops.append(.insert(text))
     }
-    func deleteBackward(count: Int) throws { ops.append(.delete(count)) }
+    func deleteBackward(count: Int) throws {
+        if failDeletesRemaining > 0 { failDeletesRemaining -= 1; throw InserterError.postFailed }
+        ops.append(.delete(count))
+    }
 }
 
 final class FakeRangeReplacer: SessionRangeReplacing {
@@ -100,6 +104,61 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     try c.discardCurrentUtterance()
     #expect(key.ops == [.insert("嗨嗨"), .delete(2)])
     #expect(c.currentUtteranceLength == 0)
+}
+
+@Test func retractSessionDeletesOnlySuffixAndCountsGraphemes() throws {
+    let (c, key, _) = makeCoordinator()
+    let outcome = try c.retractSession(expectedScreenText: "保留。👨‍👩‍👧‍👦",
+                                       to: "保留。", axAnchor: nil)
+    #expect(outcome == .retracted)
+    #expect(key.ops == [.delete(1)])              // family emoji 是一個 grapheme，不是 11 個 UTF-16 units
+}
+
+@Test func retractSessionUsesOneVerifiedAXReplacement() throws {
+    let key = RecordingInserter(), paste = RecordingInserter(), ax = FakeRangeReplacer()
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
+    let outcome = try c.retractSession(expectedScreenText: "本階段全文", to: "", axAnchor: 42)
+    #expect(outcome == .retracted)
+    #expect(ax.verifyCalls.count == 1 && ax.calls.count == 1)
+    #expect(ax.verifyCalls[0].location == 42 && ax.verifyCalls[0].expected == "本階段全文")
+    #expect(ax.calls[0].location == 42 && ax.calls[0].expected == "本階段全文" && ax.calls[0].new == "")
+    #expect(key.ops.isEmpty)                       // AX 與 keystroke 不混用
+}
+
+@Test func retractSessionFailsClosedWhenPreviouslyAvailableAXBecomesUnsupported() throws {
+    let key = RecordingInserter(), paste = RecordingInserter(), ax = FakeRangeReplacer()
+    ax.verifyResult = .unsupported
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
+    let outcome = try c.retractSession(expectedScreenText: "保留。尾巴", to: "保留。", axAnchor: 7)
+    #expect(outcome == .fieldMismatch)
+    #expect(ax.calls.isEmpty)
+    #expect(key.ops.isEmpty && paste.ops.isEmpty)  // 起點曾有 AX、現在不可驗證：不得盲退 wrong field
+}
+
+@Test func retractSessionStopsAfterAXSecondStepFailure() throws {
+    let key = RecordingInserter(), paste = RecordingInserter(), ax = FakeRangeReplacer()
+    ax.replaceResult = .mismatch
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
+    let outcome = try c.retractSession(expectedScreenText: "本階段", to: "", axAnchor: 7)
+    #expect(outcome == .fieldMismatch)
+    #expect(ax.calls.count == 1)
+    #expect(key.ops.isEmpty && paste.ops.isEmpty)   // AX 可能留活選取，禁止 keystroke 收尾
+}
+
+@Test func retractSessionRestoresNonPrefixSelectionBaseline() throws {
+    let (c, key, _) = makeCoordinator()
+    let outcome = try c.retractSession(expectedScreenText: "改寫後", to: "原選取", axAnchor: nil)
+    #expect(outcome == .retracted)
+    #expect(key.ops == [.delete(3), .insert("原選取")])
+}
+
+@Test func retractSessionStopsWhenAXTextNoLongerMatches() throws {
+    let key = RecordingInserter(), paste = RecordingInserter(), ax = FakeRangeReplacer()
+    ax.verifyResult = .mismatch
+    let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax)
+    let outcome = try c.retractSession(expectedScreenText: "程式以為的全文", to: "", axAnchor: 7)
+    #expect(outcome == .fieldMismatch)
+    #expect(ax.calls.isEmpty && key.ops.isEmpty && paste.ops.isEmpty) // 使用者外改後分毫不碰
 }
 
 @Test func chunkerRespectsGraphemesAndUTF16Limit() {

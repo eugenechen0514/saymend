@@ -92,6 +92,28 @@ func keychainStoreRoundTrip() throws {
     #expect(reloaded.ocrContextEnabled)    // 開啟後持久化
 }
 
+@Test func escapeRetractionSettingsDefaultAndPersist() {
+    let (s, d) = freshSettings()
+    #expect(s.escapeRetractsPolishedText)       // #21 預設：整個聽寫階段一起退掉
+    #expect(!s.escapeRetractsFrozenSession)     // 凍結鐵律預設優先，不碰使用者可能手改的文字
+
+    s.escapeRetractsPolishedText = false
+    s.escapeRetractsFrozenSession = true
+    #expect(d.object(forKey: "escapeRetractsPolishedText") as? Bool == false) // persistence key 契約
+    #expect(d.object(forKey: "escapeRetractsFrozenSession") as? Bool == true)
+    let reloaded = AppSettings(defaults: d, secrets: InMemorySecretStore())
+    #expect(!reloaded.escapeRetractsPolishedText)
+    #expect(reloaded.escapeRetractsFrozenSession)
+}
+
+@Test func escapeRetractionSettingsRejectWrongTypes() {
+    let (s, d) = freshSettings()
+    d.set("false", forKey: "escapeRetractsPolishedText")
+    d.set(1, forKey: "escapeRetractsFrozenSession")
+    #expect(s.escapeRetractsPolishedText)       // 損毀時回落 true，而非 bool(forKey:) 的 false
+    #expect(!s.escapeRetractsFrozenSession)     // 損毀時回落 false，而非把數字視為 true
+}
+
 @Test func sessionLanguageOverrideIsTransient() {
     let suite = "test-\(UUID().uuidString)"
     let s = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())

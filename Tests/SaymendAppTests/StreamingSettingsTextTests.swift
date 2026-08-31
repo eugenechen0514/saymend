@@ -14,6 +14,56 @@ import SaymendCore
             + "只切成一個片段的短句，設 1 或 2 都會等到結束。")
     }
 
+    @Test func escapeRetractionCopyStatesBothDefaultsAndTheFrozenRisk() {
+        #expect(EscapeRetractionSettingsText.polishedExplanation ==
+            "預設開啟。聽寫仍在進行時按 Esc，會退掉本次已上屏的全部文字，包含已潤飾的部分。關閉時保留已經潤飾落定的文字。")
+        #expect(EscapeRetractionSettingsText.frozenExplanation ==
+            "預設關閉以遵守凍結後不再改寫的原則。開啟後，Esc 可能連你凍結後自己輸入的內容一起刪掉，而且無法復原。")
+    }
+
+    @MainActor @Test func escapeRetractionToggleBindingsWriteTheirMatchingSettings() {
+        let suite = "escape-bindings-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults, secrets: InMemorySecretStore())
+
+        let polished = EscapeRetractionSetting.polishedText.binding(to: settings)
+        let frozen = EscapeRetractionSetting.frozenSession.binding(to: settings)
+        #expect(polished.wrappedValue && !frozen.wrappedValue)
+        polished.wrappedValue = false
+        frozen.wrappedValue = true
+        #expect(!settings.escapeRetractsPolishedText)
+        #expect(settings.escapeRetractsFrozenSession)
+        #expect(defaults.object(forKey: "escapeRetractsPolishedText") as? Bool == false)
+        #expect(defaults.object(forKey: "escapeRetractsFrozenSession") as? Bool == true)
+    }
+
+    /// 從 production `SettingsView.body` 確認一般分頁仍有接線且未被 hidden，再展開真正的
+    /// `GeneralSettingsTab.body`（包含所有 onChange）尋找 Toggle label 與說明 Text。
+    /// 不能只建構最內層 child，否則 body/call site 被移除仍會假綠。
+    @MainActor @Test func settingsViewContainsVisibleEscapeRetractionWarnings() {
+        let suite = "escape-copy-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults, secrets: InMemorySecretStore())
+
+        let settingsBody = SettingsView(settings: settings).body
+        #expect(containsUnhiddenType(named: "SaymendApp.GeneralSettingsTab", in: settingsBody))
+
+        let tabBody = GeneralSettingsTab(settings: settings).body
+        let visible = unhiddenTextStrings(in: tabBody)
+        #expect(visible.contains("Esc 一併退掉已潤飾文字"))
+        #expect(visible.contains("凍結後按 Esc 仍退字"))
+        #expect(visible.contains(EscapeRetractionSettingsText.polishedExplanation))
+        #expect(visible.contains(EscapeRetractionSettingsText.frozenExplanation))
+
+        let hiddenAtCallSite = Group { GeneralSettingsTab(settings: settings).body.hidden() }
+        #expect(!unhiddenTextStrings(in: hiddenAtCallSite)
+            .contains(EscapeRetractionSettingsText.frozenExplanation))
+        let hiddenFromSettingsView = Group { GeneralSettingsTab(settings: settings).hidden() }
+        #expect(!containsUnhiddenType(named: "SaymendApp.GeneralSettingsTab", in: hiddenFromSettingsView))
+    }
+
     /// 不只找 opaque tree 裡的任意 String：該字串必須位在真正的 `Text` storage，
     /// 且祖先不能有 SwiftUI `_HiddenModifier`。這個 seam 精確守 `.id(text)` 與 `.hidden()`，
     /// 不宣稱取代 screenshot test 判斷 opacity、遮擋等一般像素可見性。
@@ -39,10 +89,28 @@ import SaymendCore
         #expect(!unhiddenTextStrings(in: siblingOracle).contains("hidden sibling"))
     }
 
+    private func containsUnhiddenType(named expected: String,
+                                      in value: Any,
+                                      hiddenByAncestor: Bool = false,
+                                      depth: Int = 0) -> Bool {
+        guard depth < 40 else { return false }
+        let mirror = Mirror(reflecting: value)
+        let directlyHidden = mirror.children.contains {
+            $0.label == "modifier"
+                && String(reflecting: Swift.type(of: $0.value)) == "SwiftUI._HiddenModifier"
+        }
+        let hidden = hiddenByAncestor || directlyHidden
+        if String(reflecting: Swift.type(of: value)) == expected { return !hidden }
+        return mirror.children.contains {
+            containsUnhiddenType(named: expected, in: $0.value,
+                                 hiddenByAncestor: hidden, depth: depth + 1)
+        }
+    }
+
     private func unhiddenTextStrings(in value: Any,
                                      hiddenByAncestor: Bool = false,
                                      depth: Int = 0) -> [String] {
-        guard depth < 40 else { return [] }
+        guard depth < 120 else { return [] }
         let mirror = Mirror(reflecting: value)
         let directlyHidden = mirror.children.contains {
             $0.label == "modifier"

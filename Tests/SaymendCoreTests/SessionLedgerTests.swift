@@ -48,6 +48,22 @@ import Testing
     #expect(u?.to == "呃你好")
 }
 
+@Test func escapeRetractionSeparatesPolishedTextFromDegradedRaw() {
+    var ledger = SessionLedger()
+    ledger.begin(axAnchor: nil)
+    ledger.commit("第一句。")
+    ledger.synchronizeObservedTail("第一句。第二句 raw")
+
+    #expect(ledger.escapeRetractionTarget(includingPolishedText: false) == "第一句。")
+    #expect(ledger.escapeRetractionTarget(includingPolishedText: true) == "")
+
+    ledger.begin(axAnchor: nil)
+    ledger.synchronizeObservedTail("未潤飾")
+    ledger.appendPolished("好。")
+    #expect(ledger.sessionText == "未潤飾好。")
+    #expect(ledger.escapeRetractionTarget(includingPolishedText: false) == "好。")
+}
+
 @Test func freezeAndArchive() {
     var l = SessionLedger()
     l.begin(axAnchor: nil)

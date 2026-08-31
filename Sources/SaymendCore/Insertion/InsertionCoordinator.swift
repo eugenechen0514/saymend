@@ -14,6 +14,12 @@ public final class InsertionCoordinator {
         case fieldMismatch     // AX 校驗不符（外力改動欄位）：放棄且呼叫端應凍結
     }
 
+    /// Esc 全聽寫階段退回。沒有 tailAdvanced：呼叫端提供的是按下 Esc 當下完整欄位鏡像。
+    public enum SessionRetractionOutcome: Equatable {
+        case retracted
+        case fieldMismatch
+    }
+
     /// 過期尾端回收結果（M10-C）。與另外兩個 outcome 型別分開：語意不同——
     /// 這條路徑失敗時原文完好留在螢幕上，呼叫端只需保留原文並說明原因，不必凍結、也無需急救。
     public enum StaleTailOutcome: Equatable {
@@ -198,7 +204,50 @@ public final class InsertionCoordinator {
         return .replaced
     }
 
-    /// Esc：退格清掉目前 utterance 已上屏的文字。
+    /// Esc：把本聽寫階段目前在欄位中的完整鏡像退回指定終點（issue #21）。
+    /// AX 可用時整段校驗後一次替換；keystroke 路徑若終點是既有 prefix，只退多出的 suffix，
+    /// 不把要保留的潤飾文字刪掉重打。非 prefix（例如恢復原選取）才走刪舊打新與既有回復鐵律。
+    public func retractSession(expectedScreenText: String,
+                               to retainedText: String,
+                               axAnchor: Int?) throws -> SessionRetractionOutcome {
+        guard expectedScreenText != retainedText else {
+            currentUtteranceText = ""
+            return .retracted
+        }
+        if let ax = rangeReplacer, let anchor = axAnchor {
+            switch ax.verifyRange(location: anchor, expected: expectedScreenText) {
+            case .unsupported:
+                // session 起點曾可驗證、現在卻讀不到，代表 target/focus 已不可證；
+                // 不得依過期 mirror 盲送整段 Backspace。只有一開始就沒有 AX anchor 才走 keystroke。
+                return .fieldMismatch
+            case .mismatch:
+                return .fieldMismatch
+            case .replaced:
+                guard ax.replaceVerifiedRange(location: anchor, expected: expectedScreenText,
+                                              with: retainedText) == .replaced else {
+                    return .fieldMismatch
+                }
+                currentUtteranceText = ""
+                insertCounter += 1
+                return .retracted
+            }
+        }
+        if expectedScreenText.hasPrefix(retainedText) {
+            let suffix = expectedScreenText.dropFirst(retainedText.count)
+            if !suffix.isEmpty {
+                try keystroke.deleteBackward(count: suffix.count)
+                insertCounter += 1
+            }
+        } else {
+            try deleteAndRetype(expectedLength: expectedScreenText.count,
+                                originalText: expectedScreenText,
+                                newText: retainedText)
+        }
+        currentUtteranceText = ""
+        return .retracted
+    }
+
+    /// 舊的 utterance 級 primitive；保留給直接單元測試與非 session 呼叫端。
     public func discardCurrentUtterance() throws {
         let count = currentUtteranceText.count
         if count > 0 {
