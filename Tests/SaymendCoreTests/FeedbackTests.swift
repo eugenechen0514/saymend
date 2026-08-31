@@ -5,9 +5,9 @@ import Testing
 @Suite struct FeedbackTests {
     @Test func streamingExtendsUnderlineSpan() {
         let fb = FakeFeedback()
-        let reader = FakeFieldReader()
+        let reader = FakeFieldReader(), ax = FakeRangeReplacer()
         reader.context = FieldContext(hasFocusedElement: true, caretLocation: 10)
-        let (c, _, _, _, _, _) = makeController(fieldReader: reader, feedback: fb)
+        let (c, _, _, _, _, _) = makeController(rangeReplacer: ax, fieldReader: reader, feedback: fb)
         c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
         c.handleTranscript(.finalized("第一句"), at: 11.0)
         let updates = fb.events.compactMap { if case .updated(let u) = $0 { return u }; return nil }

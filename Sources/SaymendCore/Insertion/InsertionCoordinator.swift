@@ -72,7 +72,33 @@ public final class InsertionCoordinator {
         currentUtteranceText = ""
     }
 
-    /// finalized 片段上屏。主 inserter 失敗時換另一個（規格 §5.2 逐層降級）。
+    /// Production raw finalized：以 session 起始 AX identity＋目前完整 session 文字做 verified
+    /// replacement，將 raw 原子追加至原 field。事前 snapshot＋global CGEvent 有 TOCTOU，不能替代此 primitive。
+    public func insertFinalizedVerified(_ text: String,
+                                        expectedScreenText: String,
+                                        axAnchor: Int?,
+                                        fieldIdentity: FieldIdentity?) -> SessionRetractionOutcome {
+        guard !text.isEmpty else { return .retracted }
+        guard let ax = rangeReplacer, let anchor = axAnchor, let fieldIdentity else {
+            return .fieldMismatch
+        }
+        switch ax.verifyRange(fieldIdentity: fieldIdentity, location: anchor,
+                              expected: expectedScreenText) {
+        case .unsupported, .mismatch:
+            return .fieldMismatch
+        case .replaced:
+            guard ax.replaceVerifiedRange(fieldIdentity: fieldIdentity, location: anchor,
+                                          expected: expectedScreenText,
+                                          with: expectedScreenText + text) == .replaced else {
+                return .fieldMismatch
+            }
+            currentUtteranceText += text
+            insertCounter += 1
+            return .retracted
+        }
+    }
+
+    /// 低階／舊測試 finalized primitive；production controller 只在明示 test hook 下使用。
     public func insertFinalized(_ text: String) throws {
         guard !text.isEmpty else { return }
         try insertWithFallback(text)
@@ -211,8 +237,7 @@ public final class InsertionCoordinator {
             case .mismatch:
                 return .fieldMismatch
             case .unsupported:
-                if fieldIdentity != nil { return .fieldMismatch } // session-bound write 不得退 global keystroke
-                break   // 僅低階、無 identity caller 保留既有 keystroke 路徑
+                return .fieldMismatch // 進入 AX branch 代表有 identity；session-bound write 不退 global keystroke
             case .replaced:   // ＝驗證通過
                 if ax.replaceVerifiedRange(fieldIdentity: fieldIdentity, location: anchor,
                                            expected: combined, with: newText) == .replaced {

@@ -35,6 +35,8 @@ public final class FieldIdentityRegistry<Element> {
         return areEqual(original, element)
     }
 
+    public var count: Int { elements.count }
+
     public func release(_ identity: FieldIdentity?) {
         guard let identity else { return }
         elements.removeValue(forKey: identity.token)

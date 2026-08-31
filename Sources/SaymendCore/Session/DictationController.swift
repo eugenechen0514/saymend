@@ -335,10 +335,14 @@ public final class DictationController {
             // M2 遺留債：聽寫中焦點切進密碼欄位（Tab、程式切換焦點——滑鼠/鍵盤活動已由凍結涵蓋，
             // 但焦點可以不經這兩者移動）。規格 §5.3：密碼欄位一個字都不能進。硬停整個 session。
             let focusedField = fieldReader.snapshot()
-            if focusedField.isSecure {
+            // snapshot 可能為另一個 candidate field 建 token；只有 ledger identity 是 adopted lease。
+            // 所有未採用 token 一律在本事件結束時 release，selectionPending 也不能漏。
+            defer {
                 if focusedField.fieldIdentity != ledger.fieldIdentity {
                     fieldReader.releaseFieldIdentity(focusedField.fieldIdentity)
                 }
+            }
+            if focusedField.isSecure {
                 abortForSecureField()
                 return
             }
@@ -348,26 +352,8 @@ public final class DictationController {
             if case .selectionPending = sessionTarget {
                 coordinator.accumulateFinalized(text)      // 緩衝：不上屏（M3 設計裁決 1）
             } else {
-                // Session 起始有 AX identity 時，每次 raw 寫入前都重驗目前 focused field。
-                // 程式化切焦點不一定產生 userActivity；只靠 freeze event 會把文字打進另一欄。
-                if !allowsUnverifiedWritesForTesting {
-                    let current = focusedField
-                    guard let expectedField = ledger.fieldIdentity,
-                          current.fieldIdentity == expectedField else {
-                        if current.fieldIdentity != ledger.fieldIdentity {
-                            fieldReader.releaseFieldIdentity(current.fieldIdentity)
-                        }
-                        recordInsertEvent(kind: "insertSkipped", classification: "fieldIdentityMismatch",
-                                          utteranceText: text)
-                        if !ledger.frozen {
-                            ledger.freeze()
-                            feedback?.sessionFrozen()
-                        }
-                        clipboardRescue?(text)
-                        hud.present(.notice("欄位已切換，內容已入剪貼簿"))
-                        return
-                    }
-                }
+                // Production raw write 不採「snapshot 後再 global key/paste」：外部 App 可在兩者之間
+                // 切 focus。真正寫入由 insertFinalizedVerified 在同一 AX operation 內重驗 identity＋全文。
                 // 凍結守衛（合併阻擋級 finding）：raw 插入路徑先前缺這道守衛，其他每條落地路徑都有
                 // （applyNewContent:599／wasBuffered:545／applyCorrection 等）。freeze() 只設 frozen 旗標、
                 // 不動 internalPhase，而本函式開頭的相位守衛放 .finishing 通過。Whisper 遠端是批次上傳：
@@ -384,15 +370,37 @@ public final class DictationController {
                     hud.present(.notice("已凍結，內容已入剪貼簿"))
                     return
                 }
-                do {
-                    try coordinator.insertFinalized(text)
-                    displayedSessionText += text
-                    emitFeedback()                             // 底線延伸至新上屏文字
-                } catch {
-                    recordInsertEvent(kind: "insertFailed", classification: "rawInsertFailed",
-                                      utteranceText: text, detail: "\(error)")
-                    clipboardRescue?(text)
-                    hud.present(.notice("插入失敗，內容已入剪貼簿"))
+                if allowsUnverifiedWritesForTesting {
+                    do {
+                        try coordinator.insertFinalized(text)
+                        displayedSessionText += text
+                        emitFeedback()
+                    } catch {
+                        recordInsertEvent(kind: "insertFailed", classification: "rawInsertFailed",
+                                          utteranceText: text, detail: "\(error)")
+                        clipboardRescue?(text)
+                        hud.present(.notice("插入失敗，內容已入剪貼簿"))
+                    }
+                } else {
+                    switch coordinator.insertFinalizedVerified(
+                        text,
+                        expectedScreenText: displayedSessionText,
+                        axAnchor: ledger.axAnchor,
+                        fieldIdentity: ledger.fieldIdentity
+                    ) {
+                    case .retracted:
+                        displayedSessionText += text
+                        emitFeedback()
+                    case .fieldMismatch:
+                        recordInsertEvent(kind: "insertSkipped", classification: "fieldIdentityMismatch",
+                                          utteranceText: text)
+                        if !ledger.frozen {
+                            ledger.freeze()
+                            feedback?.sessionFrozen()
+                        }
+                        clipboardRescue?(text)
+                        hud.present(.notice("無法驗證原欄位，內容已入剪貼簿"))
+                    }
                 }
             }
         case .transcribing:

@@ -259,7 +259,8 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     #expect(!key.ops.contains(.insert("新文")))
 }
 
-@Test func replaceSessionAXUnsupportedFallsBackToKeystroke() throws {
+@Test func replaceSessionWithoutIdentityKeepsLegacyKeystrokeFallback() throws {
+    // 低階 API 相容性；production controller 的 session-bound call 一律帶 identity 並 fail closed。
     let key = RecordingInserter(); let paste = RecordingInserter()
     let ax = FakeRangeReplacer(); ax.verifyResult = .unsupported
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: ax, pasteThreshold: 100)

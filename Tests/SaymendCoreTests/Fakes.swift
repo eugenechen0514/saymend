@@ -42,6 +42,10 @@ final class FakeASR: ASREngine {
 
 /// 可手動放行的假意圖服務
 ///
+/// 已知 test-hardening 限制：多數既有 controller tests 直接 await `lastIntentTask.value`，沒有
+/// bounded watchdog；若 mutation 額外建立一個 gated intent，應紅的測試可能改成掛住。正式行為不受影響，
+/// 但新增 gated regression 應優先用 `awaitBounded` 並在 timeout 時 release/cancel cleanup。
+///
 /// release() 與 process() 的登記順序無關（order-independent latch）：因 process 以
 /// fire-and-forget Task 派發，其任務體要等主 actor 讓出才起跑，呼叫端（測試）可能在
 /// 任務登記 gate *之前* 就呼叫 release()。此時把 release 記入 pendingReleases，待 process
@@ -122,6 +126,9 @@ final class FakeFieldReader: FieldContextProviding {
 /// 有狀態的欄位環境：TextInserter、FieldContextProviding、AX range 全部操作同一份文字、caret
 /// 與 focus。只看 `.delete(N)` 無法證明刪的是本 session；這個 fake 直接讓測試斷言最終欄位內容。
 final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, SessionRangeReplacing {
+    var afterNextSnapshot: (() -> Void)?
+    var verifyOverride: RangeReplaceResult?
+    var replaceOverride: RangeReplaceResult?
     var preservingCaretOverride: RangeReplaceResult?
     var failInsertsRemaining = 0
     private struct State {
@@ -129,7 +136,7 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
         var caretUTF16: Int
         var isSecure: Bool
         var selectedRange: FieldContext.SelectedRange?
-        var identity: FieldIdentity
+        var identity: FieldIdentity?
     }
 
     private var fields: [String: State] = [:]
@@ -138,9 +145,8 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
 
     func addField(_ id: String, text: String, caretUTF16: Int? = nil,
                   isSecure: Bool = false) {
-        let identity = identityRegistry.identity(for: id)
         fields[id] = State(text: text, caretUTF16: caretUTF16 ?? text.utf16.count,
-                           isSecure: isSecure, selectedRange: nil, identity: identity)
+                           isSecure: isSecure, selectedRange: nil, identity: nil)
         if focusedID == nil { focusedID = id }
     }
 
@@ -158,23 +164,33 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
 
     func typeUserText(_ text: String) throws { try insert(text) }
 
+    var identityEntryCount: Int { identityRegistry.count }
+
     func snapshot() -> FieldContext {
-        guard let state = focusedState else { return FieldContext() }
+        guard let focusedID, var state = fields[focusedID] else { return FieldContext() }
+        if state.identity == nil {
+            state.identity = identityRegistry.identity(for: focusedID)
+            fields[focusedID] = state
+        }
         let selectedText: String? = state.selectedRange.flatMap { selection in
             guard let target = range(in: state.text, location: selection.location,
                                      utf16Length: selection.length) else { return nil }
             return String(state.text[target])
         }
-        return FieldContext(hasFocusedElement: true, isSecure: state.isSecure,
-                            caretLocation: state.caretUTF16, fieldIdentity: state.identity,
-                            selectedRange: state.selectedRange, selectedText: selectedText)
+        let context = FieldContext(hasFocusedElement: true, isSecure: state.isSecure,
+                                   caretLocation: state.caretUTF16, fieldIdentity: state.identity,
+                                   selectedRange: state.selectedRange, selectedText: selectedText)
+        let hook = afterNextSnapshot
+        afterNextSnapshot = nil
+        hook?()                                         // 模擬 snapshot 與 physical write 間外部切 focus
+        return context
     }
 
     func releaseFieldIdentity(_ identity: FieldIdentity?) {
         guard let identity else { return }
         for id in fields.keys where fields[id]?.identity == identity {
             identityRegistry.release(identity)
-            fields[id]!.identity = identityRegistry.identity(for: id)
+            fields[id]!.identity = nil
         }
     }
 
@@ -209,6 +225,7 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
 
     func verifyRange(fieldIdentity: FieldIdentity, location: Int,
                      expected: String) -> RangeReplaceResult {
+        if let verifyOverride { return verifyOverride }
         guard let focusedID, let state = fields[focusedID] else { return .unsupported }
         guard identityRegistry.matches(fieldIdentity, element: focusedID) else { return .mismatch }
         return range(in: state.text, location: location, expected: expected) == nil ? .mismatch : .replaced
@@ -216,7 +233,8 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
 
     func replaceVerifiedRange(fieldIdentity: FieldIdentity, location: Int,
                               expected: String, with newText: String) -> RangeReplaceResult {
-        replace(fieldIdentity: fieldIdentity, location: location, expected: expected,
+        if let replaceOverride { return replaceOverride }
+        return replace(fieldIdentity: fieldIdentity, location: location, expected: expected,
                 with: newText, preserveCaret: false)
     }
 
