@@ -1,6 +1,8 @@
 import Foundation
 @testable import SaymendCore
 
+let defaultTestFieldIdentity = FieldIdentity(token: 1)
+
 enum FakeAudioError: Error { case startFailed }
 
 final class FakeAudio: AudioCaptureService {
@@ -106,8 +108,176 @@ final class FakeHUD: HUDPresenting {
 }
 
 final class FakeFieldReader: FieldContextProviding {
+    var suppliesDefaultFieldIdentity = true
     var context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: nil)
-    func snapshot() -> FieldContext { context }
+    func snapshot() -> FieldContext {
+        var value = context
+        if suppliesDefaultFieldIdentity, value.hasFocusedElement, value.fieldIdentity == nil {
+            value.fieldIdentity = defaultTestFieldIdentity
+        }
+        return value
+    }
+}
+
+/// 有狀態的欄位環境：TextInserter、FieldContextProviding、AX range 全部操作同一份文字、caret
+/// 與 focus。只看 `.delete(N)` 無法證明刪的是本 session；這個 fake 直接讓測試斷言最終欄位內容。
+final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, SessionRangeReplacing {
+    var preservingCaretOverride: RangeReplaceResult?
+    var failInsertsRemaining = 0
+    private struct State {
+        var text: String
+        var caretUTF16: Int
+        var isSecure: Bool
+        var selectedRange: FieldContext.SelectedRange?
+        var identity: FieldIdentity
+    }
+
+    private var fields: [String: State] = [:]
+    private var focusedID: String?
+    private let identityRegistry = FieldIdentityRegistry<String>(areEqual: ==)
+
+    func addField(_ id: String, text: String, caretUTF16: Int? = nil,
+                  isSecure: Bool = false) {
+        let identity = identityRegistry.identity(for: id)
+        fields[id] = State(text: text, caretUTF16: caretUTF16 ?? text.utf16.count,
+                           isSecure: isSecure, selectedRange: nil, identity: identity)
+        if focusedID == nil { focusedID = id }
+    }
+
+    func focus(_ id: String) {
+        precondition(fields[id] != nil)
+        focusedID = id
+    }
+
+    func text(in id: String) -> String { fields[id]!.text }
+
+    func select(in id: String, location: Int, length: Int) {
+        fields[id]!.selectedRange = .init(location: location, length: length)
+        fields[id]!.caretUTF16 = location + length
+    }
+
+    func typeUserText(_ text: String) throws { try insert(text) }
+
+    func snapshot() -> FieldContext {
+        guard let state = focusedState else { return FieldContext() }
+        let selectedText: String? = state.selectedRange.flatMap { selection in
+            guard let target = range(in: state.text, location: selection.location,
+                                     utf16Length: selection.length) else { return nil }
+            return String(state.text[target])
+        }
+        return FieldContext(hasFocusedElement: true, isSecure: state.isSecure,
+                            caretLocation: state.caretUTF16, fieldIdentity: state.identity,
+                            selectedRange: state.selectedRange, selectedText: selectedText)
+    }
+
+    func releaseFieldIdentity(_ identity: FieldIdentity?) {
+        guard let identity else { return }
+        for id in fields.keys where fields[id]?.identity == identity {
+            identityRegistry.release(identity)
+            fields[id]!.identity = identityRegistry.identity(for: id)
+        }
+    }
+
+    func insert(_ text: String) throws {
+        if failInsertsRemaining > 0 {
+            failInsertsRemaining -= 1
+            throw InserterError.postFailed
+        }
+        try mutateFocused { state in
+            guard let index = stringIndex(in: state.text, utf16Offset: state.caretUTF16) else {
+                throw InserterError.postFailed
+            }
+            state.text.insert(contentsOf: text, at: index)
+            state.caretUTF16 += text.utf16.count
+        }
+    }
+
+    func deleteBackward(count: Int) throws {
+        try mutateFocused { state in
+            guard var start = stringIndex(in: state.text, utf16Offset: state.caretUTF16) else {
+                throw InserterError.postFailed
+            }
+            let end = start
+            for _ in 0..<count where start > state.text.startIndex {
+                start = state.text.index(before: start)
+            }
+            let newCaret = state.text[..<start].utf16.count
+            state.text.removeSubrange(start..<end)
+            state.caretUTF16 = newCaret
+        }
+    }
+
+    func verifyRange(fieldIdentity: FieldIdentity, location: Int,
+                     expected: String) -> RangeReplaceResult {
+        guard let focusedID, let state = fields[focusedID] else { return .unsupported }
+        guard identityRegistry.matches(fieldIdentity, element: focusedID) else { return .mismatch }
+        return range(in: state.text, location: location, expected: expected) == nil ? .mismatch : .replaced
+    }
+
+    func replaceVerifiedRange(fieldIdentity: FieldIdentity, location: Int,
+                              expected: String, with newText: String) -> RangeReplaceResult {
+        replace(fieldIdentity: fieldIdentity, location: location, expected: expected,
+                with: newText, preserveCaret: false)
+    }
+
+    func replaceVerifiedRangePreservingCaret(fieldIdentity: FieldIdentity, location: Int,
+                                             expected: String, with newText: String) -> RangeReplaceResult {
+        if let preservingCaretOverride { return preservingCaretOverride }
+        return replace(fieldIdentity: fieldIdentity, location: location, expected: expected,
+                       with: newText, preserveCaret: true)
+    }
+
+    private var focusedState: State? {
+        guard let focusedID else { return nil }
+        return fields[focusedID]
+    }
+
+    private func mutateFocused(_ body: (inout State) throws -> Void) throws {
+        guard let focusedID, var state = fields[focusedID] else { throw InserterError.postFailed }
+        try body(&state)
+        fields[focusedID] = state
+    }
+
+    private func replace(fieldIdentity: FieldIdentity, location: Int,
+                         expected: String, with newText: String,
+                         preserveCaret: Bool) -> RangeReplaceResult {
+        guard let focusedID, var state = fields[focusedID] else { return .unsupported }
+        guard identityRegistry.matches(fieldIdentity, element: focusedID) else { return .mismatch }
+        guard let target = range(in: state.text, location: location, expected: expected) else {
+            return .mismatch
+        }
+        let oldCaret = state.caretUTF16
+        state.text.replaceSubrange(target, with: newText)
+        state.selectedRange = nil
+        if preserveCaret {
+            state.caretUTF16 = caretAfterReplacement(current: oldCaret, location: location,
+                                                     oldLength: expected.utf16.count,
+                                                     newLength: newText.utf16.count)
+        } else {
+            state.caretUTF16 = location + newText.utf16.count
+        }
+        fields[focusedID] = state
+        return .replaced
+    }
+
+    private func range(in text: String, location: Int, expected: String) -> Range<String.Index>? {
+        guard let target = range(in: text, location: location, utf16Length: expected.utf16.count),
+              String(text[target]) == expected else { return nil }
+        return target
+    }
+
+    private func range(in text: String, location: Int, utf16Length: Int) -> Range<String.Index>? {
+        guard let lower = stringIndex(in: text, utf16Offset: location),
+              let upper = stringIndex(in: text, utf16Offset: location + utf16Length) else { return nil }
+        return lower..<upper
+    }
+
+    private func stringIndex(in text: String, utf16Offset: Int) -> String.Index? {
+        guard utf16Offset >= 0,
+              let index = text.utf16.index(text.utf16.startIndex, offsetBy: utf16Offset,
+                                           limitedBy: text.utf16.endIndex) else { return nil }
+        return String.Index(index, within: text)
+    }
 }
 
 /// 歷史 spy
@@ -160,14 +330,47 @@ func makeController(
     let hud = FakeHUD()
     let suite = "test-\(UUID().uuidString)"
     let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+    let effectiveFieldReader: FakeFieldReader = fieldReader ?? {
+        let reader = FakeFieldReader()
+        reader.suppliesDefaultFieldIdentity = false
+        return reader
+    }()
     let controller = DictationController(
         audio: audio, asr: asr, coordinator: coordinator,
         intent: polisher, hud: hud, settings: settings,
         clipboardRescue: clipboard.map { spy in { spy.rescue($0) } },
-        fieldReader: fieldReader,
+        fieldReader: effectiveFieldReader,
         feedback: feedback,
         history: history,
         contextOCR: contextOCR
     )
+    if fieldReader == nil, rangeReplacer == nil {
+        controller.allowUnverifiedWritesForTesting()
+    }
     return (controller, audio, asr, key, polisher, hud)
+}
+
+@MainActor
+func makeStatefulController(
+    environment: StatefulFieldEnvironment,
+    polisher: GatedIntentService = GatedIntentService(),
+    supportsAX: Bool = true,
+    clipboard: ClipboardSpy? = nil,
+    history: FakeHistory? = nil
+) -> (DictationController, FakeAudio, FakeASR, FakeHUD) {
+    let audio = FakeAudio(), asr = FakeASR(), hud = FakeHUD()
+    let coordinator = InsertionCoordinator(keystroke: environment, paste: environment,
+                                           rangeReplacer: supportsAX ? environment : nil,
+                                           pasteThreshold: 100)
+    let suite = "stateful-field-\(UUID().uuidString)"
+    let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!,
+                               secrets: InMemorySecretStore())
+    let controller = DictationController(
+        audio: audio, asr: asr, coordinator: coordinator,
+        intent: polisher, hud: hud, settings: settings,
+        clipboardRescue: clipboard.map { spy in { spy.rescue($0) } },
+        fieldReader: environment,
+        history: history
+    )
+    return (controller, audio, asr, hud)
 }

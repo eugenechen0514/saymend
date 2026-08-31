@@ -18,9 +18,10 @@ import Testing
         let fb = FakeFeedback()
         let intent = GatedIntentService()
         intent.outcome = .newContent("第一句。")
-        let reader = FakeFieldReader()
+        let reader = FakeFieldReader(), ax = FakeRangeReplacer()
         reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0)
-        let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader, feedback: fb)
+        let (c, _, _, _, _, _) = makeController(polisher: intent, rangeReplacer: ax,
+                                                fieldReader: reader, feedback: fb)
         c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
         c.handleTranscript(.finalized("第一句"), at: 11.0)
         c.tick(at: 12.6)

@@ -7,7 +7,7 @@ import SaymendCore
 /// `Text` visibility test seam，避免警告只存在於註解或被 `.hidden()` 遮掉。
 enum EscapeRetractionSettingsText {
     static let polishedExplanation =
-        "預設開啟。聽寫仍在進行時按 Esc，會退掉本次已上屏的全部文字，包含已潤飾的部分。關閉時保留已經潤飾落定的文字。"
+        "預設開啟。聽寫仍在進行時按 Esc，會退掉本次已上屏的全部文字，包含已潤飾的部分。關閉時保留已經潤飾落定的文字。若目前 App 無法驗證原欄位，為避免刪錯字會保留內容並提示。"
     static let frozenExplanation =
         "預設關閉以遵守凍結後不再改寫的原則。開啟後，Esc 可能連你凍結後自己輸入的內容一起刪掉，而且無法復原。"
 }

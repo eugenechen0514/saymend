@@ -3,10 +3,12 @@ import Testing
 
 @Test func beginResetsStateAndStoresAnchor() {
     var l = SessionLedger()
-    l.begin(axAnchor: 42)
+    let identity = FieldIdentity(token: 42)
+    l.begin(axAnchor: 42, fieldIdentity: identity)
     #expect(l.isActive)
     #expect(l.sessionText == "")
     #expect(l.axAnchor == 42)
+    #expect(l.fieldIdentity == identity)
     #expect(!l.frozen)
     #expect(!l.canUndo)
 }
@@ -76,6 +78,7 @@ import Testing
     #expect(l.sessionText == "")
     #expect(!l.frozen)
     #expect(l.axAnchor == nil)
+    #expect(l.fieldIdentity == nil)
     #expect(!l.canUndo)
 }
 

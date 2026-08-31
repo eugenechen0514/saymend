@@ -57,7 +57,7 @@ public final class DictationController {
     /// 鐵律最後手段：原文救不回時交給剪貼簿（app 端接 NSPasteboard）
     private let clipboardRescue: ((String) -> Void)?
     /// 聚焦欄位快照：密碼欄位拒絕聽寫、session 起點取 AX 錨位（規格 §4.6／§5.3）
-    private let fieldReader: (any FieldContextProviding)?
+    private let fieldReader: any FieldContextProviding
     /// 視覺回饋層（規格 §3.5）：Core 只發語意事件，App 端 FeedbackCoordinator 決定畫不畫、畫哪裡
     private let feedback: (any SessionFeedbackPresenting)?
     /// 聽寫歷史（規格 §4.9）：nil＝不記錄。寫入失敗不得影響聽寫主流程。
@@ -72,7 +72,9 @@ public final class DictationController {
     /// 本聽寫階段目前實際掌控的欄位文字鏡像，包含已閉合但 intent 尚在途的 raw。
     /// `ledger.sessionText` 只記已落定結果，無法單獨支撐 issue #21 的全階段 Esc。
     private var displayedSessionText = ""
-
+    /// 舊測試專用：保留 issue #21 前的 keystroke polish harness，避免非欄位安全測試
+    /// 被迫改驗 AX 實作。production 永遠 false；資料安全 tests 使用 stateful verified field。
+    private var allowsUnverifiedWritesForTesting = false
     private var pressedAt: TimeInterval?
     private var readerTask: Task<Void, Never>?
     /// 60 秒靜音逾時結束：排空後直接封存，不進延續窗（規格 §3.4 逾時＝凍結觸發器）
@@ -126,7 +128,7 @@ public final class DictationController {
                 settings: AppSettings,
                 segmenter: UtteranceSegmenter = UtteranceSegmenter(),
                 clipboardRescue: ((String) -> Void)? = nil,
-                fieldReader: (any FieldContextProviding)? = nil,
+                fieldReader: any FieldContextProviding,
                 feedback: (any SessionFeedbackPresenting)? = nil,
                 history: (any HistoryRecording)? = nil,
                 contextOCR: (() async -> String?)? = nil,
@@ -144,6 +146,11 @@ public final class DictationController {
         self.history = history
         self.contextOCR = contextOCR
         self.now = now
+    }
+
+    /// @testable-only convention seam；production source 不得呼叫。
+    func allowUnverifiedWritesForTesting() {
+        allowsUnverifiedWritesForTesting = true
     }
 
     // MARK: - 熱鍵事件
@@ -203,30 +210,39 @@ public final class DictationController {
         if case .selectionPending = sessionTarget {
             coordinator.clearCurrentUtterance()        // 緩衝：螢幕沒字，不得退格（須在 archiveSession 重置 sessionTarget 前判斷）
         } else if !ledger.frozen || settings.escapeRetractsFrozenSession {
+            let currentField = fieldReader.snapshot()
             // 即使使用者 opt-in 允許凍結後退字，secure field 仍是不可覆蓋的絕對 veto。
-            if fieldReader?.snapshot().isSecure == true {
+            if currentField.isSecure {
+                if currentField.fieldIdentity != ledger.fieldIdentity {
+                    fieldReader.releaseFieldIdentity(currentField.fieldIdentity)
+                }
                 failureNotice = "目前是密碼欄位，未退字"
+            } else if ledger.fieldIdentity == nil {
+                fieldReader.releaseFieldIdentity(currentField.fieldIdentity)
+                failureNotice = "無法驗證原欄位，未退字"
+            } else if let expectedField = ledger.fieldIdentity,
+                      currentField.fieldIdentity != expectedField {
+                fieldReader.releaseFieldIdentity(currentField.fieldIdentity)
+                failureNotice = "欄位已變動，未退字"
+            } else if !coordinator.canVerifySessionRange(
+                axAnchor: ledger.axAnchor, fieldIdentity: ledger.fieldIdentity) {
+                // Whole-session deletion 比舊的 current-utterance Backspace 風險大得多：不論 frozen 與否，
+                // 缺 identity-bound AX range 都 fail closed，不能把 mirror 長度盲送到目前 focused field。
+                failureNotice = ledger.frozen
+                    ? "已凍結且無法驗證原欄位，未退字"
+                    : "無法驗證原欄位，未退字"
             } else {
                 let retained = ledger.escapeRetractionTarget(
                     includingPolishedText: settings.escapeRetractsPolishedText)
-                do {
-                    switch try coordinator.retractSession(expectedScreenText: displayedSessionText,
-                                                          to: retained,
-                                                          axAnchor: ledger.axAnchor) {
-                    case .retracted:
-                        displayedSessionText = retained
-                        historyFinalOverride = retained
-                    case .fieldMismatch:
-                        failureNotice = "欄位已變動，未退字"
-                    }
-                } catch InserterError.replaceFailedRestored {
-                    failureNotice = "退字失敗，原文已回復"
-                } catch InserterError.lostText(let original) {
-                    displayedSessionText = ""          // controlled text 已無法信任，不得再按舊 mirror 退格
-                    clipboardRescue?(original)
-                    failureNotice = "退字失敗，原文已入剪貼簿"
-                } catch {
-                    failureNotice = "退字失敗"
+                switch coordinator.retractSession(expectedScreenText: displayedSessionText,
+                                                  to: retained,
+                                                  axAnchor: ledger.axAnchor,
+                                                  fieldIdentity: ledger.fieldIdentity) {
+                case .retracted:
+                    displayedSessionText = retained
+                    historyFinalOverride = retained
+                case .fieldMismatch:
+                    failureNotice = "欄位已變動，未退字"
                 }
             }
         }
@@ -318,7 +334,11 @@ public final class DictationController {
         case .finalized(let text, let quality):
             // M2 遺留債：聽寫中焦點切進密碼欄位（Tab、程式切換焦點——滑鼠/鍵盤活動已由凍結涵蓋，
             // 但焦點可以不經這兩者移動）。規格 §5.3：密碼欄位一個字都不能進。硬停整個 session。
-            if let field = fieldReader?.snapshot(), field.isSecure {
+            let focusedField = fieldReader.snapshot()
+            if focusedField.isSecure {
+                if focusedField.fieldIdentity != ledger.fieldIdentity {
+                    fieldReader.releaseFieldIdentity(focusedField.fieldIdentity)
+                }
                 abortForSecureField()
                 return
             }
@@ -328,6 +348,26 @@ public final class DictationController {
             if case .selectionPending = sessionTarget {
                 coordinator.accumulateFinalized(text)      // 緩衝：不上屏（M3 設計裁決 1）
             } else {
+                // Session 起始有 AX identity 時，每次 raw 寫入前都重驗目前 focused field。
+                // 程式化切焦點不一定產生 userActivity；只靠 freeze event 會把文字打進另一欄。
+                if !allowsUnverifiedWritesForTesting {
+                    let current = focusedField
+                    guard let expectedField = ledger.fieldIdentity,
+                          current.fieldIdentity == expectedField else {
+                        if current.fieldIdentity != ledger.fieldIdentity {
+                            fieldReader.releaseFieldIdentity(current.fieldIdentity)
+                        }
+                        recordInsertEvent(kind: "insertSkipped", classification: "fieldIdentityMismatch",
+                                          utteranceText: text)
+                        if !ledger.frozen {
+                            ledger.freeze()
+                            feedback?.sessionFrozen()
+                        }
+                        clipboardRescue?(text)
+                        hud.present(.notice("欄位已切換，內容已入剪貼簿"))
+                        return
+                    }
+                }
                 // 凍結守衛（合併阻擋級 finding）：raw 插入路徑先前缺這道守衛，其他每條落地路徑都有
                 // （applyNewContent:599／wasBuffered:545／applyCorrection 等）。freeze() 只設 frozen 旗標、
                 // 不動 internalPhase，而本函式開頭的相位守衛放 .finishing 通過。Whisper 遠端是批次上傳：
@@ -349,7 +389,10 @@ public final class DictationController {
                     displayedSessionText += text
                     emitFeedback()                             // 底線延伸至新上屏文字
                 } catch {
-                    hud.present(.notice("插入失敗"))
+                    recordInsertEvent(kind: "insertFailed", classification: "rawInsertFailed",
+                                      utteranceText: text, detail: "\(error)")
+                    clipboardRescue?(text)
+                    hud.present(.notice("插入失敗，內容已入剪貼簿"))
                 }
             }
         case .transcribing:
@@ -460,17 +503,35 @@ public final class DictationController {
 
     private func startListening(mode: ListeningMode, at t: TimeInterval) {
         // 密碼欄位拒絕（規格 §5.3）：不錄音、不送 LLM、不開 session
-        let field = fieldReader?.snapshot() ?? FieldContext()
+        var field = fieldReader.snapshot()
         if field.isSecure {
             // 延續窗中改在密碼欄按下：封存前一 session（含清除 session 級語系覆蓋，設計裁決 4）。
             // hud.present 須在 archiveSession（會發 .hidden）之後，否則 notice 被蓋掉。
             archiveSession()
+            fieldReader.releaseFieldIdentity(field.fieldIdentity) // secure snapshot 未被 ledger 採用
             hud.present(.notice("密碼欄位不聽寫"))
             return
         }
+        // 延續窗只有同一個 AX element 才能 resume。程式化切焦點不一定產生鍵鼠活動；
+        // identity 不同／不可驗證時先封存舊 session，這次按鍵改開新 session。
+        let mustArchiveOldSession = (isLingering && ledger.isActive
+                                     && (ledger.fieldIdentity == nil
+                                         || field.fieldIdentity != ledger.fieldIdentity))
+            || (!isLingering && ledger.isActive)
+        if mustArchiveOldSession {
+            // finishing 同欄也必須重抓：第一次 snapshot 拿到的 token 會被 archive release。
+            archiveSession()
+            fieldReader.releaseFieldIdentity(field.fieldIdentity) // 第一份 snapshot 未被新 ledger 採用
+            field = fieldReader.snapshot()
+            if field.isSecure {
+                fieldReader.releaseFieldIdentity(field.fieldIdentity)
+                hud.present(.notice("密碼欄位不聽寫"))
+                return
+            }
+        }
         do {
             readerTask?.cancel()
-            let resuming = isLingering && ledger.isActive   // 延續窗內＝同 session 續聽
+            let resuming = isLingering && ledger.isActive   // 延續窗內、同 field＝同 session 續聽
             coordinator.reset()
             segmenter.sessionStarted(at: t)
             archiveAfterDrain = false
@@ -482,11 +543,13 @@ public final class DictationController {
                 if field.hasSelection, let range = field.selectedRange, let original = field.selectedText {
                     // 選取即目標：anchor＝選取起點，帳本以原選取文字為種子（undo 可回到它）
                     sessionTarget = .selectionPending(range: range, original: original)
-                    ledger.begin(axAnchor: range.location, initialText: original)
+                    ledger.begin(axAnchor: range.location, fieldIdentity: field.fieldIdentity,
+                                 initialText: original)
                     displayedSessionText = original
                 } else {
                     sessionTarget = .tail
-                    ledger.begin(axAnchor: field.caretLocation)   // UTF-16 單位，僅 AX 路徑使用
+                    ledger.begin(axAnchor: field.caretLocation,
+                                 fieldIdentity: field.fieldIdentity) // UTF-16 anchor＋原 field identity
                     displayedSessionText = ""
                 }
                 capturedFrontAppName = field.frontAppName
@@ -557,6 +620,7 @@ public final class DictationController {
         ocrTask?.cancel()
         ocrTask = nil
         capturedOCRText = nil
+        fieldReader.releaseFieldIdentity(ledger.fieldIdentity)
         ledger.archive()
         displayedSessionText = ""
         feedback?.sessionEnded()            // 封存：overlay 立即隱藏
@@ -689,11 +753,24 @@ public final class DictationController {
                     return
                 }
                 do {
-                    try coordinator.insertDetached(text)
-                    displayedSessionText += text
-                    ledger.appendPolished(text)
-                    emitFeedback()                         // 緩衝後續句落地：底線延伸至新內容
+                    switch try coordinator.replaceSession(
+                        commandSnapshot: coordinator.currentTailSnapshot(),
+                        expectedSessionText: ledger.sessionText,
+                        with: ledger.sessionText + text,
+                        axAnchor: ledger.axAnchor,
+                        fieldIdentity: ledger.fieldIdentity
+                    ) {
+                    case .replaced:
+                        displayedSessionText += text
+                        ledger.appendPolished(text)
+                        emitFeedback()                     // identity-bound AX 追加後才延伸底線
+                    case .tailAdvanced, .fieldMismatch:
+                        invalidateDisplayedSessionMirror()
+                        clipboardRescue?(text)
+                        hud.present(.notice("欄位已切換，內容已入剪貼簿"))
+                    }
                 } catch {
+                    invalidateDisplayedSessionMirror()
                     clipboardRescue?(text)
                     hud.present(.notice("插入失敗，內容已入剪貼簿"))
                 }
@@ -743,17 +820,68 @@ public final class DictationController {
             hud.present(.notice(insertSkipNotice(.frozen)))
             return
         }
+        if allowsUnverifiedWritesForTesting {
+            applyNewContentUnverifiedForTesting(text, snapshot: snapshot)
+            return
+        }
+        let current = fieldReader.snapshot()
+        guard let expectedField = ledger.fieldIdentity,
+              current.fieldIdentity == expectedField else {
+            if current.fieldIdentity != ledger.fieldIdentity {
+                fieldReader.releaseFieldIdentity(current.fieldIdentity)
+            }
+            recordInsertEvent(kind: "insertSkipped", classification: "fieldIdentityMismatch",
+                              utteranceText: snapshot.text)
+            keepRaw(snapshot, notice: "欄位已切換，保留原文")
+            invalidateDisplayedSessionMirror()
+            return
+        }
         // 替換前的欄位鏡像（raw 已上屏）。必須含 currentUtteranceText——回收路徑走到這裡時，
         // 下一句的原文已經落在螢幕上；漏掉它會讓 diff 把使用者還沒被碰的那句也框成「剛改動」。
         // 一般路徑的 currentUtteranceText 是空的，加了不影響。
         let old = ledger.sessionText + snapshot.text + coordinator.currentUtteranceText
+        let location = ledger.axAnchor.map { $0 + ledger.sessionText.utf16.count }
+        let replacement = location.map {
+            coordinator.replaceTailVerified(snapshot, at: $0, with: text,
+                                            fieldIdentity: ledger.fieldIdentity)
+        } ?? .fieldMismatch
+        switch replacement {
+        case .replaced:
+            guard replaceDisplayedUtterance(snapshot, after: ledger.sessionText, with: text) else {
+                invalidateDisplayedSessionMirror()
+                hud.present(.notice("欄位鏡像失效，本段停止修正"))
+                return
+            }
+            ledger.appendPolished(text)
+            emitFeedback(oldText: old)                 // 潤飾異動高亮
+        case .tailAdvanced:
+            if !recoverStaleTail(text, snapshot: snapshot, previousMirror: old) {
+                recordInsertEvent(kind: "insertSkipped", classification: "counterMismatch",
+                                  utteranceText: snapshot.text)
+                keepRaw(snapshot, notice: insertSkipNotice(.tailAdvanced))
+            }
+        case .fieldMismatch:
+            recordInsertEvent(kind: "insertSkipped", classification: "fieldMismatch",
+                              utteranceText: snapshot.text)
+            keepRaw(snapshot, notice: "欄位已切換或無法驗證，保留原文")
+            invalidateDisplayedSessionMirror()
+        }
+    }
+
+    /// 舊測試 harness 專用；production 不可達。行為保持原本的 counter＋keystroke 路徑，
+    /// 讓 intent/history 測試不必假裝自己在驗 AX field safety。
+    private func applyNewContentUnverifiedForTesting(
+        _ text: String,
+        snapshot: InsertionCoordinator.UtteranceSnapshot
+    ) {
+        let old = ledger.sessionText + snapshot.text + coordinator.currentUtteranceText
         do {
             if try coordinator.replaceTail(snapshot, with: text) {
-                replaceDisplayedUtterance(snapshot, after: ledger.sessionText, with: text)
+                guard replaceDisplayedUtterance(snapshot, after: ledger.sessionText, with: text) else {
+                    invalidateDisplayedSessionMirror(); return
+                }
                 ledger.appendPolished(text)
-                emitFeedback(oldText: old)             // 潤飾異動高亮
-            } else if recoverStaleTail(text, snapshot: snapshot, previousMirror: old) {
-                // 尾端已前進，但這句仍能就地回收（M10-C）——細節見 recoverStaleTail
+                emitFeedback(oldText: old)
             } else {
                 recordInsertEvent(kind: "insertSkipped", classification: "counterMismatch",
                                   utteranceText: snapshot.text)
@@ -766,7 +894,7 @@ public final class DictationController {
         } catch InserterError.lostText(let original) {
             recordInsertEvent(kind: "insertFailed", classification: "lostText",
                               utteranceText: snapshot.text)
-            replaceDisplayedUtterance(snapshot, after: ledger.sessionText, with: "")
+            _ = replaceDisplayedUtterance(snapshot, after: ledger.sessionText, with: "")
             clipboardRescue?(original)
             hud.present(.notice("插入失敗，原文已複製到剪貼簿"))
         } catch {
@@ -787,7 +915,8 @@ public final class DictationController {
             switch try coordinator.replaceSession(commandSnapshot: commandSnapshot,
                                                   expectedSessionText: ledger.sessionText,
                                                   with: corrected,
-                                                  axAnchor: ledger.axAnchor) {
+                                                  axAnchor: ledger.axAnchor,
+                                                  fieldIdentity: ledger.fieldIdentity) {
             case .replaced:
                 displayedSessionText = corrected
                 ledger.commit(corrected)
@@ -855,7 +984,8 @@ public final class DictationController {
             hud.present(.notice("選取已變動，結果已入剪貼簿"))
             return
         }
-        switch coordinator.replaceSelection(location: range.location, expected: original, with: text) {
+        switch coordinator.replaceSelection(location: range.location, expected: original, with: text,
+                                            fieldIdentity: ledger.fieldIdentity) {
         case .replaced:
             displayedSessionText = text
             ledger.commit(text)
@@ -897,18 +1027,51 @@ public final class DictationController {
             hud.present(.notice("已凍結，無法復原")); return
         }
         guard let step = ledger.undo() else {
-            // 沒步驟可回：把指令話語從欄位退掉（它不是內容），並同步 Esc 使用的完整 mirror。
-            if (try? coordinator.replaceTail(commandSnapshot, with: "")) == true {
-                replaceDisplayedUtterance(commandSnapshot, after: ledger.sessionText, with: "")
+            // 沒步驟可回：只有 identity-bound AX 能安全移除指令。無 AX 時保留 raw；tail 已前進
+            // 時同樣推進 ledger。漏帳會讓下一句 mirror splice 從錯誤 offset 開始（issue #21 HIGH）。
+            guard coordinator.canVerifySessionRange(axAnchor: ledger.axAnchor,
+                                                     fieldIdentity: ledger.fieldIdentity) else {
+                keepRaw(commandSnapshot, notice: "沒有可復原的步驟")
+                return
             }
-            hud.present(.notice("沒有可復原的步驟"))
+            do {
+                switch try coordinator.replaceSession(commandSnapshot: commandSnapshot,
+                                                      expectedSessionText: ledger.sessionText,
+                                                      with: ledger.sessionText,
+                                                      axAnchor: ledger.axAnchor,
+                                                      fieldIdentity: ledger.fieldIdentity) {
+                case .replaced:
+                    guard replaceDisplayedUtterance(commandSnapshot, after: ledger.sessionText,
+                                                    with: "") else {
+                        invalidateDisplayedSessionMirror()
+                        hud.present(.notice("欄位鏡像失效，本段停止修正"))
+                        return
+                    }
+                    hud.present(.notice("沒有可復原的步驟"))
+                case .tailAdvanced:
+                    keepRaw(commandSnapshot, notice: "沒有可復原的步驟")
+                case .fieldMismatch:
+                    if !commandSnapshot.text.isEmpty {
+                        ledger.commitRaw(ledger.sessionText + commandSnapshot.text)
+                    }
+                    invalidateDisplayedSessionMirror()
+                    hud.present(.notice("欄位已切換，未復原"))
+                }
+            } catch {
+                if !commandSnapshot.text.isEmpty {
+                    ledger.commitRaw(ledger.sessionText + commandSnapshot.text)
+                }
+                invalidateDisplayedSessionMirror()
+                hud.present(.notice("未復原（欄位狀態不明）"))
+            }
             return
         }
         do {
             switch try coordinator.replaceSession(commandSnapshot: commandSnapshot,
                                                   expectedSessionText: step.from,
                                                   with: step.to,
-                                                  axAnchor: ledger.axAnchor) {
+                                                  axAnchor: ledger.axAnchor,
+                                                  fieldIdentity: ledger.fieldIdentity) {
             case .replaced:
                 displayedSessionText = step.to
                 hud.present(.notice("已復原"))
@@ -977,10 +1140,17 @@ public final class DictationController {
                                   previousMirror: String) -> Bool {
         guard let anchor = ledger.axAnchor else { return false }
         let location = anchor + ledger.sessionText.utf16.count
-        guard coordinator.replaceStaleTail(snapshot, at: location, with: text) == .replaced else {
+        guard coordinator.replaceStaleTail(snapshot, at: location, with: text,
+                                           fieldIdentity: ledger.fieldIdentity) == .replaced else {
             return false
         }
-        replaceDisplayedUtterance(snapshot, after: ledger.sessionText, with: text)
+        guard replaceDisplayedUtterance(snapshot, after: ledger.sessionText, with: text) else {
+            // AX 已物理改成功，不能再讓 caller keepRaw；凍結並標記 mirror 不可用，後續 Esc 僅可
+            // 走 identity-bound AX 驗證，無 AX 則 fail closed。
+            invalidateDisplayedSessionMirror()
+            hud.present(.notice("欄位鏡像失效，本段停止修正"))
+            return true
+        }
         ledger.appendPolished(text)
         // 文字有落地、且是潤飾後的版本，故不屬 insertFailed／insertSkipped 二分，另立一類。
         // detail 帶回收後的文字：歷史頁要看得出回收回來的是什麼內容。
@@ -988,6 +1158,12 @@ public final class DictationController {
                           utteranceText: snapshot.text, detail: text)
         emitFeedback(oldText: previousMirror)
         return true
+    }
+
+    /// @testable-only seam：刻意製造 field mirror 與物理欄位不一致，驗證 splice mismatch
+    /// 會 fail closed。internal 是 convention、非硬 access-control；production 不得呼叫。
+    func setDisplayedSessionTextForTesting(_ text: String) {
+        displayedSessionText = text
     }
 
     /// 插入層備援診斷（issue #1 被動蒐證）：主 inserter 失敗、備援成功。
@@ -999,9 +1175,10 @@ public final class DictationController {
 
     /// 將實際欄位鏡像中「已落定 prefix 後的這句 raw」換成 outcome。比只改 suffix 深一層：
     /// 下一句已上屏時 stale-tail 會在中段改寫，後方文字必須原樣保留，Esc 才能算對全階段範圍。
+    @discardableResult
     private func replaceDisplayedUtterance(_ snapshot: InsertionCoordinator.UtteranceSnapshot,
                                            after settledPrefix: String,
-                                           with newText: String) {
+                                           with newText: String) -> Bool {
         let utf16 = displayedSessionText.utf16
         guard let lower = utf16.index(utf16.startIndex,
                                       offsetBy: settledPrefix.utf16.count,
@@ -1011,8 +1188,15 @@ public final class DictationController {
                                       limitedBy: utf16.endIndex),
               String(decoding: utf16[lower..<upper], as: UTF16.self) == snapshot.text,
               let stringLower = String.Index(lower, within: displayedSessionText),
-              let stringUpper = String.Index(upper, within: displayedSessionText) else { return }
+              let stringUpper = String.Index(upper, within: displayedSessionText) else { return false }
         displayedSessionText.replaceSubrange(stringLower..<stringUpper, with: newText)
+        return true
+    }
+
+    private func invalidateDisplayedSessionMirror() {
+        guard !ledger.frozen else { return }
+        ledger.freeze()
+        feedback?.sessionFrozen()
     }
 
     /// 原文照留：帳本入帳（欄位鏡像）＋提示

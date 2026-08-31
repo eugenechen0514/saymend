@@ -19,6 +19,7 @@ public struct SessionLedger {
     public private(set) var initialText = ""
     public private(set) var frozen = false
     public private(set) var axAnchor: Int?
+    public private(set) var fieldIdentity: FieldIdentity?
     public private(set) var isActive = false
     /// session 世代：每次 begin 遞增（延續窗 resume 不會 begin，故不變）。
     /// controller 的在途 LLM outcome 以此判別歸屬——archive→begin 後，舊世代 outcome 一律丟棄。
@@ -36,7 +37,8 @@ public struct SessionLedger {
     /// 開新 session。呼叫端在聽寫啟動時提供 AX 起點錨位（讀不到給 nil）。
     /// initialText＝選取即目標模式的種子（規格 §3.6）：sessionText 起始即為
     /// 使用者選取的原文，首次 commit 後 undo 便回到它；一般聽寫維持空字串。
-    public mutating func begin(axAnchor: Int?, initialText: String = "") {
+    public mutating func begin(axAnchor: Int?, fieldIdentity: FieldIdentity? = nil,
+                               initialText: String = "") {
         sessionText = initialText
         self.initialText = initialText
         versions = []
@@ -44,6 +46,7 @@ public struct SessionLedger {
         frozen = false
         isActive = true
         self.axAnchor = axAnchor
+        self.fieldIdentity = fieldIdentity
         generation &+= 1
     }
 
@@ -115,6 +118,7 @@ public struct SessionLedger {
         frozen = false
         isActive = false
         axAnchor = nil
+        fieldIdentity = nil
     }
 
     private mutating func pushCurrentVersion() {

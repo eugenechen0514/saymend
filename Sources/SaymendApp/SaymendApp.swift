@@ -121,8 +121,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         historyStore?.purge(olderThanDays: settings.historyRetentionDays)   // 啟動時清過期（規格 §4.9）
 
-        let axInserter = AXInserter()
-        let axReader = AXFieldReader(profiles: profileStore)
+        let axFieldRegistry = AXFieldRegistry()
+        let axInserter = AXInserter(registry: axFieldRegistry)
+        let axReader = AXFieldReader(profiles: profileStore, registry: axFieldRegistry)
         let coordinator = InsertionCoordinator(keystroke: keystroke, paste: PasteInserter(),
                                                rangeReplacer: axInserter)
         let provider = OpenAICompatProvider(configProvider: { [settings] in settings.openAIConfig() })

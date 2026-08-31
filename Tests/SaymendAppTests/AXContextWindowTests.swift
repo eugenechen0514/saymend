@@ -1,3 +1,5 @@
+import ApplicationServices
+import Foundation
 import Testing
 @testable import SaymendApp
 
@@ -24,6 +26,24 @@ import Testing
         #expect(!w.after.unicodeScalars.contains { $0.value == 0xFFFD })
         #expect(w.before == "🎉")            // 窗口 3 units 只裝得下一個完整 🎉（邊界讓開半個）
         #expect(w.after == "🎉")
+    }
+
+    @Test func fieldRegistryUsesOpaqueDistinctTokensAndCFEqual() {
+        let registry = AXFieldRegistry()
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let sameAppNewWrapper = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let system = AXUIElementCreateSystemWide()
+        #expect(CFEqual(app, sameAppNewWrapper))           // 同 element、不同 Swift wrapper
+        let appIdentity = registry.identity(for: app)
+        let sameAppIdentity = registry.identity(for: sameAppNewWrapper)
+        let systemIdentity = registry.identity(for: system)
+
+        #expect(appIdentity == sameAppIdentity)
+        #expect(appIdentity != systemIdentity)       // token 常數／hash 冒充 identity 都會破壞此契約
+        #expect(registry.matches(appIdentity, element: app))
+        #expect(!registry.matches(appIdentity, element: system))
+        registry.release(appIdentity)
+        #expect(!registry.matches(appIdentity, element: app))
     }
 
     @Test func emptyValueYieldsEmptyWindows() {
