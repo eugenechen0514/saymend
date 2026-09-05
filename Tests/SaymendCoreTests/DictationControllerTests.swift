@@ -127,6 +127,27 @@ import Testing
     #expect(failed.first?.utteranceRaw == "要丟掉")
 }
 
+/// mutation M8 存活後補上：凍結時若 utterance 早已閉合（currentUtteranceText 為空），Esc 沒有東西可退，
+/// 就不該發「未退回文字」的 notice、也不該記 insertSkipped——那會對一個不存在的操作報告失敗。
+@MainActor
+@Test func escapeWhileFrozenWithNothingToRetractStaysQuiet() {
+    let polisher = GatedIntentService()
+    polisher.gated = true                       // 卡住潤飾，排除它對欄位與 HUD 的干擾
+    let history = FakeHistory()
+    let (c, _, _, key, _, hud) = makeController(polisher: polisher, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("已經落地的字"), at: 10.5)
+    c.tick(at: 12.1)                            // 靜音 1.6 秒 > quietGap → 話語閉合，currentUtteranceText 歸零
+    c.userActivityDetected(at: 12.5)            // 使用者手動打字 → 凍結
+    #expect(c.ledger.frozen)
+    key.ops.removeAll()
+    c.escapePressed()
+    #expect(key.ops.isEmpty)
+    #expect(c.phase == .idle)
+    #expect(hud.states.last == .hidden, "沒有東西可退就不該報「未退回」；實際：\(hud.states.last.map { "\($0)" } ?? "nil")")
+    #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.isEmpty)
+}
+
 @MainActor
 @Test func pressWhileHoldIsIgnored() {
     let (c, audio, _, _, _, _) = makeController()
