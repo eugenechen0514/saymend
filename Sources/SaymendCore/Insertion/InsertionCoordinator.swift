@@ -65,8 +65,6 @@ public final class InsertionCoordinator {
     /// 所有寫入都經這裡，不會漏站。與 `SessionLedger.sessionText` 的差別：鏡像含尚未落定（潤飾在途）的 raw
     /// 與進行中的 utterance；Esc 退回以它為 expected，才能在潤飾在途時也退得掉（issue #21 的 1.5 秒窗口）。
     public private(set) var displayedText = ""
-    /// Esc 有沒有東西可退：鏡像已偏離 session 起始原文
-    public var hasRetractableText: Bool { displayedText != initialText }
 
     public init(keystroke: any TextInserter,
                 paste: any TextInserter,

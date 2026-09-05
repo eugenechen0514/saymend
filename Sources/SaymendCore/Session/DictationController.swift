@@ -197,33 +197,39 @@ public final class DictationController {
         var retractionNotice: String?
         if case .selectionPending = sessionTarget {
             coordinator.clearCurrentUtterance()        // 緩衝：螢幕沒字，不得退格（須在 archiveSession 重置 sessionTarget 前判斷）
-        } else if ledger.frozen {
-            // 凍結守衛（issue #38 ①）：其他每條落地路徑都有，只有 Esc 漏了。凍結的成因正是使用者剛手動
-            // 編輯過欄位，我們不再知道欄位長什麼樣。整段文字原封保留，Esc 的另一半語意「結束聽寫」照常執行。
-            // （凍結後是否仍退回本 session 的文字，由 #46 的設定決定；預設不退。）
-            if coordinator.hasRetractableText {
-                // utteranceText 在這裡例外地是**整段鏡像**而非單句：Esc 要退的本來就是整段，凍結擋下的也是整段
-                recordInsertEvent(kind: "insertSkipped", classification: "frozen",
-                                  utteranceText: coordinator.displayedText)
-                retractionNotice = "已凍結，未退回文字"
-            }
-            coordinator.clearCurrentUtterance()
         } else {
-            // 整段退回（issue #21／#44）：以欄位鏡像為 expected、verified AX 範圍替換回 session 起始原文——
-            // 含已潤飾、已修正、潤飾在途的 raw 與進行中的 utterance，不再只退當前話語。
-            // 缺 anchor／identity／AX、identity 不符或內容不符：一個字都不動，只提示（裁定 3：不碰剪貼簿）。
+            // 退回終點由設定決定（issue #46）：「一併退掉已潤飾」＝session 起始原文；關閉＝帳本的已潤飾鏡像（只退 raw）。
+            let target = ledger.escapeRetractionTarget(includingPolishedText: settings.escapeRetractsPolishedText)
             let retracting = coordinator.displayedText
-            switch coordinator.retractSession(to: ledger.initialText) {
-            case .replaced:
-                // 欄位已退回 session 起始原文：帳本鏡像跟上，否則 archiveSession 會把使用者剛丟掉的文字
-                // 當成這次聽寫的 finalText 寫進 History。不建版本——session 馬上封存，沒有東西可復原。
-                ledger.synchronizeObservedTail(ledger.initialText)
-            case .unverified:
-                recordInsertEvent(kind: "insertSkipped", classification: "unverified", utteranceText: retracting)
-                retractionNotice = Self.retractionUnverifiedNotice
-            case .fieldMismatch, .tailAdvanced:
-                recordInsertEvent(kind: "insertSkipped", classification: "fieldMismatch", utteranceText: retracting)
-                retractionNotice = Self.retractionUnverifiedNotice
+            if ledger.frozen && !settings.escapeRetractsFrozenSession {
+                // 凍結守衛（issue #38 ①）：其他每條落地路徑都有，只有 Esc 漏了。凍結的成因正是使用者剛手動
+                // 編輯過欄位，我們不再知道欄位長什麼樣。整段文字原封保留，Esc 的另一半語意「結束聽寫」照常執行。
+                // 凍結後是否仍退由 escapeRetractsFrozenSession 決定（#46），預設不退。
+                // 只在 Esc 本來會退掉東西（鏡像 ≠ 目標）時才提示、記事件：全都已潤飾又只退 raw，本來就沒事可做。
+                if retracting != target {
+                    // utteranceText 在這裡例外地是**整段鏡像**而非單句：Esc 要退的本來就是整段，凍結擋下的也是整段
+                    recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: retracting)
+                    retractionNotice = "已凍結，未退回文字"
+                }
+                coordinator.clearCurrentUtterance()
+            } else {
+                // 整段退回（issue #21／#44）：以欄位鏡像為 expected、verified AX 範圍替換成 target——
+                // 含已潤飾、已修正、潤飾在途的 raw 與進行中的 utterance，不再只退當前話語。
+                // 缺 anchor／identity／AX、identity 不符或內容不符：一個字都不動，只提示（裁定 3：不碰剪貼簿）。
+                // 凍結且設定開啟時也走這裡，同一套規則：使用者凍結後手打在 session 範圍之後的字在範圍外、自然保留；
+                // 手打進範圍內＝內容不符 → fail closed。設定不是 verified AX 的例外。
+                switch coordinator.retractSession(to: target) {
+                case .replaced:
+                    // 欄位已退回 target：帳本鏡像跟上，否則 archiveSession 會把使用者剛丟掉的文字
+                    // 當成這次聽寫的 finalText 寫進 History。不建版本——session 馬上封存，沒有東西可復原。
+                    ledger.synchronizeObservedTail(target)
+                case .unverified:
+                    recordInsertEvent(kind: "insertSkipped", classification: "unverified", utteranceText: retracting)
+                    retractionNotice = Self.retractionUnverifiedNotice
+                case .fieldMismatch, .tailAdvanced:
+                    recordInsertEvent(kind: "insertSkipped", classification: "fieldMismatch", utteranceText: retracting)
+                    retractionNotice = Self.retractionUnverifiedNotice
+                }
             }
         }
         // Esc 不進延續窗（設計裁決 3）＝提前封存。統一走 archiveSession 清乾淨 session 級狀態
@@ -708,7 +714,7 @@ public final class DictationController {
                 }
                 do {
                     try coordinator.insertDetached(text)
-                    ledger.commit(ledger.sessionText + text)
+                    ledger.appendPolished(text)
                     emitFeedback()                         // 緩衝後續句落地：底線延伸至新內容
                 } catch {
                     clipboardRescue?(text)
@@ -766,7 +772,7 @@ public final class DictationController {
         let old = ledger.sessionText + snapshot.text + coordinator.currentUtteranceText
         switch coordinator.replaceTail(snapshot, with: text) {
         case .replaced:
-            ledger.commit(ledger.sessionText + text)
+            ledger.appendPolished(text)            // 只有這一句取得 polished 身分（#46）
             emitFeedback(oldText: old)             // 潤飾異動高亮
         case .tailAdvanced:
             if recoverStaleTail(text, snapshot: snapshot, previousMirror: old) { return }   // 就地回收（M10-C）
@@ -914,17 +920,17 @@ public final class DictationController {
         case .tailAdvanced:
             recordInsertEvent(kind: "insertSkipped", classification: "counterMismatch",
                               utteranceText: commandSnapshot.text)
-            ledger.commit(step.from)      // 帳本回滾成欄位實況
+            ledger.restoreFailedUndo(step)   // 帳本（含已潤飾鏡像）回滾成欄位實況
             keepRaw(commandSnapshot, notice: "未復原（新內容已接續）")
         case .unverified:
             recordInsertEvent(kind: "insertSkipped", classification: "unverified",
                               utteranceText: commandSnapshot.text)
-            ledger.commit(step.from)      // 帳本回滾成欄位實況（欄位一個字都沒動）
+            ledger.restoreFailedUndo(step)   // 帳本（含已潤飾鏡像）回滾成欄位實況（欄位一個字都沒動）
             keepRaw(commandSnapshot, notice: "未復原（無法確認文字位置）")
         case .fieldMismatch:
             recordInsertEvent(kind: "insertSkipped", classification: "fieldMismatch",
                               utteranceText: commandSnapshot.text)
-            ledger.commit(step.from)
+            ledger.restoreFailedUndo(step)
             ledger.freeze()
             feedback?.sessionFrozen()
             hud.present(.notice("欄位已被外部改動，本段停止修正"))
@@ -960,7 +966,7 @@ public final class DictationController {
         guard coordinator.replaceStaleTail(snapshot, at: location, with: text) == .replaced else {
             return false
         }
-        ledger.commit(ledger.sessionText + text)
+        ledger.appendPolished(text)
         // 文字有落地、且是潤飾後的版本，故不屬 insertFailed／insertSkipped 二分，另立一類。
         // detail 帶回收後的文字：歷史頁要看得出回收回來的是什麼內容。
         recordInsertEvent(kind: "insertRecovered", classification: "staleTail",
@@ -976,10 +982,10 @@ public final class DictationController {
         recordInsertEvent(kind: "insertFallback", classification: kind.rawValue, utteranceText: "")
     }
 
-    /// 原文照留：帳本入帳（欄位鏡像）＋提示
+    /// 原文照留：帳本入帳（欄位鏡像，建版本但不算已潤飾——#46 只退 raw 時它會被退掉）＋提示
     private func keepRaw(_ snapshot: InsertionCoordinator.UtteranceSnapshot, notice: String) {
         if !snapshot.text.isEmpty {
-            ledger.commit(ledger.sessionText + snapshot.text)
+            ledger.commitRaw(ledger.sessionText + snapshot.text)
         }
         hud.present(.notice(notice))
         emitFeedback()
