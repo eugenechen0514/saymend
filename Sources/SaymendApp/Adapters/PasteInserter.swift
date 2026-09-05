@@ -77,8 +77,4 @@ final class PasteInserter: TextInserter {
             pasteboard.writeObjects([item])
         }
     }
-
-    func deleteBackward(count: Int) throws {
-        throw InserterError.unsupported   // 貼上路徑不做刪除；協調器一律用 keystroke 退格
-    }
 }
