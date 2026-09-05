@@ -5,11 +5,16 @@ final class RecordingInserter: TextInserter {
     enum Op: Equatable { case insert(String), delete(Int) }
     var ops: [Op] = []
     var failInsertsRemaining = 0
+    var failDeletesRemaining = 0
     func insert(_ text: String) throws {
         if failInsertsRemaining > 0 { failInsertsRemaining -= 1; throw InserterError.postFailed }
         ops.append(.insert(text))
     }
-    func deleteBackward(count: Int) throws { ops.append(.delete(count)) }
+    /// 拋錯時不記 op：模擬 issue #38 修正後的原子契約——拋錯＝一個字都沒動
+    func deleteBackward(count: Int) throws {
+        if failDeletesRemaining > 0 { failDeletesRemaining -= 1; throw InserterError.postFailed }
+        ops.append(.delete(count))
+    }
 }
 
 final class FakeRangeReplacer: SessionRangeReplacing {

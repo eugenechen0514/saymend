@@ -209,6 +209,9 @@ public final class InsertionCoordinator {
     }
 
     /// 刪舊打新＋鐵律回復。
+    /// `deleteBackward` 刻意放在 do 區塊之外：依 TextInserter 的原子契約（issue #38），它拋錯＝一個字
+    /// 都沒動，欄位仍是原文、無需回復，直接往上拋交給呼叫端 keepRaw 即可。鐵律回復只需守
+    /// 「刪成功、補插失敗」這一段。
     private func deleteAndRetype(expectedLength: Int, originalText: String, newText: String) throws {
         if expectedLength > 0 {
             try keystroke.deleteBackward(count: expectedLength)
@@ -226,6 +229,8 @@ public final class InsertionCoordinator {
         insertCounter += 1
     }
 
+    /// 主 inserter 拋錯後**全量**重送給備援。成立的前提是 TextInserter 的原子契約（issue #38）：
+    /// 主 inserter 拋錯＝一個字都沒進欄位，重送完整文字才不會留下「前綴＋完整文字」。
     private func insertWithFallback(_ text: String) throws {
         let pasteFirst = text.count >= pasteThreshold
         let primary: any TextInserter = pasteFirst ? paste : keystroke

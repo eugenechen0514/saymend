@@ -82,6 +82,51 @@ import Testing
     #expect(key.ops.isEmpty, "話語已閉合，Esc 不應該再退字——退了就是刪到已定案的內容")
 }
 
+/// issue #38 ①：全 repo 每一條落地路徑都有 `guard !ledger.frozen`（handleTranscript／applyNewContent／
+/// applyCorrection／performUndo），只有 Esc 沒有。凍結的成因是使用者剛手動編輯過欄位——
+/// 這時尾端已經不是我們以為的樣子，照 `currentUtteranceText.count` 盲退格會吃掉使用者的字。
+/// Esc 的另一半語意「結束聽寫」不受影響：照常停錄音、封存、回 idle。
+@MainActor
+@Test func escapeWhileFrozenKeepsFieldButStillEndsSession() {
+    let history = FakeHistory()
+    let (c, audio, asr, key, _, hud) = makeController(history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("要丟掉"), at: 10.5)
+    c.userActivityDetected(at: 10.8)               // 使用者手動打字 → 凍結
+    #expect(c.ledger.frozen)
+    key.ops.removeAll()
+    c.escapePressed()
+    #expect(key.ops.isEmpty, "凍結後 Esc 不得對欄位發任何鍵盤事件；實際：\(key.ops)")
+    #expect(c.phase == .idle)
+    #expect(asr.cancelCount == 1)
+    #expect(audio.stopCount == 1)
+    // notice 必須在 archiveSession 發出的 .hidden 之後，否則被蓋掉（同 abortForSecureField 的順序）
+    #expect(hud.states.last == .notice("已凍結，未退回文字"))
+    let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+    #expect(skipped.count == 1)
+    #expect(skipped.first?.outcomeText == "frozen")
+    #expect(skipped.first?.utteranceRaw == "要丟掉")
+}
+
+/// issue #38 ①（後半）：舊版 `try? coordinator.discardCurrentUtterance()` 把退格失敗吞掉——
+/// 不發 notice、不記診斷事件，使用者按了 Esc 看到字還在，卻沒有任何訊號說明為什麼。
+/// 修正後的 inserter 契約是「拋錯＝一個字都沒動」，所以文字確實還在欄位上；要說出口。
+@MainActor
+@Test func escapeReportsWhenRetractionFails() {
+    let history = FakeHistory()
+    let (c, _, _, key, _, hud) = makeController(history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("要丟掉"), at: 10.5)
+    key.failDeletesRemaining = 1
+    c.escapePressed()
+    #expect(c.phase == .idle)                                   // 仍然結束聽寫
+    #expect(hud.states.last == .notice("退回失敗，文字保留"))
+    let failed = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
+    #expect(failed.count == 1)
+    #expect(failed.first?.outcomeText == "discardFailed：postFailed")
+    #expect(failed.first?.utteranceRaw == "要丟掉")
+}
+
 @MainActor
 @Test func pressWhileHoldIsIgnored() {
     let (c, audio, _, _, _, _) = makeController()

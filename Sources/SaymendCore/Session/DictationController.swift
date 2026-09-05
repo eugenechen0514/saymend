@@ -188,15 +188,41 @@ public final class DictationController {
         segmenter.hardReset()
         asr.cancel()
         audio.stop()
+        // 退字的結果通知（若有）要留到 archiveSession 之後才發：archive 會發 .hidden，先發會被蓋掉
+        // （同 abortForSecureField／handleASRFailure 的順序）。診斷事件則相反，必須在 archive
+        // 清掉 historySessionID 之前記。
+        var retractionNotice: String?
         if case .selectionPending = sessionTarget {
             coordinator.clearCurrentUtterance()        // 緩衝：螢幕沒字，不得退格（須在 archiveSession 重置 sessionTarget 前判斷）
+        } else if ledger.frozen {
+            // 凍結守衛（issue #38 ①）：其他每條落地路徑都有，只有 Esc 漏了。凍結的成因正是使用者剛手動
+            // 編輯過欄位，尾端已經不是我們以為的樣子，照長度盲退格會吃掉使用者的字。文字原封保留，
+            // Esc 的另一半語意「結束聽寫」照常執行。
+            let text = coordinator.currentUtteranceText
+            if !text.isEmpty {
+                recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: text)
+                retractionNotice = "已凍結，未退回文字"
+            }
+            coordinator.clearCurrentUtterance()
         } else {
-            try? coordinator.discardCurrentUtterance()
+            let text = coordinator.currentUtteranceText
+            do {
+                try coordinator.discardCurrentUtterance()
+            } catch {
+                // 退格失敗（issue #38 ①）：inserter 契約是「拋錯＝一個字都沒動」，文字確實還在欄位上。
+                // 舊版 try? 吞掉後不發 notice、不記事件，使用者看到字沒退卻沒有任何訊號。
+                recordInsertEvent(kind: "insertFailed", classification: "discardFailed",
+                                  utteranceText: text, detail: "\(error)")
+                retractionNotice = "退回失敗，文字保留"
+            }
         }
         // Esc 不進延續窗（設計裁決 3）＝提前封存。統一走 archiveSession 清乾淨 session 級狀態
         // （sessionTarget／sessionLanguageOverride，設計裁決 4「archive 時自動清除」）——
         // internalPhase 已設 idle，之後遲到的 stream-end 會被 asrStreamEnded 的相位守衛冪等忽略。
         archiveSession()
+        if let notice = retractionNotice {
+            hud.present(.notice(notice))
+        }
     }
 
     /// 使用者手動活動（打字／滑鼠點擊／切 App；app 端由 HotkeyMonitor 與 NSWorkspace 餵入）。
