@@ -44,42 +44,41 @@ import Testing
 
 @MainActor
 @Test func escapeDiscardsUtteranceAndEndsSession() {
-    let (c, audio, asr, key, _, hud) = makeController()
+    let ax = FakeRangeReplacer()
+    let (c, audio, asr, key, _, hud) = makeController(rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("要丟掉"), at: 10.5)
     c.escapePressed()
     #expect(c.phase == .idle)
     #expect(asr.cancelCount == 1)
     #expect(audio.stopCount == 1)
-    #expect(key.ops.contains(.delete(3)))          // 退格清掉「要丟掉」
+    // issue #44：退回走 verified AX 範圍替換（anchor 0、expected＝鏡像、new＝""），零鍵盤事件
+    #expect(ax.calls.count == 1)
+    #expect(ax.calls.first?.location == 0 && ax.calls.first?.expected == "要丟掉" && ax.calls.first?.new == "")
+    #expect(key.ops == [.insert("要丟掉")])
     #expect(hud.states.last == .hidden)
 }
 
-/// **Esc 退字的有效窗口只有 quietGap 那 1.5 秒**（issue #16 實機驗收 ⑤ 的定性測試）。
+/// **issue #21 的驗收**：話語閉合（quietGap 1.5 秒）之後按 Esc，字仍然要退掉。
 ///
-/// 實機 2026-08-08：使用者按住熱鍵、等文字真的落進 Antinote 之後才按 Esc，字沒有退掉。
-/// 查下來不是 Esc 壞了——`escapeDiscardsUtteranceAndEndsSession` 證明機制是好的，
-/// 差別只在那條測試的 finalized 與 escape 之間**沒有 tick**。
-///
-/// 真實情境有 tick：App 每 250ms 呼叫一次，文字落地後靜音滿 1.5 秒話語就閉合，
-/// `snapshotAndBeginNext()` 把 `currentUtteranceText` 歸零，Esc 就沒有東西可刪。
-/// 而本機串流引擎的解碼延遲是 1–5 秒，文字是一陣一陣落的，兩陣之間必然超過 1.5 秒
-/// ——**所以每次落地的文字都會在 1.5 秒後定案，人手很難搶在那之前按下 Esc**。
-///
-/// 這條測試不主張現行行為是對的，只是把它釘住：日後若決定改成「Esc 退掉整個
-/// 聽寫階段的文字」，這條會失敗，提醒改的人那是一個有意的行為變更。
+/// 這條取代了 `escapeAfterUtteranceClosedRetractsNothing`——那條釘住的是舊行為「話語閉合後 Esc 退不掉」，
+/// 它的註解就寫著「日後若決定改成 Esc 退掉整個聽寫階段的文字，這條會失敗，提醒改的人那是一個有意的行為變更」。
+/// 現在正是那個有意的變更：實機 2026-08-08 使用者等文字落進 Antinote 才按 Esc、字沒退（issue #16 驗收 ⑤ → #21）。
+/// 機制：coordinator 的欄位鏡像含潤飾在途的 raw，Esc 以整個鏡像為 expected 做 verified AX 替換。
 @MainActor
-@Test func escapeAfterUtteranceClosedRetractsNothing() {
+@Test func escapeAfterUtteranceClosedRetractsTheWholeSession() {
     let polisher = GatedIntentService()
-    polisher.gated = true                       // 卡住潤飾，排除它對欄位的干擾
-    let (c, _, _, key, _, _) = makeController(polisher: polisher)
+    polisher.gated = true                       // 卡住潤飾：文字已閉合、潤飾在途、currentUtteranceText 為空
+    let ax = FakeRangeReplacer()
+    let (c, _, _, key, _, _) = makeController(polisher: polisher, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("已經落地的字"), at: 10.5)
     #expect(key.ops == [.insert("已經落地的字")])
-    c.tick(at: 12.1)                            // 靜音 1.6 秒 > quietGap 1.5 → 話語閉合
-    key.ops.removeAll()
+    c.tick(at: 12.1)                            // 靜音 1.6 秒 > quietGap 1.5 → 話語閉合：currentUtteranceText 已歸零
     c.escapePressed()
-    #expect(key.ops.isEmpty, "話語已閉合，Esc 不應該再退字——退了就是刪到已定案的內容")
+    #expect(ax.calls.count == 1)
+    #expect(ax.calls.first?.expected == "已經落地的字" && ax.calls.first?.new == "")
+    #expect(key.ops == [.insert("已經落地的字")], "零鍵盤事件")
 }
 
 /// issue #38 ①：全 repo 每一條落地路徑都有 `guard !ledger.frozen`（handleTranscript／applyNewContent／
@@ -89,14 +88,15 @@ import Testing
 @MainActor
 @Test func escapeWhileFrozenKeepsFieldButStillEndsSession() {
     let history = FakeHistory()
-    let (c, audio, asr, key, _, hud) = makeController(history: history)
+    let ax = FakeRangeReplacer()
+    let (c, audio, asr, key, _, hud) = makeController(rangeReplacer: ax, history: history)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("要丟掉"), at: 10.5)
     c.userActivityDetected(at: 10.8)               // 使用者手動打字 → 凍結
     #expect(c.ledger.frozen)
     key.ops.removeAll()
     c.escapePressed()
-    #expect(key.ops.isEmpty, "凍結後 Esc 不得對欄位發任何鍵盤事件；實際：\(key.ops)")
+    #expect(key.ops.isEmpty && ax.calls.isEmpty, "凍結後 Esc 不得對欄位做任何寫入；實際：\(key.ops) \(ax.calls.count)")
     #expect(c.phase == .idle)
     #expect(asr.cancelCount == 1)
     #expect(audio.stopCount == 1)
@@ -108,44 +108,94 @@ import Testing
     #expect(skipped.first?.utteranceRaw == "要丟掉")
 }
 
-/// issue #38 ①（後半）：舊版 `try? coordinator.discardCurrentUtterance()` 把退格失敗吞掉——
-/// 不發 notice、不記診斷事件，使用者按了 Esc 看到字還在，卻沒有任何訊號說明為什麼。
-/// 修正後的 inserter 契約是「拋錯＝一個字都沒動」，所以文字確實還在欄位上；要說出口。
+/// issue #44：沒有 verified AX（這裡：App 不支援 AX 範圍能力）→ Esc 一個字都不動、只提示（裁定 3：不碰剪貼簿），
+/// 仍照常結束聽寫。取代 #39 的 `escapeReportsWhenRetractionFails`——那條測的是退格拋錯，退格已不存在。
 @MainActor
-@Test func escapeReportsWhenRetractionFails() {
+@Test func escapeWithoutVerifiedAXKeepsFieldAndNotifies() {
+    let history = FakeHistory()
+    let clipboard = ClipboardSpy()
+    let (c, _, _, key, _, hud) = makeController(rangeReplacer: nil, clipboard: clipboard, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("要丟掉"), at: 10.5)
+    c.escapePressed()
+    #expect(c.phase == .idle)                                   // 仍然結束聽寫
+    #expect(key.ops == [.insert("要丟掉")])                      // 純追加照常、退回零寫入
+    #expect(hud.states.last == .notice(DictationController.retractionUnverifiedNotice))
+    #expect(clipboard.texts.isEmpty, "按 Esc 就是要丟掉它，不進剪貼簿")
+    let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+    #expect(skipped.count == 1)
+    #expect(skipped.first?.outcomeText == "unverified")
+    #expect(skipped.first?.utteranceRaw == "要丟掉")
+}
+
+/// identity 或內容不符（焦點已到別的欄位、欄位被外力改動）：同樣一個字不動、只提示，但事件分類不同。
+@MainActor
+@Test func escapeWithFieldMismatchKeepsFieldAndNotifies() {
+    let history = FakeHistory()
+    let ax = FakeRangeReplacer(); ax.verifyResult = .mismatch
+    let (c, _, _, key, _, hud) = makeController(rangeReplacer: ax, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("要丟掉"), at: 10.5)
+    c.escapePressed()
+    #expect(c.phase == .idle)
+    #expect(ax.calls.isEmpty && key.ops == [.insert("要丟掉")])
+    #expect(hud.states.last == .notice(DictationController.retractionUnverifiedNotice))
+    #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.first?.outcomeText == "fieldMismatch")
+}
+
+/// 凍結時若本 session 什麼都還沒寫進欄位，Esc 沒有東西可退，就不該發「未退回文字」的 notice、也不該記
+/// insertSkipped——那會對一個不存在的操作報告失敗。（issue #44 前這條的情境是「話語已閉合」；現在閉合的話語
+/// 仍在鏡像裡、仍是可退的，所以改成「連第一個字都還沒落地」。）
+@MainActor
+@Test func escapeWhileFrozenWithNothingToRetractStaysQuiet() {
     let history = FakeHistory()
     let (c, _, _, key, _, hud) = makeController(history: history)
     c.hotkeyPressed(at: 10.0)
-    c.handleTranscript(.finalized("要丟掉"), at: 10.5)
-    key.failDeletesRemaining = 1
-    c.escapePressed()
-    #expect(c.phase == .idle)                                   // 仍然結束聽寫
-    #expect(hud.states.last == .notice("退回失敗，文字保留"))
-    let failed = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
-    #expect(failed.count == 1)
-    #expect(failed.first?.outcomeText == "discardFailed：postFailed")
-    #expect(failed.first?.utteranceRaw == "要丟掉")
-}
-
-/// mutation M8 存活後補上：凍結時若 utterance 早已閉合（currentUtteranceText 為空），Esc 沒有東西可退，
-/// 就不該發「未退回文字」的 notice、也不該記 insertSkipped——那會對一個不存在的操作報告失敗。
-@MainActor
-@Test func escapeWhileFrozenWithNothingToRetractStaysQuiet() {
-    let polisher = GatedIntentService()
-    polisher.gated = true                       // 卡住潤飾，排除它對欄位與 HUD 的干擾
-    let history = FakeHistory()
-    let (c, _, _, key, _, hud) = makeController(polisher: polisher, history: history)
-    c.hotkeyPressed(at: 10.0)
-    c.handleTranscript(.finalized("已經落地的字"), at: 10.5)
-    c.tick(at: 12.1)                            // 靜音 1.6 秒 > quietGap → 話語閉合，currentUtteranceText 歸零
-    c.userActivityDetected(at: 12.5)            // 使用者手動打字 → 凍結
+    c.userActivityDetected(at: 10.3)            // 還沒有任何 finalized 就手動打字 → 凍結
     #expect(c.ledger.frozen)
-    key.ops.removeAll()
     c.escapePressed()
     #expect(key.ops.isEmpty)
     #expect(c.phase == .idle)
     #expect(hud.states.last == .hidden, "沒有東西可退就不該報「未退回」；實際：\(hud.states.last.map { "\($0)" } ?? "nil")")
     #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.isEmpty)
+}
+
+/// 凍結時話語已閉合（currentUtteranceText 為空）但字仍在欄位上：Esc 仍要提示「未退回」——
+/// 判斷依據是整段鏡像有沒有東西可退，不是當前話語。
+@MainActor
+@Test func escapeWhileFrozenAfterUtteranceClosedStillReportsRetainedText() {
+    let polisher = GatedIntentService()
+    polisher.gated = true
+    let history = FakeHistory()
+    let (c, _, _, _, _, hud) = makeController(polisher: polisher, history: history)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("已經落地的字"), at: 10.5)
+    c.tick(at: 12.1)                            // 話語閉合、潤飾在途
+    c.userActivityDetected(at: 12.5)            // 凍結
+    c.escapePressed()
+    #expect(hud.states.last == .notice("已凍結，未退回文字"))
+    let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+    #expect(skipped.first?.outcomeText == "frozen")
+    #expect(skipped.first?.utteranceRaw == "已經落地的字", "記的是整段鏡像，不是空的當前話語")
+}
+
+/// 潤飾落地時 AX 校驗不符（欄位被外力改動或焦點已到別的元素）：raw 同步進帳本、凍結、提示——之後沒有可信的位置可改寫。
+@MainActor
+@Test func polishFieldMismatchSynchronizesLedgerAndFreezes() async {
+    let polisher = GatedIntentService()
+    polisher.outcome = .newContent("你好。")
+    let ax = FakeRangeReplacer(); ax.verifyResult = .mismatch
+    let history = FakeHistory()
+    let (c, _, _, key, _, hud) = makeController(polisher: polisher, rangeReplacer: ax, history: history)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("呃你好"), at: 11.0)
+    c.tick(at: 12.6); await c.lastIntentTask?.value
+    #expect(ax.calls.isEmpty && key.ops == [.insert("呃你好")])
+    #expect(c.ledger.frozen)
+    #expect(c.ledger.sessionText == "呃你好", "raw 已在欄位上，帳本要鏡像它")
+    #expect(!c.ledger.canUndo, "什麼都沒改寫，不建版本")
+    #expect(hud.states.contains(.notice("欄位已被外部改動，本段停止修正")))
+    #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.first?.outcomeText == "fieldMismatch")
 }
 
 // MARK: - issue #43：session 起始欄位 identity 的 pin／release
@@ -266,14 +316,17 @@ import Testing
 @Test func quietGapPolishesAndReplacesTail() async {
     let polisher = GatedIntentService()
     polisher.outcome = .newContent("你好。")
-    let (c, _, _, key, _, _) = makeController(polisher: polisher)
+    let ax = FakeRangeReplacer()
+    let (c, _, _, key, _, _) = makeController(polisher: polisher, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)                    // 鎖定
     c.handleTranscript(.finalized("呃你好"), at: 11.0)
     c.tick(at: 12.6)                              // 1.6s quiet → 潤飾
     await c.lastIntentTask?.value
     #expect(polisher.calls.map(\.raw) == ["呃你好"])
-    #expect(key.ops == [.insert("呃你好"), .delete(3), .insert("你好。")])
+    #expect(key.ops == [.insert("呃你好")])                               // 潤飾不再退格重打（issue #44）
+    #expect(ax.calls.count == 1)
+    #expect(ax.calls.first?.location == 0 && ax.calls.first?.expected == "呃你好" && ax.calls.first?.new == "你好。")
 }
 
 @MainActor
@@ -281,7 +334,7 @@ import Testing
     let polisher = GatedIntentService()
     polisher.gated = true
     polisher.outcome = .newContent("第一段。")
-    let (c, _, _, key, _, hud) = makeController(polisher: polisher)
+    let (c, _, _, key, _, hud) = makeController(polisher: polisher, fieldReader: FakeFieldReader())   // 無 anchor → 回收不可用
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("第一段"), at: 11.0)
@@ -289,7 +342,7 @@ import Testing
     c.handleTranscript(.finalized("第二段"), at: 13.0)  // 尾端前進
     polisher.release()
     await c.lastIntentTask?.value
-    #expect(!key.ops.contains(.delete(3)))        // 不得替換
+    #expect(key.ops == [.insert("第一段"), .insert("第二段")])   // 不得替換
     // 成因要說得出口：這是「尾端已前進」，不是凍結、也不是寫入失敗（M10-C #5）
     #expect(hud.states.contains(.notice(insertSkipNotice(.tailAdvanced))))
 }
@@ -305,7 +358,7 @@ import Testing
     polisher.outcome = .newContent("第一段。")
     let ax = FakeRangeReplacer()
     let field = FakeFieldReader()
-    field.context = FieldContext(hasFocusedElement: true, caretLocation: 0)
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1))
     let history = FakeHistory()
     let (c, _, _, key, _, hud) = makeController(polisher: polisher, rangeReplacer: ax,
                                                 fieldReader: field, history: history)
@@ -322,7 +375,8 @@ import Testing
     #expect(ax.preservingCaretCalls.first?.location == 0)
     #expect(ax.preservingCaretCalls.first?.expected == "第一段")
     #expect(ax.preservingCaretCalls.first?.new == "第一段。")
-    #expect(!key.ops.contains(.delete(3)))              // 第二段一個字都不能被動到
+    #expect(key.ops == [.insert("第一段"), .insert("第二段")])   // 第二段一個字都不能被動到
+    #expect(ax.calls.isEmpty)                            // 不走會把游標收到中段的尾端路徑
     #expect(!hud.states.contains(.notice(insertSkipNotice(.tailAdvanced))))
     #expect(history.exchanges.contains { $0.outcomeKind == "insertRecovered" })
     #expect(history.exchanges.contains { $0.outcomeText?.contains("第一段。") == true })
@@ -338,7 +392,7 @@ import Testing
     polisher.gatedRaws = ["第二段"]                       // 只卡第二句
     let ax = FakeRangeReplacer()
     let field = FakeFieldReader()
-    field.context = FieldContext(hasFocusedElement: true, caretLocation: 100)
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 100, fieldIdentity: FieldIdentity(token: 1))
     let (c, _, _, _, _, _) = makeController(polisher: polisher, rangeReplacer: ax, fieldReader: field)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
@@ -372,7 +426,7 @@ import Testing
     polisher.gatedRaws = ["第一段"]                       // 只卡第一句
     let ax = FakeRangeReplacer()
     let field = FakeFieldReader()
-    field.context = FieldContext(hasFocusedElement: true, caretLocation: 100)
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 100, fieldIdentity: FieldIdentity(token: 1))
     let (c, _, _, _, _, _) = makeController(polisher: polisher, rangeReplacer: ax, fieldReader: field)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
@@ -403,7 +457,7 @@ import Testing
     polisher.gatedRaws = ["第一段"]
     let ax = FakeRangeReplacer()
     let field = FakeFieldReader()
-    field.context = FieldContext(hasFocusedElement: true, caretLocation: 100)
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 100, fieldIdentity: FieldIdentity(token: 1))
     let (c, _, _, _, _, _) = makeController(polisher: polisher, rangeReplacer: ax, fieldReader: field)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
@@ -428,7 +482,7 @@ import Testing
     polisher.outcome = .newContent("第一段。")
     let ax = FakeRangeReplacer()
     let field = FakeFieldReader()
-    field.context = FieldContext(hasFocusedElement: true, caretLocation: 0)
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1))
     let feedback = FakeFeedback()
     let (c, _, _, _, _, _) = makeController(polisher: polisher, rangeReplacer: ax,
                                             fieldReader: field, feedback: feedback)
@@ -460,7 +514,7 @@ import Testing
     let ax = FakeRangeReplacer()
     ax.verifyResult = .mismatch
     let field = FakeFieldReader()
-    field.context = FieldContext(hasFocusedElement: true, caretLocation: 0)
+    field.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1))
     let history = FakeHistory()
     let (c, _, _, _, _, hud) = makeController(polisher: polisher, rangeReplacer: ax,
                                               fieldReader: field, history: history)
@@ -484,7 +538,7 @@ import Testing
     let polisher = GatedIntentService()
     polisher.gated = true
     polisher.outcome = .newContent("第一段。")
-    let (c, _, _, key, _, hud) = makeController(polisher: polisher)   // rangeReplacer: nil
+    let (c, _, _, key, _, hud) = makeController(polisher: polisher, rangeReplacer: nil)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("第一段"), at: 11.0)
@@ -493,7 +547,7 @@ import Testing
     polisher.release()
     await c.lastIntentTask?.value
 
-    #expect(!key.ops.contains(.delete(3)))
+    #expect(key.ops == [.insert("第一段"), .insert("第二段")])
     #expect(hud.states.contains(.notice(insertSkipNotice(.tailAdvanced))))
 }
 
@@ -512,7 +566,7 @@ import Testing
     c.userActivityDetected(at: 12.8)          // 在途時使用者手動打字 → 凍結
     polisher.release()
     await c.lastIntentTask?.value
-    #expect(!key.ops.contains(.delete(3)))    // 凍結後不得改寫欄位
+    #expect(key.ops == [.insert("呃你好")])    // 凍結後不得改寫欄位
     // 成因要說得出口，且不得與「尾端已前進」共用同一句（M10-C #5）
     #expect(hud.states.contains(.notice(insertSkipNotice(.frozen))))
     #expect(!hud.states.contains(.notice(insertSkipNotice(.tailAdvanced))))
@@ -581,7 +635,8 @@ import Testing
 @Test func streamEndFlushesRemainderThroughPolish() async {
     let polisher = GatedIntentService()
     polisher.outcome = .newContent("尾巴。")
-    let (c, _, asr, key, _, _) = makeController(polisher: polisher)
+    let ax = FakeRangeReplacer()
+    let (c, _, asr, key, _, _) = makeController(polisher: polisher, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("尾巴"), at: 11.0)
     c.hotkeyReleased(at: 12.0)                    // 長按結束 → audio.stop
@@ -589,7 +644,8 @@ import Testing
     c.asrStreamEnded(at: 12.1)
     await c.lastIntentTask?.value
     #expect(polisher.calls.map(\.raw) == ["尾巴"])
-    #expect(key.ops == [.insert("尾巴"), .delete(2), .insert("尾巴。")])
+    #expect(key.ops == [.insert("尾巴")])
+    #expect(ax.calls.first?.expected == "尾巴" && ax.calls.first?.new == "尾巴。")
 }
 
 @MainActor
@@ -609,7 +665,8 @@ import Testing
 @Test func drainFinalizedAfterEndIsInsertedAndFlushed() async {
     let polisher = GatedIntentService()
     polisher.outcome = .newContent("你好世界。")
-    let (c, _, _, key, _, _) = makeController(polisher: polisher)
+    let ax = FakeRangeReplacer()
+    let (c, _, _, key, _, _) = makeController(polisher: polisher, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("你好"), at: 10.5)
     c.hotkeyReleased(at: 11.0)                         // 長按放開 → endListening → 進排空窗
@@ -617,7 +674,8 @@ import Testing
     c.asrStreamEnded(at: 11.2)                         // 排空結束 → flush → 潤飾整句
     await c.lastIntentTask?.value
     #expect(polisher.calls.map(\.raw) == ["你好世界"])              // 尾巴「世界」沒被丟
-    #expect(key.ops == [.insert("你好"), .insert("世界"), .delete(4), .insert("你好世界。")])
+    #expect(key.ops == [.insert("你好"), .insert("世界")])
+    #expect(ax.calls.first?.expected == "你好世界" && ax.calls.first?.new == "你好世界。")
 }
 
 /// Finding #2：舊 session 的殘留 transcript 不得注入正在使用的新 session。
@@ -744,7 +802,8 @@ import Testing
 @Test func userActivityWhileListeningFreezesAndBlocksReplace() async {
     let polisher = GatedIntentService()
     polisher.outcome = .newContent("你好。")
-    let (c, _, asr, key, _, hud) = makeController(polisher: polisher)
+    let ax = FakeRangeReplacer()
+    let (c, _, asr, key, _, hud) = makeController(polisher: polisher, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("呃你好"), at: 10.5)
     c.userActivityDetected(at: 10.8)      // 使用者手動打字（設計裁決 2）
@@ -754,7 +813,7 @@ import Testing
     asr.continuation?.finish()
     c.asrStreamEnded(at: 11.6)
     await c.lastIntentTask?.value
-    #expect(!key.ops.contains(.delete(3)))   // 凍結後不得改寫欄位
+    #expect(ax.calls.isEmpty && key.ops == [.insert("呃你好")])   // 凍結後不得改寫欄位
     #expect(!c.isLingering)                  // 凍結 session 不進延續窗
     #expect(!c.ledger.isActive)
 }
@@ -797,7 +856,8 @@ import Testing
 @MainActor
 @Test func editCommandReplacesSessionAndRemovesCommandUtterance() async {
     let intent = GatedIntentService()
-    let (c, _, _, key, _, hud) = makeController(polisher: intent)
+    let ax = FakeRangeReplacer()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)                      // 鎖定
     intent.outcome = .newContent("星期二開會。")
@@ -810,8 +870,9 @@ import Testing
     c.tick(at: 14.6)
     await c.lastIntentTask?.value
     #expect(intent.calls.last?.context.targetText == "星期二開會。")       // 呼叫帶 session 全文
-    // 退指令 6 字 → 退 session 全文 6 字 → 重打修正後全文
-    #expect(Array(key.ops.suffix(3)) == [.delete(6), .delete(6), .insert("星期三開會。")])
+    // issue #44：session 全文＋指令話語＝整個鏡像，一次 verified AX 替換；零鍵盤事件
+    #expect(key.ops.last == .insert("欸改成星期三"))
+    #expect(ax.calls.last?.expected == "星期二開會。欸改成星期三" && ax.calls.last?.new == "星期三開會。")
     #expect(c.ledger.sessionText == "星期三開會。")
     #expect(hud.states.contains(.notice("已修正")))
 }
@@ -819,7 +880,8 @@ import Testing
 @MainActor
 @Test func undoIntentRevertsLastCommit() async {
     let intent = GatedIntentService()
-    let (c, _, _, key, _, hud) = makeController(polisher: intent)
+    let ax = FakeRangeReplacer()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
     intent.outcome = .newContent("星期二開會。")
@@ -835,7 +897,8 @@ import Testing
     c.tick(at: 16.6)
     await c.lastIntentTask?.value
     #expect(c.ledger.sessionText == "星期二開會。")
-    #expect(Array(key.ops.suffix(3)) == [.delete(5), .delete(6), .insert("星期二開會。")])
+    #expect(key.ops.last == .insert("復原上一步"))
+    #expect(ax.calls.last?.expected == "星期三開會。復原上一步" && ax.calls.last?.new == "星期二開會。")
     #expect(hud.states.contains(.notice("已復原")))
     #expect(c.ledger.canUndo)                        // 還能再復原回空
 }
@@ -860,28 +923,12 @@ import Testing
     #expect(c.ledger.sessionText == "內容。")         // 帳本未動
 }
 
-@MainActor
-@Test func lostTextDuringNewContentRescuesToClipboard() async {
-    let intent = GatedIntentService()
-    let clipboard = ClipboardSpy()
-    let pasteFake = RecordingInserter()
-    let (c, _, _, key, _, hud) = makeController(polisher: intent, pasteInserter: pasteFake, clipboard: clipboard)
-    c.hotkeyPressed(at: 10.0)
-    c.hotkeyReleased(at: 10.1)
-    intent.outcome = .newContent("你好。")
-    c.handleTranscript(.finalized("呃你好"), at: 11.0)
-    key.failInsertsRemaining = 2                     // 新文字與原文回復（keystroke 側）都失敗
-    pasteFake.failInsertsRemaining = 2               // paste 備援也失敗
-    c.tick(at: 12.6)
-    await c.lastIntentTask?.value
-    #expect(clipboard.texts == ["呃你好"])            // 鐵律最後手段：原文進剪貼簿
-    #expect(hud.states.contains(.notice("插入失敗，原文已複製到剪貼簿")))
-}
 
 @MainActor
 @Test func undoRequestedDuringLingerRevertsAndKeepsLinger() async {
     let intent = GatedIntentService()
-    let (c, _, asr, key, _, hud) = makeController(polisher: intent)
+    let ax = FakeRangeReplacer()
+    let (c, _, asr, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
     intent.outcome = .newContent("星期二開會。")
@@ -898,7 +945,8 @@ import Testing
     c.asrStreamEnded(at: 15.2)
     #expect(c.isLingering)
     c.undoRequested()                          // HUD 按鈕（無指令話語）
-    #expect(Array(key.ops.suffix(2)) == [.delete(6), .insert("星期二開會。")])
+    #expect(key.ops.last == .insert("改成星期三"))
+    #expect(ax.calls.last?.expected == "星期三開會。" && ax.calls.last?.new == "星期二開會。")
     #expect(c.ledger.sessionText == "星期二開會。")
     #expect(hud.states.contains(.notice("已復原")))
     #expect(c.isLingering)                     // 延續窗不因復原而中斷
@@ -920,7 +968,7 @@ import Testing
     c.handleTranscript(.finalized("半句"), at: 10.5)   // 目前 utterance 尚未收尾
     c.undoRequested()
     #expect(hud.states.contains(.notice("說完這句再復原")))
-    #expect(!key.ops.contains(.delete(2)))
+    #expect(key.ops == [.insert("半句")])
 }
 
 @MainActor
@@ -946,7 +994,7 @@ import Testing
 @MainActor
 @Test func axAnchorFlowsIntoCorrection() async {
     let reader = FakeFieldReader()
-    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 42)
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 42, fieldIdentity: FieldIdentity(token: 1))
     let ax = FakeRangeReplacer()                      // verify／replace 預設 .replaced
     let intent = GatedIntentService()
     let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, fieldReader: reader)
@@ -960,9 +1008,9 @@ import Testing
     c.handleTranscript(.finalized("欸改成星期三"), at: 13.0)
     c.tick(at: 14.6)
     await c.lastIntentTask?.value
-    #expect(ax.verifyCalls.first?.location == 42)     // session 起點錨位流進 AX 路徑
-    #expect(ax.calls.first?.location == 42)
-    #expect(ax.calls.first?.expected == "星期二開會。欸改成星期三")   // session＋指令合併單一範圍
+    #expect(ax.verifyCalls.allSatisfy { $0.location == 42 })   // session 起點錨位流進 AX 路徑（首句潤飾與修正皆是）
+    #expect(ax.calls.last?.location == 42)
+    #expect(ax.calls.last?.expected == "星期二開會。欸改成星期三")   // session＋指令合併單一範圍（首句潤飾是 first，修正是 last）
     #expect(key.ops.last == .insert("欸改成星期三"))   // AX 單次整段替換：零退格（最後的鍵盤事件是指令原文上屏）
     #expect(c.ledger.sessionText == "星期三開會。")
     #expect(hud.states.contains(.notice("已修正")))
@@ -971,8 +1019,8 @@ import Testing
 @MainActor
 @Test func axMismatchFreezesSession() async {
     let reader = FakeFieldReader()
-    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 0)
-    let ax = FakeRangeReplacer(); ax.verifyResult = .mismatch
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1))
+    let ax = FakeRangeReplacer()
     let intent = GatedIntentService()
     let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, fieldReader: reader)
     c.hotkeyPressed(at: 10.0)
@@ -980,7 +1028,8 @@ import Testing
     intent.outcome = .newContent("內容。")
     c.handleTranscript(.finalized("內容"), at: 11.0)
     c.tick(at: 12.6)
-    await c.lastIntentTask?.value
+    await c.lastIntentTask?.value                     // 首句潤飾先正常落定（它現在也走 AX）
+    ax.verifyResult = .mismatch                       // 只對接下來的修正注入 mismatch
     intent.outcome = .editedSession("改。")
     c.handleTranscript(.finalized("改一下"), at: 13.0)
     let opsBefore = key.ops.count
@@ -1002,7 +1051,8 @@ import Testing
     // 危險順序：使用者活動（未過濾的 HUD mouseDown）先到 → 封存 → undo 變 no-op
     do {
         let intent = GatedIntentService()
-        let (c, _, asr, key, _, _) = makeController(polisher: intent)
+        let ax = FakeRangeReplacer()
+        let (c, _, asr, key, _, _) = makeController(polisher: intent, rangeReplacer: ax)
         c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
         intent.outcome = .newContent("星期二開會。")
         c.handleTranscript(.finalized("星期二開會"), at: 11.0)
@@ -1013,16 +1063,17 @@ import Testing
         c.hotkeyPressed(at: 15.0); c.hotkeyReleased(at: 15.05)
         asr.continuation?.finish(); c.asrStreamEnded(at: 15.2)
         #expect(c.isLingering)
-        let opsBefore = key.ops.count
+        let opsBefore = key.ops.count, axBefore = ax.calls.count
         c.userActivityDetected(at: 15.3)           // 未過濾的 mouseDown → 立即封存
         #expect(!c.isLingering)                    // session 已封存
         c.undoRequested()                          // mouseUp 才觸發，命中 .idle → no-op
-        #expect(key.ops.count == opsBefore)        // 什麼都沒退，復原失效（危險已成立）
+        #expect(key.ops.count == opsBefore && ax.calls.count == axBefore)   // 什麼都沒退，復原失效（危險已成立）
     }
     // 正確接線：HUD 點擊被 HotkeyMonitor 過濾（不送 userActivity），只送 undoRequested → 復原成立
     do {
         let intent = GatedIntentService()
-        let (c, _, asr, key, _, hud) = makeController(polisher: intent)
+        let ax = FakeRangeReplacer()
+        let (c, _, asr, _, _, hud) = makeController(polisher: intent, rangeReplacer: ax)
         c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
         intent.outcome = .newContent("星期二開會。")
         c.handleTranscript(.finalized("星期二開會"), at: 11.0)
@@ -1034,7 +1085,7 @@ import Testing
         asr.continuation?.finish(); c.asrStreamEnded(at: 15.2)
         #expect(c.isLingering)
         c.undoRequested()                          // 過濾後只剩這一路
-        #expect(Array(key.ops.suffix(2)) == [.delete(6), .insert("星期二開會。")])
+        #expect(ax.calls.last?.expected == "星期三開會。" && ax.calls.last?.new == "星期二開會。")
         #expect(c.ledger.sessionText == "星期二開會。")
         #expect(hud.states.contains(.notice("已復原")))
         #expect(c.isLingering)                     // 復原不中斷延續窗
@@ -1114,7 +1165,8 @@ import Testing
 @MainActor
 @Test func editedSessionWithStaleBasisDegradesToKeepRaw() async {
     let intent = GatedIntentService()
-    let (c, _, _, key, _, hud) = makeController(polisher: intent)
+    let ax = FakeRangeReplacer()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)                 // 鎖定
     intent.gatedRaws = ["第一句"]              // 第一句卡住、第二句直通
@@ -1126,9 +1178,10 @@ import Testing
     c.tick(at: 14.6)                           // 第二句（修正指令）以「不含第一句」的過期基準呼叫 LLM
     intent.release()                            // 放行第一句；套用串行化：第一句先落地、第二句後落地
     await c.lastIntentTask?.value
-    // 第一句因尾端已前進而保留原文（M1 設計裁決）、修正因基準過期降級 keepRaw——重點：第一句沒有被抹掉
-    #expect(c.ledger.sessionText == "第一句欸改一下")
+    // 第一句尾端已前進 → 就地回收成「第一句。」（M10-C）；修正因基準過期降級 keepRaw——重點：第一句沒有被抹掉、竄改全文沒落地
+    #expect(c.ledger.sessionText == "第一句。欸改一下")
     #expect(!key.ops.contains(.insert("被竄改的全文。")))
+    #expect(!ax.calls.contains { $0.new == "被竄改的全文。" })
     #expect(hud.states.contains(.notice("未修正（內容已變動，請再說一次）")))
     #expect(intent.calls.last?.context.targetText == "")   // 佐證：第二句呼叫時基準確實是過期的空全文
 }
@@ -1136,7 +1189,8 @@ import Testing
 @MainActor
 @Test func outcomesApplyInUtteranceOrderEvenIfLaterReturnsFirst() async {
     let intent = GatedIntentService()
-    let (c, _, _, key, _, _) = makeController(polisher: intent)
+    let ax = FakeRangeReplacer()
+    let (c, _, _, _, _, _) = makeController(polisher: intent, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
     intent.gatedRaws = ["第一句"]              // 模擬第 N 句慢、第 N+1 句先返回
@@ -1149,12 +1203,12 @@ import Testing
     intent.release()
     await c.lastIntentTask?.value
     // 串行化保證帳本與欄位順序一致：先一後二，不得左右對調。
-    // 第一句因尾端已前進而保留原文（M1 設計裁決：潤飾僅替換仍在尾端的 utterance）。
-    #expect(c.ledger.sessionText == "第一句第二句。")
-    let inserts = key.ops.compactMap { if case .insert(let s) = $0 { return s } else { return nil } }
-    let i1 = inserts.firstIndex(of: "第一句")
-    let i2 = inserts.firstIndex(of: "第二句。")
-    #expect(i1 != nil && i2 != nil && i1! < i2!)
+    // 第一句尾端已前進 → 就地回收（M10-C，preservingCaret）；第二句仍在尾端 → 正常尾端替換。
+    // 順序證據＝AX 驗證的先後：先驗第一句、再驗第二句。
+    #expect(c.ledger.sessionText == "第一句。第二句。")
+    #expect(ax.verifyCalls.map(\.expected) == ["第一句", "第二句"])
+    #expect(ax.preservingCaretCalls.map(\.new) == ["第一句。"])
+    #expect(ax.calls.map(\.new) == ["第二句。"])
 }
 
 @MainActor
@@ -1183,8 +1237,10 @@ import Testing
 // MARK: - 選取即目標（規格 §3.6，M3 設計裁決 1–4）
 
 /// 便利：帶選取的欄位快照
+/// 有 AX 的選取欄位（issue #44 起帶 identity——沒有 identity 的話 replaceSelection 會走 .unsupported 降級）
 private func selectionField(_ text: String, location: Int) -> FieldContext {
     FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: location,
+                 fieldIdentity: FieldIdentity(token: 1),
                  selectedRange: .init(location: location, length: text.utf16.count),
                  selectedText: text)
 }
@@ -1533,21 +1589,6 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
 }
 
-@MainActor
-@Test func lostTextFallsBackToClipboardRescue() async {
-    let intent = GatedIntentService()
-    intent.outcome = .newContent("第一句。")
-    let paste = RecordingInserter()
-    let spy = ClipboardSpy()
-    let (c, _, _, key, _, _) = makeController(polisher: intent, pasteInserter: paste, clipboard: spy)
-    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
-    c.handleTranscript(.finalized("第一句"), at: 11.0)          // 原文上屏成功
-    key.failInsertsRemaining = 2                                // 之後的插入全失敗：
-    paste.failInsertsRemaining = 2                              // 新文（主/副）＋原文回復（主/副）
-    c.tick(at: 12.6)
-    await c.lastIntentTask?.value
-    #expect(spy.texts == ["第一句"])                             // 鐵律最後手段：原文進剪貼簿
-}
 
 /// 規格 §4.5「per-session 臨時覆蓋」：session 結束（封存）即失效
 @MainActor
@@ -1578,7 +1619,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 @MainActor
 @Test func sessionLanguageOverrideClearsWhenSecureFieldAbortsPendingSession() {
     let reader = FakeFieldReader()
-    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 0)
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1))
     let (c, _, asr, _, _, _) = makeController(fieldReader: reader)
     c.settings.sessionLanguageOverride = .english
     c.hotkeyPressed(at: 10.0)
@@ -1619,7 +1660,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     intent.outcome = .newContent("你好。")
     let history = FakeHistory()
     let reader = FakeFieldReader()
-    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0,
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1),
                                   frontAppBundleID: "com.apple.TextEdit", frontAppName: "TextEdit")
     let (c, _, asr, _, _, _) = makeController(polisher: intent, fieldReader: reader, history: history)
     c.hotkeyPressed(at: 10.0)
@@ -1670,7 +1711,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     let intent = GatedIntentService()
     var ocrCalls = 0
     let reader = FakeFieldReader()
-    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0)   // 無前後文
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1))   // 無前後文
     let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader,
                                             contextOCR: { ocrCalls += 1; return "螢幕參考" })
     c.hotkeyPressed(at: 10.0)
@@ -1687,7 +1728,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     let intent = GatedIntentService()
     var ocrCalls = 0
     let reader = FakeFieldReader()
-    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 3, contextBefore: "前文")
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 3, fieldIdentity: FieldIdentity(token: 1), contextBefore: "前文")
     let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader,
                                             contextOCR: { ocrCalls += 1; return "不該用到" })
     c.hotkeyPressed(at: 10.0)
@@ -1729,7 +1770,8 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     polisher.gated = true
     polisher.outcome = .newContent("第一段。")
     let history = FakeHistory()
-    let (c, _, _, _, _, _) = makeController(polisher: polisher, history: history)
+    // 無 anchor → 過期尾端回收不可用，才會走到 counterMismatch 的 keepRaw（有 anchor 時會就地回收，見 lateArrivingPolishIsRecoveredInPlace）
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, fieldReader: FakeFieldReader(), history: history)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("第一段"), at: 11.0)
@@ -1743,45 +1785,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(events[0].utteranceRaw == "第一段")
 }
 
-@MainActor
-@Test func replaceFailedRestoredRecordsInsertFailed() async {
-    let polisher = GatedIntentService()
-    polisher.outcome = .newContent("潤飾後。")
-    let history = FakeHistory()
-    let paste = RecordingInserter()
-    let (c, _, _, key, _, _) = makeController(polisher: polisher, pasteInserter: paste, history: history)
-    c.hotkeyPressed(at: 10.0)
-    c.hotkeyReleased(at: 10.1)
-    c.handleTranscript(.finalized("原文"), at: 11.0)
-    key.failInsertsRemaining = 1                        // 新文 primary 失敗
-    paste.failInsertsRemaining = 1                      // 新文 secondary 失敗 → 還原（還原插入會成功）
-    c.tick(at: 12.6)
-    await c.lastIntentTask?.value
-    let events = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
-    #expect(events.count == 1)
-    #expect(events[0].outcomeText == "replaceFailedRestored")
-}
 
-@MainActor
-@Test func lostTextRecordsInsertFailed() async {
-    let polisher = GatedIntentService()
-    polisher.outcome = .newContent("潤飾後。")
-    let history = FakeHistory()
-    let clip = ClipboardSpy()
-    let paste = RecordingInserter()
-    let (c, _, _, key, _, _) = makeController(polisher: polisher, pasteInserter: paste,
-                                              clipboard: clip, history: history)
-    c.hotkeyPressed(at: 10.0)
-    c.hotkeyReleased(at: 10.1)
-    c.handleTranscript(.finalized("原文"), at: 11.0)
-    key.failInsertsRemaining = 2                        // 新文＋還原全失敗
-    paste.failInsertsRemaining = 2
-    c.tick(at: 12.6)
-    await c.lastIntentTask?.value
-    let events = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
-    #expect(events.count == 1)
-    #expect(events[0].outcomeText == "lostText")
-}
 
 @MainActor
 @Test func basisExpiredRecordsInsertSkipped() async {
@@ -1874,28 +1878,6 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(skipped.contains { $0.outcomeText == "counterMismatch" })
 }
 
-@MainActor
-@Test func correctionInsertFailureRecordsReplaceFailedRestored() async {
-    let polisher = GatedIntentService()
-    polisher.outcomeByRaw = ["首句": .newContent("首句。"),
-                             "改一下": .editedSession("首句改。")]
-    let history = FakeHistory()
-    let paste = RecordingInserter()
-    let (c, _, _, key, _, _) = makeController(polisher: polisher, pasteInserter: paste, history: history)
-    c.hotkeyPressed(at: 10.0)
-    c.hotkeyReleased(at: 10.1)
-    c.handleTranscript(.finalized("首句"), at: 11.0)
-    c.tick(at: 12.6)
-    await c.lastIntentTask?.value                       // 首句落定
-    c.handleTranscript(.finalized("改一下"), at: 13.0)
-    key.failInsertsRemaining = 1                        // 修正文 primary 失敗
-    paste.failInsertsRemaining = 1                      // 修正文 secondary 失敗 → 還原成功
-    c.tick(at: 14.6)
-    await c.lastIntentTask?.value
-    let failed = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
-    #expect(failed.count == 1)
-    #expect(failed[0].outcomeText == "replaceFailedRestored")
-}
 
 @MainActor
 @Test func selectionChangedRecordsInsertSkipped() async {
@@ -1927,7 +1909,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     reader.context = selectionField("既有選取", location: 0)
     let paste = RecordingInserter()
     // rangeReplacer 為 nil → .unsupported → insertDetached；讓兩個 inserter 都失敗
-    let (c, _, _, key, _, _) = makeController(polisher: intent, pasteInserter: paste,
+    let (c, _, _, key, _, _) = makeController(polisher: intent, pasteInserter: paste, rangeReplacer: nil,
                                               clipboard: clip, fieldReader: reader, history: history)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)
@@ -1950,7 +1932,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     // .fieldMismatch 只在 AX 路徑成立（InsertionCoordinator.swift:127 需 axAnchor 非 nil），
     // 故必須給有 caretLocation 的 fieldReader——比照 axMismatchFreezesSession 的構造。
     let reader = FakeFieldReader()
-    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 0)
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1))
     let (c, _, _, _, _, _) = makeController(polisher: polisher, rangeReplacer: ax,
                                             fieldReader: reader, history: history)
     c.hotkeyPressed(at: 10.0)
@@ -1967,28 +1949,6 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(c.ledger.frozen)                            // 既有行為不變：mismatch 即凍結
 }
 
-@MainActor
-@Test func undoInsertFailureRecordsReplaceFailedRestored() async {
-    let polisher = GatedIntentService()
-    polisher.outcomeByRaw = ["首句": .newContent("首句。"),
-                             "復原": .undo]
-    let history = FakeHistory()
-    let paste = RecordingInserter()
-    let (c, _, _, key, _, _) = makeController(polisher: polisher, pasteInserter: paste, history: history)
-    c.hotkeyPressed(at: 10.0)
-    c.hotkeyReleased(at: 10.1)
-    c.handleTranscript(.finalized("首句"), at: 11.0)
-    c.tick(at: 12.6)
-    await c.lastIntentTask?.value                       // 首句落定（建立 undo 版本）
-    c.handleTranscript(.finalized("復原"), at: 13.0)
-    key.failInsertsRemaining = 1
-    paste.failInsertsRemaining = 1
-    c.tick(at: 14.6)
-    await c.lastIntentTask?.value
-    let failed = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
-    #expect(failed.count == 1)
-    #expect(failed[0].outcomeText == "replaceFailedRestored")
-}
 
 // MARK: - M8：批次 ASR 引擎的兩個新事件
 
