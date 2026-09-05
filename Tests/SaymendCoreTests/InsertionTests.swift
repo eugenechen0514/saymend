@@ -107,7 +107,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     #expect(c.currentUtteranceLength == 1)   // 以串接後字串計數，不是片段各自加總
     #expect(c.retractSession() == .replaced)
     #expect(ax.calls.count == 1)
-    #expect(ax.calls[0].location == 7 && ax.calls[0].expected == "e\u{301}" && ax.calls[0].new == "")
+    #expect(ax.calls.first?.location == 7 && ax.calls.first?.expected == "e\u{301}" && ax.calls.first?.new == "")
 }
 
 // MARK: - 鏡像（displayedText）：本 session 從 anchor 起實際寫在欄位上的文字
@@ -143,7 +143,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     #expect(c.currentUtteranceLength == 3)
     #expect(c.displayedText == "已經落地的字下一句")
     #expect(c.retractSession() == .replaced)
-    #expect(ax.calls[0].expected == "已經落地的字下一句")
+    #expect(ax.calls.first?.expected == "已經落地的字下一句")
 }
 
 // MARK: - retractSession（Esc）：整段退回 initialText，verified AX 專屬
@@ -156,8 +156,8 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let stale = c.currentTailSnapshot()
     #expect(c.retractSession() == .replaced)
     #expect(ax.verifyCalls.count == 1 && ax.calls.count == 1)
-    #expect(ax.calls[0].identity == sessionIdentity)
-    #expect(ax.calls[0].location == 5 && ax.calls[0].expected == "嗨嗨第二句" && ax.calls[0].new == "")
+    #expect(ax.calls.first?.identity == sessionIdentity)
+    #expect(ax.calls.first?.location == 5 && ax.calls.first?.expected == "嗨嗨第二句" && ax.calls.first?.new == "")
     #expect(key.ops == [.insert("嗨嗨"), .insert("第二句")])     // 零鍵盤事件
     #expect(c.displayedText == "")
     #expect(c.currentUtteranceLength == 0)
@@ -227,6 +227,19 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 // MARK: - replaceTail（潤飾）：verified AX 範圍＝鏡像尾端
 
+@Test func replaceTailAcrossUtteranceCombiningMarkUsesUTF16Boundary() throws {
+    // 前一句尾是 "e"、下一句只有組合重音符：欄位上合成一個字位 é，但兩者屬不同 utterance。
+    // 字位語意的 hasSuffix 會說鏡像「不以 \u{301} 結尾」而誤判 mismatch；UTF-16 比對才對得上 AX 的範圍。
+    let (c, _, _, ax) = makeAXCoordinator(anchor: 10)
+    try c.insertFinalized("e")
+    _ = c.snapshotAndBeginNext()                              // 第一句潤飾在途
+    try c.insertFinalized("\u{301}")
+    let snap = c.snapshotAndBeginNext()
+    #expect(c.replaceTail(snap, with: "\u{301}!") == .replaced)
+    #expect(ax.calls.first?.location == 11 && ax.calls.first?.expected == "\u{301}")
+    #expect(Array(c.displayedText.utf16) == Array("e\u{301}!".utf16))
+}
+
 @Test func replaceTailUsesVerifiedAXRangeAtMirrorTail() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 10)
     try c.insertFinalized("呃你好")
@@ -234,7 +247,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     #expect(c.replaceTail(snap, with: "你好。") == .replaced)
     #expect(ax.verifyCalls.count == 1)
     #expect(ax.calls.count == 1)
-    #expect(ax.calls[0].location == 10 && ax.calls[0].expected == "呃你好" && ax.calls[0].new == "你好。")
+    #expect(ax.calls.first?.location == 10 && ax.calls.first?.expected == "呃你好" && ax.calls.first?.new == "你好。")
     #expect(key.ops == [.insert("呃你好")])                  // 零退格、零重打
     #expect(c.displayedText == "你好。")
 }
@@ -247,8 +260,8 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let snap = c.snapshotAndBeginNext()
     #expect(snap.length == 2)
     #expect(c.replaceTail(snap, with: "好") == .replaced)
-    #expect(ax.calls[0].location == 12, "anchor 10 + 鏡像 14 − 快照 12")
-    #expect(ax.calls[0].expected == "👨‍👩‍👧‍👦好")
+    #expect(ax.calls.first?.location == 12, "anchor 10 + 鏡像 14 − 快照 12")
+    #expect(ax.calls.first?.expected == "👨‍👩‍👧‍👦好")
     #expect(c.displayedText == "前綴好")
 }
 
@@ -310,10 +323,10 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     #expect(c.replaceSession(commandSnapshot: snap, with: "新文") == .replaced)
     #expect(ax.verifyCalls.count == 1)                      // 先驗證
     #expect(ax.calls.count == 1)                            // 再替換
-    #expect(ax.calls[0].identity == sessionIdentity)
-    #expect(ax.calls[0].location == 42)
-    #expect(ax.calls[0].expected == "舊文指令")              // session＋指令話語合併為單一範圍
-    #expect(ax.calls[0].new == "新文")
+    #expect(ax.calls.first?.identity == sessionIdentity)
+    #expect(ax.calls.first?.location == 42)
+    #expect(ax.calls.first?.expected == "舊文指令")              // session＋指令話語合併為單一範圍
+    #expect(ax.calls.first?.new == "新文")
     #expect(key.ops == [.insert("舊文"), .insert("指令")])   // 全程零鍵盤事件
     #expect(c.displayedText == "新文")
 }
@@ -402,8 +415,8 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let outcome = c.replaceSelection(location: 7, expected: "原選取", with: "改寫後")
     #expect(outcome == .replaced)
     #expect(ax.calls.count == 1)
-    #expect(ax.calls[0].identity == sessionIdentity)
-    #expect(ax.calls[0].location == 7 && ax.calls[0].expected == "原選取" && ax.calls[0].new == "改寫後")
+    #expect(ax.calls.first?.identity == sessionIdentity)
+    #expect(ax.calls.first?.location == 7 && ax.calls.first?.expected == "原選取" && ax.calls.first?.new == "改寫後")
     #expect(key.ops.isEmpty && paste.ops.isEmpty)
     #expect(c.displayedText == "改寫後")
 }
@@ -477,10 +490,10 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let outcome = c.replaceStaleTail(snap, at: 40, with: "第一段。")
     #expect(outcome == .replaced)
     #expect(ax.preservingCaretCalls.count == 1)
-    #expect(ax.preservingCaretCalls[0].identity == sessionIdentity)
-    #expect(ax.preservingCaretCalls[0].location == 40)
-    #expect(ax.preservingCaretCalls[0].expected == "第一段")
-    #expect(ax.preservingCaretCalls[0].new == "第一段。")
+    #expect(ax.preservingCaretCalls.first?.identity == sessionIdentity)
+    #expect(ax.preservingCaretCalls.first?.location == 40)
+    #expect(ax.preservingCaretCalls.first?.expected == "第一段")
+    #expect(ax.preservingCaretCalls.first?.new == "第一段。")
     #expect(ax.calls.isEmpty)                           // 不得走會把游標收到中段的舊路徑
     #expect(key.ops == [.insert("第一段"), .insert("第二段")])   // 零退格：後面那句不能被動到
     #expect(c.displayedText == "第一段。第二段")          // 鏡像中段更新

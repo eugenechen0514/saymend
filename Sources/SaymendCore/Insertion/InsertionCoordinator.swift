@@ -202,13 +202,18 @@ public final class InsertionCoordinator {
         guard let ax = rangeReplacer, let anchor = sessionAnchor, let identity = sessionIdentity else {
             return .unverified
         }
-        // 鏡像若對不上快照（不該發生的漂移），寧可判 mismatch 不動欄位，不要用錯的位置去驗
-        guard displayedText.hasSuffix(snap.text) else { return .fieldMismatch }
-        let location = anchor + displayedText.utf16.count - snap.text.utf16.count
+        // 以 UTF-16 比對鏡像尾端：String 的 hasSuffix／removeLast 是字位語意（且會做 canonical equivalence），
+        // 跨 utterance 的組字（前一句尾 "e"、下一句只有 "\u{301}"）會讓字位邊界對不上；AX 範圍本來就是 UTF-16。
+        // 鏡像若對不上快照（不該發生的漂移），寧可判 mismatch 不動欄位，不要用錯的位置去驗。
+        let mirror = Array(displayedText.utf16), tail = Array(snap.text.utf16)
+        guard mirror.count >= tail.count, Array(mirror[(mirror.count - tail.count)...]) == tail else {
+            return .fieldMismatch
+        }
+        let location = anchor + mirror.count - tail.count
         return performVerifiedReplace(ax, identity: identity, location: location,
                                       expected: snap.text, with: newText) {
-            self.displayedText.removeLast(snap.text.count)
-            self.displayedText += newText
+            // 前綴是合法字串（鏡像＝前綴＋快照的逐 unit 串接），切在快照起點不會留下孤立 surrogate
+            self.displayedText = String(decoding: mirror[..<(mirror.count - tail.count)], as: UTF16.self) + newText
         }
     }
 
