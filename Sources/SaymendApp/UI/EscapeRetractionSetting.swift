@@ -15,9 +15,14 @@ enum EscapeRetractionSettingsText {
 
 /// 兩個 Toggle 的 label、說明與 persistence Binding 同源：SettingsView 只依此表產生控件，
 /// 不存在兩條 type-correct 的 `onChange` 可以接反；測試直接驅動相同的 Binding。
-enum EscapeRetractionSetting: CaseIterable {
+enum EscapeRetractionSetting: CaseIterable, Hashable {
     case polishedText
     case frozenSession
+
+    /// 目前設定值的快照（GeneralSettingsTab 的 @State 種子）
+    static func snapshot(of settings: AppSettings) -> [EscapeRetractionSetting: Bool] {
+        Dictionary(uniqueKeysWithValues: allCases.map { ($0, $0.binding(to: settings).wrappedValue) })
+    }
 
     var title: String {
         switch self {
@@ -33,7 +38,8 @@ enum EscapeRetractionSetting: CaseIterable {
         }
     }
 
-    /// AppSettings 非 ObservableObject：Binding 直接讀寫 settings，不經 @State 快照。
+    /// persistence 端的 Binding：直接讀寫 AppSettings。畫面重繪不靠它——AppSettings 非 ObservableObject，
+    /// GeneralSettingsTab 另以 @State 快照包住它（同本檔其他設定的規則），這裡只負責「寫到正確的 key」。
     func binding(to settings: AppSettings) -> Binding<Bool> {
         switch self {
         case .polishedText:

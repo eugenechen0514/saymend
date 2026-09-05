@@ -60,7 +60,6 @@ public final class InsertionCoordinator {
     // 由 controller 在 ledger begin／archive 時設定與清除；延續窗 resume 只呼叫 reset()，這些都不動。
     private var sessionAnchor: Int?
     private var sessionIdentity: FieldIdentity?
-    private var initialText = ""
     /// **欄位鏡像**：本 session 從 anchor 起實際寫在欄位上的文字。每個物理寫入都在本型別內同步更新——
     /// 所有寫入都經這裡，不會漏站。與 `SessionLedger.sessionText` 的差別：鏡像含尚未落定（潤飾在途）的 raw
     /// 與進行中的 utterance；Esc 退回以它為 expected，才能在潤飾在途時也退得掉（issue #21 的 1.5 秒窗口）。
@@ -78,10 +77,10 @@ public final class InsertionCoordinator {
 
     /// 新 session：anchor／identity 來自 reader 同一次 snapshot（與 ledger 相同來源），
     /// initialText＝選取即目標的原選取（鏡像從它開始），一般聽寫為空。
+    /// 起始原文本身不用留：Esc 的退回目標由呼叫端從帳本取（issue #46），這裡只需要鏡像。
     public func beginSession(anchor: Int?, identity: FieldIdentity?, initialText: String = "") {
         sessionAnchor = anchor
         sessionIdentity = identity
-        self.initialText = initialText
         displayedText = initialText
         currentUtteranceText = ""
     }
@@ -90,7 +89,6 @@ public final class InsertionCoordinator {
     public func endSession() {
         sessionAnchor = nil
         sessionIdentity = nil
-        initialText = ""
         displayedText = ""
         currentUtteranceText = ""
     }

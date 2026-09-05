@@ -102,6 +102,9 @@ struct GeneralSettingsTab: View {
     @State private var whisperTimeout: Double
     // 本機 WhisperKit（M9 §5）
     @State private var whisperLocalModelPath: URL?
+    // Esc 退字的兩個邊界（issue #46）：以 descriptor 為 key 的 @State 快照——AppSettings 非 ObservableObject，
+    // 裸 Binding 直讀寫 settings 沒有任何機制讓 SwiftUI 重繪；寫回仍經同一個 descriptor，沒有兩條可以接反的線
+    @State private var escapeRetraction: [EscapeRetractionSetting: Bool]
     // 串流參數（issue #15）：預設收合，一般使用者不會碰到
     @State private var showStreamAdvanced = false
     @State private var streamRequiredSegments: Int
@@ -140,6 +143,7 @@ struct GeneralSettingsTab: View {
         self.whisperLocalLastLoad = whisperLocalLastLoad
         _modelWaitTimeout = State(initialValue: settings.whisperModelWaitTimeout)
         _hotkey = State(initialValue: settings.hotkey)
+        _escapeRetraction = State(initialValue: EscapeRetractionSetting.snapshot(of: settings))
         _language = State(initialValue: settings.outputLanguage)
         _baseURL = State(initialValue: settings.llmBaseURLString)
         _model = State(initialValue: settings.llmModel)
@@ -283,8 +287,14 @@ struct GeneralSettingsTab: View {
         }
     }
 
+    /// @State 快照在前（觸發重繪）、persistence Binding 在後（寫到正確的 key）；兩者都由同一個 option 決定。
     @ViewBuilder private func escapeRetractionControl(_ option: EscapeRetractionSetting) -> some View {
-        Toggle(option.title, isOn: option.binding(to: settings))
+        Toggle(option.title, isOn: Binding(
+            get: { escapeRetraction[option] ?? option.binding(to: settings).wrappedValue },
+            set: { newValue in
+                escapeRetraction[option] = newValue
+                option.binding(to: settings).wrappedValue = newValue
+            }))
         Text(option.explanation)
             .font(.caption).foregroundStyle(.secondary)
     }
