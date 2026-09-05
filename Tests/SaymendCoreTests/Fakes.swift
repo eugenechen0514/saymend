@@ -107,7 +107,12 @@ final class FakeHUD: HUDPresenting {
 
 final class FakeFieldReader: FieldContextProviding {
     var context = FieldContext(hasFocusedElement: true, isSecure: false, caretLocation: nil)
-    func snapshot() -> FieldContext { context }
+    /// 被歸還的 identity token（issue #43）。不變式：session 結束後 released.count == snapshots
+    /// ——每個 snapshot 的 token 要嘛被 ledger 採用（archive 時歸還）、要嘛當場歸還。
+    private(set) var released: [FieldIdentity?] = []
+    private(set) var snapshots = 0
+    func snapshot() -> FieldContext { snapshots += 1; return context }
+    func releaseFieldIdentity(_ identity: FieldIdentity?) { released.append(identity) }
 }
 
 /// 歷史 spy

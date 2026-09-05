@@ -122,7 +122,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         historyStore?.purge(olderThanDays: settings.historyRetentionDays)   // 啟動時清過期（規格 §4.9）
 
         let axInserter = AXInserter()
-        let axReader = AXFieldReader(profiles: profileStore)
+        // 欄位 identity registry（issue #43）：reader 與 feedback 共用，同一元素同一 token
+        let axRegistry = AXFieldRegistry()
+        let axReader = AXFieldReader(profiles: profileStore, registry: axRegistry)
         let coordinator = InsertionCoordinator(keystroke: keystroke, paste: PasteInserter(),
                                                rangeReplacer: axInserter)
         let provider = OpenAICompatProvider(configProvider: { [settings] in settings.openAIConfig() })
@@ -203,7 +205,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             traditionalize: traditionalize,
             inputs: promptInputs,
             promptBudget: PromptBudget.productionDefault())   // Debug 可由 E2E env 注入；Release 恆為預設
-        feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: hud, profiles: profileStore)
+        feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: hud, profiles: profileStore,
+                                                  registry: axRegistry)
         controller = DictationController(
             audio: audio,
             asr: asrEngine,

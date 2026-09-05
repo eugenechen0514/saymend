@@ -118,3 +118,22 @@ import Testing
     let step = ledger.undo()
     #expect(step?.to == "")
 }
+
+/// issue #43：session 起始欄位的 identity token 與 axAnchor 同住 ledger（兩者都是 AX 路徑的錨），
+/// begin 時存、archive 時清。#44 的刪字驗證會拿它去對現在聚焦的 element。
+@Test func beginStoresFieldIdentityAndArchiveClearsIt() {
+    var l = SessionLedger()
+    let id = FieldIdentity(token: 42)
+    l.begin(axAnchor: 3, fieldIdentity: id)
+    #expect(l.fieldIdentity == id)
+    #expect(l.axAnchor == 3)
+    l.archive()
+    #expect(l.fieldIdentity == nil)
+}
+
+@Test func beginWithoutIdentityLeavesItNil() {
+    var l = SessionLedger()
+    l.begin(axAnchor: nil, fieldIdentity: FieldIdentity(token: 1))
+    l.begin(axAnchor: nil)                   // 新 session 沒給 identity → 不得殘留上一個
+    #expect(l.fieldIdentity == nil)
+}

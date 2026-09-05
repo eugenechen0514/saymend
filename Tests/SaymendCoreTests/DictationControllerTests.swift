@@ -148,6 +148,102 @@ import Testing
     #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.isEmpty)
 }
 
+// MARK: - issue #43：session 起始欄位 identity 的 pin／release
+
+/// reader 在熱鍵按下的 snapshot 裡給出 identity token，controller 必須把它存進 ledger（與 axAnchor 同住）。
+@MainActor
+@Test func sessionPinsFieldIdentityFromReaderSnapshot() {
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 5, fieldIdentity: FieldIdentity(token: 7))
+    let (c, _, _, _, _, _) = makeController(fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    #expect(c.ledger.fieldIdentity == FieldIdentity(token: 7))
+    #expect(c.ledger.axAnchor == 5)
+}
+
+/// 選取即目標走的是另一個 begin 呼叫點，identity 一樣要進 ledger。
+@MainActor
+@Test func selectionSessionPinsFieldIdentityToo() {
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 3,
+                                  fieldIdentity: FieldIdentity(token: 9),
+                                  selectedRange: .init(location: 3, length: 4), selectedText: "選取文字")
+    let (c, _, _, _, _, _) = makeController(fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    #expect(c.ledger.fieldIdentity == FieldIdentity(token: 9))
+    #expect(c.ledger.axAnchor == 3)
+}
+
+/// archive 時把 begin 拿到的 token 歸還給 reader（registry 引用計數減一），ledger 清空。
+@MainActor
+@Test func archiveReleasesThePinnedFieldIdentity() {
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 7))
+    let (c, _, _, _, _, _) = makeController(fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)                               // snapshot #1：採用
+    #expect(reader.released.isEmpty)
+    c.handleTranscript(.finalized("字"), at: 10.5)            // snapshot #2：密碼守衛用，當場歸還
+    #expect(reader.released == [FieldIdentity(token: 7)], "守衛用的 snapshot 不採用就要立即歸還")
+    #expect(c.ledger.fieldIdentity == FieldIdentity(token: 7), "ledger 那一份不受影響")
+    c.escapePressed()                                       // → archiveSession：歸還採用的那一份
+    #expect(reader.released == [FieldIdentity(token: 7), FieldIdentity(token: 7)])
+    #expect(reader.released.count == reader.snapshots, "不變式：每個 snapshot 的 token 最終都歸還恰一次")
+    #expect(c.ledger.fieldIdentity == nil)
+}
+
+/// 開始時就在密碼欄位：不開 session，snapshot 的 token 也不得洩漏。
+@MainActor
+@Test func secureFieldAtStartReleasesTheSnapshotToken() {
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, isSecure: true, fieldIdentity: FieldIdentity(token: 7))
+    let (c, _, _, _, _, _) = makeController(fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    #expect(!c.ledger.isActive)
+    #expect(reader.released == [FieldIdentity(token: 7)])
+    #expect(reader.released.count == reader.snapshots)
+}
+
+/// reader 沒給 identity（無 AX）：沒東西可歸還，controller 不得對 reader 呼叫 release(nil) 製造噪音。
+@MainActor
+@Test func sessionWithoutIdentityArchivesCleanly() {
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: nil)
+    let (c, _, _, _, _, _) = makeController(fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("字"), at: 10.5)
+    #expect(c.ledger.fieldIdentity == nil)
+    c.escapePressed()
+    #expect(reader.released.isEmpty)
+}
+
+/// 延續窗內再按熱鍵＝同 session（規格 §3.4），不走 begin：identity 維持起始那一個、不歸還。
+/// 即使 reader 此刻回報另一個 token（焦點已移）也不改——「resume 要不要重新驗證欄位」是 #44 的事，
+/// 本票只釘住現況：session 期間 ledger 的 identity 只在 begin 設一次、archive 清一次。
+@MainActor
+@Test func lingerResumeKeepsPinnedIdentityWithoutReleasing() async {
+    let polisher = GatedIntentService()
+    polisher.outcome = .newContent("你好。")
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 7))
+    let (c, _, asr, _, _, _) = makeController(polisher: polisher, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("呃你好"), at: 10.5)
+    c.hotkeyReleased(at: 11.0)
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.2)
+    await c.lastIntentTask?.value
+    #expect(c.isLingering)
+    let releasedBeforeResume = reader.released.count        // 前面每句 finalized 的守衛 snapshot 都已當場歸還
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 8))
+    c.hotkeyPressed(at: 12.0)                               // 延續窗內再按 → resume：不 begin，新 token 當場歸還
+    #expect(c.ledger.fieldIdentity == FieldIdentity(token: 7))
+    #expect(reader.released.suffix(1) == [FieldIdentity(token: 8)])
+    #expect(reader.released.count == releasedBeforeResume + 1)
+    c.escapePressed()
+    #expect(reader.released.last == FieldIdentity(token: 7), "最後歸還的是起始採用的那一個")
+    #expect(reader.released.count == reader.snapshots, "不變式：每個 snapshot 的 token 最終都歸還恰一次")
+}
+
 @MainActor
 @Test func pressWhileHoldIsIgnored() {
     let (c, audio, _, _, _, _) = makeController()

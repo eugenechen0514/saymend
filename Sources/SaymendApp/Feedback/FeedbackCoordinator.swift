@@ -17,10 +17,16 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
     private var pollTimer: Timer?
     private var axObserver: AXObserver?
     private var observedElement: AXUIElement?
-    /// 本 session 的目標欄位元素：首次繪製時釘定。App 內 Tab 換欄位不觸發活動偵測，
+    /// 本 session 的目標欄位：首次繪製時釘定。App 內 Tab 換欄位不觸發活動偵測，
     /// session 不會封存，但焦點已不在原欄位——此時必須隱藏而非照 stale anchor 亂畫
     /// （鐵律：寧可不顯示，不可畫錯位置，規格 §3.5；終審 finding）。
-    private var sessionElement: AXUIElement?
+    /// issue #43 起改持有共用 registry 的 token，與 AXFieldReader 對同一元素拿到同一個 token；
+    /// 釘定時機（首繪）與比對語意（CFEqual）不變。
+    private let registry: AXFieldRegistry
+    private var sessionIdentity: FieldIdentity?
+    private var sessionElement: AXUIElement? {
+        sessionIdentity.flatMap { registry.element(for: $0) }
+    }
     /// 連續繪製失敗計數與本 session 放棄旗標。
     /// 鍵入走 CGEvent 事件佇列，sessionUpdated 當下文字常尚未落地——首繪失敗是**時序常態**，
     /// 不是能力問題（能力用參數化屬性清單探測）。失敗→隱藏＋靠 10Hz 輪詢重試；
@@ -49,10 +55,11 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
     }
 
     init(overlay: OverlayWindowController, hud: HUDWindowController,
-         profiles: (any AppProfileStore)? = nil) {
+         profiles: (any AppProfileStore)? = nil, registry: AXFieldRegistry) {
         self.overlay = overlay
         self.hud = hud
         self.profiles = profiles
+        self.registry = registry
     }
 
     // MARK: - SessionFeedbackPresenting
@@ -109,7 +116,7 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         stopFollowing()
         overlay.fadeOutAndHide()                       // 凍結：底線淡出（規格 §3.5）
         lastUpdate = nil
-        sessionElement = nil
+        releaseSessionIdentity()
         clearHighlight()
         resetRenderHealth()
     }
@@ -118,9 +125,15 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         stopFollowing()
         overlay.hide()
         lastUpdate = nil
-        sessionElement = nil
+        releaseSessionIdentity()
         clearHighlight()
         resetRenderHealth()
+    }
+
+    /// 歸還本 session 的 token（registry 引用計數減一；ledger 那一份由 controller 自己歸還）
+    private func releaseSessionIdentity() {
+        registry.release(sessionIdentity)
+        sessionIdentity = nil
     }
 
     private func resetRenderHealth() {
@@ -149,11 +162,11 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
     }
 
     /// 首次呼叫＝把目前聚焦元素釘為 session 目標；之後＝驗證焦點仍在同一元素。
-    /// CFEqual 比較 AXUIElement 的底層 token（同一元素的兩個 wrapper 相等）。
+    /// 比對交給共用 registry（CFEqual：同一元素的兩個 wrapper 相等）。
     private func adoptOrVerifySessionElement() -> Bool {
         guard let focused = AXFieldAccess.focusedElement() else { return false }
-        if let pinned = sessionElement { return CFEqual(focused, pinned) }
-        sessionElement = focused
+        if let pinned = sessionIdentity { return registry.matches(pinned, element: focused) }
+        sessionIdentity = registry.identity(for: focused)
         return true
     }
 

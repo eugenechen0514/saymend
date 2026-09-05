@@ -306,9 +306,14 @@ public final class DictationController {
         case .finalized(let text, let quality):
             // M2 遺留債：聽寫中焦點切進密碼欄位（Tab、程式切換焦點——滑鼠/鍵盤活動已由凍結涵蓋，
             // 但焦點可以不經這兩者移動）。規格 §5.3：密碼欄位一個字都不能進。硬停整個 session。
-            if let field = fieldReader?.snapshot(), field.isSecure {
-                abortForSecureField()
-                return
+            if let field = fieldReader?.snapshot() {
+                // 這次 snapshot 只為密碼守衛，token 不採用、當場歸還（issue #43：每個 snapshot 的 token
+                // 要嘛交給 ledger、要嘛立即歸還，否則 registry 計數歸不了零）
+                releaseFieldLease(field.fieldIdentity)
+                if field.isSecure {
+                    abortForSecureField()
+                    return
+                }
             }
             // **必須在密碼欄位守衛之後**（issue #10）：診斷列會把定稿文字原樣落進資料庫，
             // 寫在守衛之前等於在密碼欄位裡留下一份使用者說的話。
@@ -451,6 +456,7 @@ public final class DictationController {
         if field.isSecure {
             // 延續窗中改在密碼欄按下：封存前一 session（含清除 session 級語系覆蓋，設計裁決 4）。
             // hud.present 須在 archiveSession（會發 .hidden）之後，否則 notice 被蓋掉。
+            releaseFieldLease(field.fieldIdentity)   // 不開 session：token 不採用
             archiveSession()
             hud.present(.notice("密碼欄位不聽寫"))
             return
@@ -458,6 +464,10 @@ public final class DictationController {
         do {
             readerTask?.cancel()
             let resuming = isLingering && ledger.isActive   // 延續窗內＝同 session 續聽
+            if resuming {
+                // 同 session 不重新 begin，ledger 沿用起始 identity；這次 snapshot 的 token 不採用、當場歸還（issue #43）
+                releaseFieldLease(field.fieldIdentity)
+            }
             coordinator.reset()
             segmenter.sessionStarted(at: t)
             archiveAfterDrain = false
@@ -469,10 +479,11 @@ public final class DictationController {
                 if field.hasSelection, let range = field.selectedRange, let original = field.selectedText {
                     // 選取即目標：anchor＝選取起點，帳本以原選取文字為種子（undo 可回到它）
                     sessionTarget = .selectionPending(range: range, original: original)
-                    ledger.begin(axAnchor: range.location, initialText: original)
+                    ledger.begin(axAnchor: range.location, fieldIdentity: field.fieldIdentity, initialText: original)
                 } else {
                     sessionTarget = .tail
-                    ledger.begin(axAnchor: field.caretLocation)   // UTF-16 單位，僅 AX 路徑使用
+                    // axAnchor 為 UTF-16 單位、fieldIdentity 為 reader 登記的 element token（issue #43）——兩者僅 AX 路徑使用
+                    ledger.begin(axAnchor: field.caretLocation, fieldIdentity: field.fieldIdentity)
                 }
                 capturedFrontAppName = field.frontAppName
                 if settings.historyEnabled, let history {
@@ -531,6 +542,13 @@ public final class DictationController {
         endListening(at: t)
     }
 
+    /// 歸還一個 snapshot 發出的 identity token（issue #43）。nil＝reader 沒給（無 AX），沒東西可還——
+    /// 不呼叫 reader，讓「每個非 nil token 恰歸還一次」這條不變式在測試裡乾淨可驗。
+    private func releaseFieldLease(_ identity: FieldIdentity?) {
+        guard let identity else { return }
+        fieldReader?.releaseFieldIdentity(identity)
+    }
+
     private func archiveSession() {
         // 定稿入史（規格 §4.9）：ledger.archive() 會清空 sessionText，故先抓最終全文。
         if let hid = historySessionID {
@@ -541,6 +559,9 @@ public final class DictationController {
         ocrTask?.cancel()
         ocrTask = nil
         capturedOCRText = nil
+        // 歸還 begin 時登記的 element token（issue #43）：必須在 ledger.archive() 清掉它之前。
+        // registry 有引用計數，FeedbackCoordinator 若也 pin 了同一 element，這裡只減 ledger 那一份。
+        releaseFieldLease(ledger.fieldIdentity)
         ledger.archive()
         feedback?.sessionEnded()            // 封存：overlay 立即隱藏
         internalPhase = .idle
