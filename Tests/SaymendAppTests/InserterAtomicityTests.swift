@@ -51,43 +51,6 @@ final class SetStringFailingPasteboard: PasteboardChannel {
 /// 避免同一個 do/catch 同時扮演兩種角色、門檻選錯時退化成永遠只驗其中一邊。
 @Suite struct InserterAtomicityTests {
 
-    // MARK: deleteBackward — 新實作只建一組 down/up（恰 2 次建構），再重複 post count 次
-
-    @Test func deleteBackwardThrowsWithZeroPostsWhenDownConstructionFails() {
-        let channel = FakeKeyEventChannel()
-        channel.failAtConstruction = 1              // down 建構失敗
-        let inserter = KeystrokeInserter(channel: channel)
-        do {
-            try inserter.deleteBackward(count: 5)
-            Issue.record("第 1 次建構會失敗，deleteBackward 不該正常回傳")
-        } catch {
-            #expect(channel.posted.isEmpty, "拋錯就必須一個事件都沒送出；實際送了 \(channel.posted.count) 個")
-        }
-    }
-
-    @Test func deleteBackwardThrowsWithZeroPostsWhenUpConstructionFails() {
-        let channel = FakeKeyEventChannel()
-        channel.failAtConstruction = 2              // down 已建好，up 建構失敗
-        let inserter = KeystrokeInserter(channel: channel)
-        do {
-            try inserter.deleteBackward(count: 5)
-            Issue.record("第 2 次建構會失敗，deleteBackward 不該正常回傳")
-        } catch {
-            #expect(channel.posted.isEmpty, "拋錯就必須一個事件都沒送出；實際送了 \(channel.posted.count) 個")
-        }
-    }
-
-    @Test func deleteBackwardBuildsOnePairThenPostsCountTimes() throws {
-        let channel = FakeKeyEventChannel()
-        let inserter = KeystrokeInserter(channel: channel)
-        try inserter.deleteBackward(count: 5)
-        // 建構次數與 count 無關，是原子性成立的機制：所有會失敗的步驟都發生在第一次 post 之前。
-        // 舊實作每輪迴圈重建，這裡會是 10。
-        #expect(channel.constructions == 2)
-        #expect(channel.constructionsAtFirstPost == 2)
-        #expect(channel.posted.count == 10)
-    }
-
     // MARK: insert — 每個 chunk 一組 down/up，全部建好才開始 post
 
     @Test func insertThrowsWithZeroPostsWhenAMiddleChunkFailsToBuild() {

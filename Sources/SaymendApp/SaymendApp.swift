@@ -121,9 +121,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         historyStore?.purge(olderThanDays: settings.historyRetentionDays)   // 啟動時清過期（規格 §4.9）
 
-        let axInserter = AXInserter()
-        // 欄位 identity registry（issue #43）：reader 與 feedback 共用，同一元素同一 token
+        // 欄位 identity registry（issue #43／#44）：reader、inserter、feedback 三方共用，同一元素同一 token
         let axRegistry = AXFieldRegistry()
+        let axInserter = AXInserter(registry: axRegistry)
         let axReader = AXFieldReader(profiles: profileStore, registry: axRegistry)
         let coordinator = InsertionCoordinator(keystroke: keystroke, paste: PasteInserter(),
                                                rangeReplacer: axInserter)
@@ -330,18 +330,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
             try? keystroke.insert("Saymend 鍵入測試 OK。")
-        }
-    }
-
-    /// 除錯用：驗證「插入 → 尾端退格替換」路徑（含 ZWJ emoji 的字位計數）
-    func debugReplace() {
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
-            let coordinator = InsertionCoordinator(keystroke: keystroke, paste: PasteInserter())
-            try? coordinator.insertFinalized("呃測試👨‍👩‍👧‍👦文字")
-            let snapshot = coordinator.snapshotAndBeginNext()
-            try? await Task.sleep(for: .seconds(1))
-            _ = try? coordinator.replaceTail(snapshot, with: "測試👨‍👩‍👧‍👦文字。")
         }
     }
 

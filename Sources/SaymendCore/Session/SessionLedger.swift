@@ -2,6 +2,9 @@
 /// 純值型別，不碰任何系統 API；「怎麼物理改寫欄位」是 InsertionCoordinator 的事。
 public struct SessionLedger {
     public private(set) var sessionText = ""
+    /// 聽寫階段開始前由本階段掌控的原文（issue #44）：一般 tail 是空字串，選取即目標是原選取。
+    /// Esc 整段退回以此為終點——不是退成空，否則會把使用者的原選取刪掉。
+    public private(set) var initialText = ""
     public private(set) var frozen = false
     public private(set) var axAnchor: Int?
     /// session 起始欄位的 identity token（issue #43）：與 axAnchor 同為 AX 路徑的錨，
@@ -22,6 +25,7 @@ public struct SessionLedger {
     /// 使用者選取的原文，首次 commit 後 undo 便回到它；一般聽寫維持空字串。
     public mutating func begin(axAnchor: Int?, fieldIdentity: FieldIdentity? = nil, initialText: String = "") {
         sessionText = initialText
+        self.initialText = initialText
         versions = []
         frozen = false
         isActive = true
@@ -61,6 +65,7 @@ public struct SessionLedger {
     /// 封存：session 結束，清空全部狀態。
     public mutating func archive() {
         sessionText = ""
+        initialText = ""
         versions = []
         frozen = false
         isActive = false

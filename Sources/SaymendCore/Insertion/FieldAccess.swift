@@ -140,21 +140,26 @@ public extension FieldContextProviding {
 
 public enum RangeReplaceResult: Equatable, Sendable {
     case replaced      // 校驗通過且已替換（verify-only 時＝驗證通過）
-    case mismatch      // 欄位現值與預期不符（外力改動）：呼叫端不得再改字
-    case unsupported   // 該 App 不支援 AX 讀寫：退回 keystroke 路徑
+    case mismatch      // 欄位現值與預期不符（外力改動），或聚焦元素不是 session 起始那個：呼叫端不得再改字
+    case unsupported   // 該 App 不支援 AX 讀寫：呼叫端 fail closed，**沒有** keystroke 退路（issue #44）
 }
 
 /// AX 範圍操作。location 與 expected 的長度一律以 **UTF-16 單位**計（AX 慣例）；
 /// FieldContext.caretLocation 亦同——這些數值只在 AX 路徑內流動，不與 grapheme 計數混用。
+///
+/// 每個操作都帶 session 起始欄位的 `fieldIdentity`（issue #43／#44）：實作必須先確認**現在聚焦的元素**
+/// 就是那個 identity（CFEqual），不是才回 `.mismatch`——同 App 內的焦點切換（Tab、maxlength 自動跳格）
+/// 不會觸發使用者活動偵測，offset＋文字剛好相同的另一個欄位只有 identity 抓得到。
 public protocol SessionRangeReplacing: AnyObject {
-    /// 只驗證不動手：.replaced＝驗證通過。
-    func verifyRange(location: Int, expected: String) -> RangeReplaceResult
+    /// 只驗證不動手：.replaced＝identity 與文字都通過。
+    func verifyRange(fieldIdentity: FieldIdentity, location: Int, expected: String) -> RangeReplaceResult
     /// 替換後把游標收到新文字尾端（維持「session 即尾端、游標相對」的前提）。
     /// 被替換的那段就是尾端時用這個。
-    func replaceVerifiedRange(location: Int, expected: String, with newText: String) -> RangeReplaceResult
+    func replaceVerifiedRange(fieldIdentity: FieldIdentity, location: Int, expected: String,
+                              with newText: String) -> RangeReplaceResult
     /// 同上，但替換後把游標放回「同一個相對位置」（見 `caretAfterReplacement`）。
     /// session **中段**回溯改寫專用：後面還接著別的文字，游標若被收到被替換段落的尾端，
     /// 後續串流插入會落在句子中間、直接毀文。
-    func replaceVerifiedRangePreservingCaret(location: Int, expected: String,
+    func replaceVerifiedRangePreservingCaret(fieldIdentity: FieldIdentity, location: Int, expected: String,
                                              with newText: String) -> RangeReplaceResult
 }

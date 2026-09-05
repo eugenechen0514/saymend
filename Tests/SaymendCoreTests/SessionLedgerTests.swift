@@ -137,3 +137,17 @@ import Testing
     l.begin(axAnchor: nil)                   // 新 session 沒給 identity → 不得殘留上一個
     #expect(l.fieldIdentity == nil)
 }
+
+/// issue #44：Esc 整段退回的終點是 session 開始前「本階段掌控的原文」——一般 tail 是空字串，
+/// 選取即目標則是原選取。不可拿 sessionText 猜。
+@Test func beginStoresInitialTextAndArchiveClearsIt() {
+    var l = SessionLedger()
+    l.begin(axAnchor: 3, initialText: "原選取")
+    #expect(l.initialText == "原選取")
+    l.commit("改寫後")
+    #expect(l.initialText == "原選取", "commit 不得改 initialText")
+    l.archive()
+    #expect(l.initialText == "")
+    l.begin(axAnchor: nil)
+    #expect(l.initialText == "")
+}

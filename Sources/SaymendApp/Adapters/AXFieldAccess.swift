@@ -217,23 +217,37 @@ final class AXFieldReader: FieldContextProviding {
     }
 }
 
-/// AX 範圍替換：讀值校驗 → 設 AXSelectedTextRange → 設 AXSelectedText。
+/// AX 範圍替換：identity 校驗 → 讀值校驗 → 設 AXSelectedTextRange → 設 AXSelectedText。
+/// identity 校驗（issue #43／#44）：現在聚焦的元素必須 CFEqual 於 session 起始登記的那個，否則 `.mismatch`——
+/// 這是「會刪字的操作一律需要 verified AX」四項檢查裡，唯一能抓到同 App 內焦點切換的一項。
+/// `focusedElement` 可注入只為了讓這道閘門有單元測試；production 用預設值。
 final class AXInserter: SessionRangeReplacing {
-    func verifyRange(location: Int, expected: String) -> RangeReplaceResult {
-        guard let element = AXFieldAccess.focusedElement(),
-              let value = AXFieldAccess.stringValue(of: element) else {
-            return .unsupported
-        }
+    private let registry: AXFieldRegistry
+    private let focusedElement: () -> AXUIElement?
+
+    init(registry: AXFieldRegistry,
+         focusedElement: @escaping () -> AXUIElement? = { AXFieldAccess.focusedElement() }) {
+        self.registry = registry
+        self.focusedElement = focusedElement
+    }
+
+    func verifyRange(fieldIdentity: FieldIdentity, location: Int, expected: String) -> RangeReplaceResult {
+        guard let element = focusedElement() else { return .unsupported }
+        guard registry.matches(fieldIdentity, element: element) else { return .mismatch }
+        guard let value = AXFieldAccess.stringValue(of: element) else { return .unsupported }
         return Self.rangeMatches(value: value, location: location, expected: expected)
     }
 
-    func replaceVerifiedRange(location: Int, expected: String, with newText: String) -> RangeReplaceResult {
-        replace(location: location, expected: expected, with: newText, caret: .collapseToNewEnd)
+    func replaceVerifiedRange(fieldIdentity: FieldIdentity, location: Int, expected: String,
+                              with newText: String) -> RangeReplaceResult {
+        replace(fieldIdentity: fieldIdentity, location: location, expected: expected,
+                with: newText, caret: .collapseToNewEnd)
     }
 
-    func replaceVerifiedRangePreservingCaret(location: Int, expected: String,
+    func replaceVerifiedRangePreservingCaret(fieldIdentity: FieldIdentity, location: Int, expected: String,
                                              with newText: String) -> RangeReplaceResult {
-        replace(location: location, expected: expected, with: newText, caret: .preserve)
+        replace(fieldIdentity: fieldIdentity, location: location, expected: expected,
+                with: newText, caret: .preserve)
     }
 
     /// 替換後游標怎麼放。兩種模式共用同一套「讀值校驗→設範圍→設文字」，
@@ -243,12 +257,11 @@ final class AXInserter: SessionRangeReplacing {
         case preserve           // 中段改寫：把原游標放回同一個相對位置
     }
 
-    private func replace(location: Int, expected: String, with newText: String,
-                         caret policy: CaretPolicy) -> RangeReplaceResult {
-        guard let element = AXFieldAccess.focusedElement(),
-              let value = AXFieldAccess.stringValue(of: element) else {
-            return .unsupported
-        }
+    private func replace(fieldIdentity: FieldIdentity, location: Int, expected: String,
+                         with newText: String, caret policy: CaretPolicy) -> RangeReplaceResult {
+        guard let element = focusedElement() else { return .unsupported }
+        guard registry.matches(fieldIdentity, element: element) else { return .mismatch }
+        guard let value = AXFieldAccess.stringValue(of: element) else { return .unsupported }
         let check = Self.rangeMatches(value: value, location: location, expected: expected)
         guard check == .replaced else { return check }
 

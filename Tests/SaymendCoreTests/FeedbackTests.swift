@@ -6,7 +6,7 @@ import Testing
     @Test func streamingExtendsUnderlineSpan() {
         let fb = FakeFeedback()
         let reader = FakeFieldReader()
-        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 10)
+        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 10, fieldIdentity: FieldIdentity(token: 1))
         let (c, _, _, _, _, _) = makeController(fieldReader: reader, feedback: fb)
         c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
         c.handleTranscript(.finalized("第一句"), at: 11.0)
@@ -19,7 +19,7 @@ import Testing
         let intent = GatedIntentService()
         intent.outcome = .newContent("第一句。")
         let reader = FakeFieldReader()
-        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0)
+        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1))
         let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader, feedback: fb)
         c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
         c.handleTranscript(.finalized("第一句"), at: 11.0)
@@ -49,7 +49,7 @@ import Testing
         intent.outcome = .editedSession("正式版")
         let ax = FakeRangeReplacer()
         let reader = FakeFieldReader()
-        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 4,
+        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 4, fieldIdentity: FieldIdentity(token: 1),
                                       selectedRange: .init(location: 4, length: 3),
                                       selectedText: "原文字")
         let (c, _, _, _, _, _) = makeController(polisher: intent, rangeReplacer: ax,
