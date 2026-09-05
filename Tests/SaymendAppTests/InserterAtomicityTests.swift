@@ -27,6 +27,22 @@ final class FakeKeyEventChannel: KeyEventChannel {
     }
 }
 
+/// 假剪貼簿（issue #41）：儲存交給包起來的真 NSPasteboard，只攔截 `setString` 讓它回 false 且不寫入——
+/// 模擬 pasteboard server 拒絕寫入。其餘操作原樣轉發，所以「還原」是否真的發生可以從底層 NSPasteboard 讀回來驗。
+final class SetStringFailingPasteboard: PasteboardChannel {
+    let backing: NSPasteboard
+    private(set) var setStringAttempts = 0
+    init(backing: NSPasteboard) { self.backing = backing }
+    var changeCount: Int { backing.changeCount }
+    var pasteboardItems: [NSPasteboardItem]? { backing.pasteboardItems }
+    func clearContents() -> Int { backing.clearContents() }
+    func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool {
+        setStringAttempts += 1
+        return false
+    }
+    func writeObjects(_ objects: [NSPasteboardWriting]) -> Bool { backing.writeObjects(objects) }
+}
+
 /// issue #38：inserter 的失敗必須是原子的——拋錯＝一個事件都沒送出，正常回傳＝全部送出。
 /// 舊實作在迴圈裡逐次建構 CGEvent，第 N 次失敗時前 N−1 個已不可逆地送出，
 /// 呼叫端只拿到一個沒有 progress 資訊的 postFailed，無從回滾。
@@ -123,6 +139,25 @@ final class FakeKeyEventChannel: KeyEventChannel {
                     "舊實作先 clearContents+setString 再建事件，失敗時使用者剪貼簿已被覆寫且永不還原")
             #expect(pb.changeCount == changeCountBefore)
             #expect(channel.posted.isEmpty)
+        }
+    }
+
+    /// issue #41：`setString` 回 false 時剪貼簿已被 clearContents 清空。舊版不檢查回傳值，照常送 Cmd+V、
+    /// 照常正常回傳——貼進去的是空剪貼簿，帳本卻以為文字在畫面上，之後潤飾會盲退格吃掉使用者的字。
+    /// 依原子契約：必須**同步**還原剪貼簿（不能等 300ms 排程）、拋錯、一個事件都不送。
+    @Test func pasteInsertRestoresClipboardAndThrowsWhenSetStringFails() {
+        let channel = FakeKeyEventChannel()
+        let backing = makePasteboard(seed: "使用者原本的剪貼簿")
+        let pb = SetStringFailingPasteboard(backing: backing)
+        let inserter = PasteInserter(channel: channel, pasteboard: pb)
+        do {
+            try inserter.insert("聽寫文字")
+            Issue.record("setString 回 false，insert 不該正常回傳")
+        } catch {
+            #expect(pb.setStringAttempts == 1)
+            #expect(backing.string(forType: .string) == "使用者原本的剪貼簿",
+                    "剪貼簿必須在拋錯前同步還原；實際：\(backing.string(forType: .string) ?? "nil")")
+            #expect(channel.posted.isEmpty, "不得送出 Cmd+V")
         }
     }
 }
