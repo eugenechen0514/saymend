@@ -14,9 +14,7 @@ import SaymendCore
             + "只切成一個片段的短句，設 1 或 2 都會等到結束。")
     }
 
-    /// 不只找 opaque tree 裡的任意 String：該字串必須位在真正的 `Text` storage，
-    /// 且祖先不能有 SwiftUI `_HiddenModifier`。這個 seam 精確守 `.id(text)` 與 `.hidden()`，
-    /// 不宣稱取代 screenshot test 判斷 opacity、遮擋等一般像素可見性。
+    /// 字串必須位在真正的 `Text` storage、且未被 `.hidden()` 遮住（見 ViewTreeInspection）。
     @MainActor @Test func streamAdvancedSectionContainsUnhiddenTradeoffText() {
         let suite = "stream-copy-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -39,27 +37,7 @@ import SaymendCore
         #expect(!unhiddenTextStrings(in: siblingOracle).contains("hidden sibling"))
     }
 
-    private func unhiddenTextStrings(in value: Any,
-                                     hiddenByAncestor: Bool = false,
-                                     depth: Int = 0) -> [String] {
-        guard depth < 40 else { return [] }
-        let mirror = Mirror(reflecting: value)
-        let directlyHidden = mirror.children.contains {
-            $0.label == "modifier"
-                && String(reflecting: Swift.type(of: $0.value)) == "SwiftUI._HiddenModifier"
-        }
-        let hidden = hiddenByAncestor || directlyHidden
-        if value is Text { return hidden ? [] : embeddedStrings(in: value) }
-        return mirror.children.flatMap {
-            unhiddenTextStrings(in: $0.value, hiddenByAncestor: hidden, depth: depth + 1)
-        }
-    }
-
-    private func embeddedStrings(in value: Any, depth: Int = 0) -> [String] {
-        guard depth < 20 else { return [] }
-        if let string = value as? String { return [string] }
-        return Mirror(reflecting: value).children.flatMap {
-            embeddedStrings(in: $0.value, depth: depth + 1)
-        }
+    private func unhiddenTextStrings(in value: Any) -> [String] {
+        ViewTreeInspection.unhiddenTextStrings(in: value)
     }
 }

@@ -102,6 +102,9 @@ struct GeneralSettingsTab: View {
     @State private var whisperTimeout: Double
     // 本機 WhisperKit（M9 §5）
     @State private var whisperLocalModelPath: URL?
+    // Esc 退字的兩個邊界（issue #46）：以 descriptor 為 key 的 @State 快照——AppSettings 非 ObservableObject，
+    // 裸 Binding 直讀寫 settings 沒有任何機制讓 SwiftUI 重繪；寫回仍經同一個 descriptor，沒有兩條可以接反的線
+    @State private var escapeRetraction: [EscapeRetractionSetting: Bool]
     // 串流參數（issue #15）：預設收合，一般使用者不會碰到
     @State private var showStreamAdvanced = false
     @State private var streamRequiredSegments: Int
@@ -140,6 +143,7 @@ struct GeneralSettingsTab: View {
         self.whisperLocalLastLoad = whisperLocalLastLoad
         _modelWaitTimeout = State(initialValue: settings.whisperModelWaitTimeout)
         _hotkey = State(initialValue: settings.hotkey)
+        _escapeRetraction = State(initialValue: EscapeRetractionSetting.snapshot(of: settings))
         _language = State(initialValue: settings.outputLanguage)
         _baseURL = State(initialValue: settings.llmBaseURLString)
         _model = State(initialValue: settings.llmModel)
@@ -199,14 +203,7 @@ struct GeneralSettingsTab: View {
 
     private var generalForm: some View {
         Form {
-            Section("聽寫") {
-                Picker("聽寫熱鍵", selection: $hotkey) {
-                    ForEach(HotkeyChoice.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                }
-                Picker("輸出語系", selection: $language) {
-                    ForEach(OutputLanguage.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                }
-            }
+            dictationSection
             asrEngineSection
             whisperLocalSection
             Section("LLM Provider") {
@@ -272,6 +269,34 @@ struct GeneralSettingsTab: View {
         .onChange(of: oaiEdit) { _, v in settings.oaiEditTimeout = v }
         .onChange(of: cliPolish) { _, v in settings.cliPolishTimeout = v }
         .onChange(of: cliEdit) { _, v in settings.cliEditTimeout = v }
+    }
+
+    /// 聽寫基本設定＋ Esc 退字的兩個邊界（issue #46）。說明必須是實際可見的 `Text`：
+    /// `EscapeRetractionSettingsUITests` 從完整 `GeneralSettingsTab.body` 展開到這裡找它們。
+    @ViewBuilder private var dictationSection: some View {
+        Section("聽寫") {
+            Picker("聽寫熱鍵", selection: $hotkey) {
+                ForEach(HotkeyChoice.allCases, id: \.self) { Text($0.displayName).tag($0) }
+            }
+            Picker("輸出語系", selection: $language) {
+                ForEach(OutputLanguage.allCases, id: \.self) { Text($0.displayName).tag($0) }
+            }
+            // 兩個 case 直接展開而非 ForEach：ForEach 的內容是惰性 closure，可見性測試的反射看不進去
+            escapeRetractionControl(.polishedText)
+            escapeRetractionControl(.frozenSession)
+        }
+    }
+
+    /// @State 快照在前（觸發重繪）、persistence Binding 在後（寫到正確的 key）；兩者都由同一個 option 決定。
+    @ViewBuilder private func escapeRetractionControl(_ option: EscapeRetractionSetting) -> some View {
+        Toggle(option.title, isOn: Binding(
+            get: { escapeRetraction[option] ?? option.binding(to: settings).wrappedValue },
+            set: { newValue in
+                escapeRetraction[option] = newValue
+                option.binding(to: settings).wrappedValue = newValue
+            }))
+        Text(option.explanation)
+            .font(.caption).foregroundStyle(.secondary)
     }
 
     /// 語音辨識引擎單選與 Whisper 遠端設定（M8 spec §6.2）。

@@ -105,7 +105,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     try c.insertFinalized("e")
     try c.insertFinalized("\u{301}")
     #expect(c.currentUtteranceLength == 1)   // 以串接後字串計數，不是片段各自加總
-    #expect(c.retractSession() == .replaced)
+    #expect(c.retractSession(to: "") == .replaced)
     #expect(ax.calls.count == 1)
     #expect(ax.calls.first?.location == 7 && ax.calls.first?.expected == "e\u{301}" && ax.calls.first?.new == "")
 }
@@ -129,7 +129,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     _ = c.snapshotAndBeginNext()
     c.reset()
     #expect(c.displayedText == "第一句")
-    #expect(c.retractSession() == .replaced)
+    #expect(c.retractSession(to: "") == .replaced)
     #expect(ax.calls.first?.expected == "第一句")
 }
 
@@ -142,11 +142,11 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     try c.insertFinalized("下一句")
     #expect(c.currentUtteranceLength == 3)
     #expect(c.displayedText == "已經落地的字下一句")
-    #expect(c.retractSession() == .replaced)
+    #expect(c.retractSession(to: "") == .replaced)
     #expect(ax.calls.first?.expected == "已經落地的字下一句")
 }
 
-// MARK: - retractSession（Esc）：整段退回 initialText，verified AX 專屬
+// MARK: - retractSession(to:)（Esc）：整段退回目標文字（起始原文或已潤飾鏡像），verified AX 專屬
 
 @Test func retractSessionReplacesWholeMirrorWithEmptyForTailSession() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 5)
@@ -154,7 +154,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     _ = c.snapshotAndBeginNext()
     try c.insertFinalized("第二句")
     let stale = c.currentTailSnapshot()
-    #expect(c.retractSession() == .replaced)
+    #expect(c.retractSession(to: "") == .replaced)
     #expect(ax.verifyCalls.count == 1 && ax.calls.count == 1)
     #expect(ax.calls.first?.identity == sessionIdentity)
     #expect(ax.calls.first?.location == 5 && ax.calls.first?.expected == "嗨嗨第二句" && ax.calls.first?.new == "")
@@ -169,24 +169,24 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let (c, _, _, ax) = makeAXCoordinator(anchor: 3, initialText: "原選取")
     #expect(c.replaceSelection(location: 3, expected: "原選取", with: "改寫後") == .replaced)
     #expect(c.displayedText == "改寫後")
-    #expect(c.retractSession() == .replaced)
+    #expect(c.retractSession(to: "原選取") == .replaced)
     #expect(ax.calls.last?.location == 3 && ax.calls.last?.expected == "改寫後" && ax.calls.last?.new == "原選取")
     #expect(c.displayedText == "原選取")
 }
 
 @Test func retractSessionWithNothingWrittenIsQuietNoOp() throws {
     let (c, _, _, ax) = makeAXCoordinator(anchor: 0)
-    #expect(c.retractSession() == .replaced)
+    #expect(c.retractSession(to: "") == .replaced)
     #expect(ax.verifyCalls.isEmpty && ax.calls.isEmpty)
     let (s, _, _, ax2) = makeAXCoordinator(anchor: 3, initialText: "原選取")
-    #expect(s.retractSession() == .replaced)               // 選取尚未被替換：欄位就是 initialText
+    #expect(s.retractSession(to: "原選取") == .replaced)   // 選取尚未被替換：欄位就是 initialText
     #expect(ax2.verifyCalls.isEmpty)
 }
 
 @Test func retractSessionWithoutIdentityIsUnverifiedAndTouchesNothing() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 0, identity: nil)
     try c.insertFinalized("字")
-    #expect(c.retractSession() == .unverified)
+    #expect(c.retractSession(to: "") == .unverified)
     #expect(ax.verifyCalls.isEmpty)
     #expect(key.ops == [.insert("字")])
     #expect(c.displayedText == "字")                       // 什麼都沒動：鏡像照舊
@@ -195,7 +195,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func retractSessionWithoutAnchorIsUnverified() throws {
     let (c, _, _, ax) = makeAXCoordinator(anchor: nil)
     try c.insertFinalized("字")
-    #expect(c.retractSession() == .unverified)
+    #expect(c.retractSession(to: "") == .unverified)
     #expect(ax.verifyCalls.isEmpty)
 }
 
@@ -204,7 +204,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: nil)
     c.beginSession(anchor: 0, identity: sessionIdentity)
     try c.insertFinalized("字")
-    #expect(c.retractSession() == .unverified)
+    #expect(c.retractSession(to: "") == .unverified)
     #expect(key.ops == [.insert("字")])
 }
 
@@ -212,7 +212,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let (c, _, _, ax) = makeAXCoordinator(anchor: 0)
     ax.verifyResult = .mismatch                             // 焦點已到別的欄位，或內容被改
     try c.insertFinalized("字")
-    #expect(c.retractSession() == .fieldMismatch)
+    #expect(c.retractSession(to: "") == .fieldMismatch)
     #expect(ax.calls.isEmpty)
     #expect(c.displayedText == "字")
 }
@@ -221,7 +221,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let (c, _, _, ax) = makeAXCoordinator(anchor: 0)
     ax.replaceResult = .mismatch                            // verify 過、replace 失敗（兩步之間變動）
     try c.insertFinalized("字")
-    #expect(c.retractSession() == .fieldMismatch)
+    #expect(c.retractSession(to: "") == .fieldMismatch)
     #expect(c.displayedText == "字")                       // 鏡像不得樂觀更新
 }
 
@@ -624,4 +624,31 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     // 兩邊都倒＝真失敗，走既有 insertFailed 路徑；不得再報「已用備援救回」
     #expect(seen.isEmpty)
     #expect(c.displayedText == "")                     // 一個字都沒進欄位，鏡像也不得記
+}
+
+@Test func retractSessionToPolishedTargetKeepsPolishedTextAndDropsRaw() throws {
+    // issue #46「只退 raw」：目標＝已潤飾鏡像。整個 session 範圍一次驗證、一次替換成目標，零鍵盤事件
+    let (c, key, _, ax) = makeAXCoordinator(anchor: 5)
+    try c.insertFinalized("呃你好")
+    let snap = c.snapshotAndBeginNext()
+    #expect(c.replaceTail(snap, with: "你好。") == .replaced)
+    try c.insertFinalized("再見")                              // 下一句 raw 仍在說
+    #expect(c.displayedText == "你好。再見")
+    #expect(c.retractSession(to: "你好。") == .replaced)
+    #expect(ax.calls.last?.location == 5 && ax.calls.last?.expected == "你好。再見" && ax.calls.last?.new == "你好。")
+    #expect(c.displayedText == "你好。")
+    #expect(c.currentUtteranceLength == 0)
+    #expect(key.ops == [.insert("呃你好"), .insert("再見")])
+}
+
+@Test func retractSessionToTargetEqualToMirrorIsQuietNoOp() throws {
+    // 全部都已潤飾、沒有 raw 可退：不驗、不寫
+    let (c, _, _, ax) = makeAXCoordinator(anchor: 0)
+    try c.insertFinalized("呃")
+    let snap = c.snapshotAndBeginNext()
+    #expect(c.replaceTail(snap, with: "你好。") == .replaced)
+    let before = ax.calls.count
+    #expect(c.retractSession(to: "你好。") == .replaced)
+    #expect(ax.calls.count == before && ax.verifyCalls.count == before)
+    #expect(c.displayedText == "你好。")
 }

@@ -232,4 +232,254 @@ import Testing
         c.escapePressed()
         #expect(env.identityEntryCount == 0)
     }
+
+    // MARK: - issue #46：兩個設定
+
+    /// 4 格設定 × 是否凍結。欄位：PREV＋「你好。」（已潤飾）＋「再見」（raw、仍在說）。
+    /// 期望值是**字面真值表**，不是從設定推導——推導式會複寫實作的分支條件，錯在一起就一起假綠。
+    struct EscapeSettingCell: Sendable, CustomTestStringConvertible {
+        let retractsPolished: Bool
+        let retractsFrozen: Bool
+        let frozen: Bool
+        let expectedField: String
+        let expectedNotice: String?          // nil＝只剩 archive 的 .hidden
+        var testDescription: String { "polished=\(retractsPolished) frozenSetting=\(retractsFrozen) frozen=\(frozen)" }
+    }
+    private static let frozenNotice = "已凍結，未退回文字"
+    static let settingMatrix: [EscapeSettingCell] = [
+        //    polished  frozenSet frozen  欄位最終內容                        提示
+        .init(retractsPolished: true,  retractsFrozen: false, frozen: false, expectedField: previous,                 expectedNotice: nil),
+        .init(retractsPolished: true,  retractsFrozen: false, frozen: true,  expectedField: previous + "你好。再見",  expectedNotice: frozenNotice),
+        .init(retractsPolished: true,  retractsFrozen: true,  frozen: false, expectedField: previous,                 expectedNotice: nil),
+        .init(retractsPolished: true,  retractsFrozen: true,  frozen: true,  expectedField: previous,                 expectedNotice: nil),
+        .init(retractsPolished: false, retractsFrozen: false, frozen: false, expectedField: previous + "你好。",      expectedNotice: nil),
+        .init(retractsPolished: false, retractsFrozen: false, frozen: true,  expectedField: previous + "你好。再見",  expectedNotice: frozenNotice),
+        .init(retractsPolished: false, retractsFrozen: true,  frozen: false, expectedField: previous + "你好。",      expectedNotice: nil),
+        .init(retractsPolished: false, retractsFrozen: true,  frozen: true,  expectedField: previous + "你好。",      expectedNotice: nil),
+    ]
+
+    @Test(arguments: settingMatrix) func escapeSettingMatrix(_ cell: EscapeSettingCell) async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: Self.previous)
+        let polisher = GatedIntentService()
+        polisher.outcomeByRaw = ["呃你好": .newContent("你好。")]
+        let (c, _, hud) = makeStatefulController(env: env, polisher: polisher)
+        c.settings.escapeRetractsPolishedText = cell.retractsPolished
+        c.settings.escapeRetractsFrozenSession = cell.retractsFrozen
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("呃你好"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        c.handleTranscript(.finalized("再見"), at: 13.0)                 // raw，尚未閉合
+        #expect(env.text(in: "A") == Self.previous + "你好。再見")
+        if cell.frozen { c.userActivityDetected(at: 13.5) }
+        c.escapePressed()
+        #expect(env.text(in: "A") == cell.expectedField)
+        #expect(hud.states.last == cell.expectedNotice.map { HUDState.notice($0) } ?? .hidden)
+        #expect(c.phase == .idle)
+    }
+
+    /// 只退 raw＋就地回收（M10-C）：第一句潤飾晚到、第二句 raw 已落地 → 第一句在中段被回收成潤飾版。
+    /// 回收只授予**這一句**polished 身分：之前 degraded 的「呃」與之後仍在說的第二句都是 raw，Esc 要退掉。
+    @Test func polishedOnlyEscapeAfterStaleTailRecoveryKeepsOnlyTheRecoveredPolish() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: Self.previous)
+        let polisher = GatedIntentService()
+        polisher.outcomeByRaw = ["呃": .degraded(reason: "逾時 3 秒"), "第一段": .newContent("第一段。")]
+        polisher.gatedRaws = ["第一段"]
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher)
+        c.settings.escapeRetractsPolishedText = false
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("呃"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value               // degraded：raw 留在欄位
+        c.handleTranscript(.finalized("第一段"), at: 13.0)
+        c.tick(at: 14.6)                                              // 第一段潤飾在途（卡住）
+        c.handleTranscript(.finalized("第二段"), at: 15.0)            // 尾端前進
+        polisher.release(); await c.lastIntentTask?.value
+        #expect(env.text(in: "A") == Self.previous + "呃第一段。第二段", "第一段就地回收，其餘不動")
+        c.escapePressed()
+        #expect(env.text(in: "A") == Self.previous + "第一段。")
+    }
+
+    /// 只退 raw：A degraded（raw 留在欄位）、B 已潤飾 → 只保留 B。polished 鏡像不能是「最後一次完整全文」。
+    @Test func polishedOnlyEscapeDropsDegradedRawButKeepsLaterPolish() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: Self.previous)
+        let polisher = GatedIntentService()
+        polisher.outcomeByRaw = ["呃第一句": .degraded(reason: "逾時 3 秒"), "第二句": .newContent("第二句。")]
+        let history = FakeHistory()
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher, history: history)
+        c.settings.escapeRetractsPolishedText = false
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("呃第一句"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        c.handleTranscript(.finalized("第二句"), at: 13.0)
+        c.tick(at: 14.6); await c.lastIntentTask?.value
+        #expect(env.text(in: "A") == Self.previous + "呃第一句第二句。")
+        c.escapePressed()
+        #expect(env.text(in: "A") == Self.previous + "第二句。")
+        #expect(history.finished.last?.finalText == "第二句。", "History 反映退回後的欄位")
+    }
+
+    /// 只退 raw：語音修正把整段換成 LLM 產物 → 整段都算已潤飾，之後說的 raw 才退。
+    @Test func polishedOnlyEscapeKeepsCorrectedSessionText() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: Self.previous)
+        let polisher = GatedIntentService()
+        polisher.outcomeByRaw = ["內容": .newContent("內容。"), "改一下": .editedSession("改好了。")]
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher)
+        c.settings.escapeRetractsPolishedText = false
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("內容"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        c.handleTranscript(.finalized("改一下"), at: 13.0)
+        c.tick(at: 14.6); await c.lastIntentTask?.value
+        #expect(env.text(in: "A") == Self.previous + "改好了。")
+        c.handleTranscript(.finalized("尾巴"), at: 15.0)
+        c.escapePressed()
+        #expect(env.text(in: "A") == Self.previous + "改好了。")
+    }
+
+    /// 只退 raw：undo 之後 polished 鏡像也要回上一版——否則 Esc 會把已復原掉的「二。」寫回欄位。
+    @Test func polishedOnlyEscapeAfterUndoDoesNotResurrectUndoneText() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: Self.previous)
+        let polisher = GatedIntentService()
+        polisher.outcomeByRaw = ["一": .newContent("一。"), "二": .newContent("二。"), "復原": .undo]
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher)
+        c.settings.escapeRetractsPolishedText = false
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("一"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        c.handleTranscript(.finalized("二"), at: 13.0)
+        c.tick(at: 14.6); await c.lastIntentTask?.value
+        #expect(env.text(in: "A") == Self.previous + "一。二。")
+        c.handleTranscript(.finalized("復原"), at: 15.0)
+        c.tick(at: 16.6); await c.lastIntentTask?.value
+        #expect(env.text(in: "A") == Self.previous + "一。")
+        c.handleTranscript(.finalized("三"), at: 17.0)
+        c.escapePressed()
+        #expect(env.text(in: "A") == Self.previous + "一。")
+    }
+
+    /// 只退 raw：undo 因尾端已前進而失敗（欄位沒動）→ 帳本與 polished 鏡像都要回到復原前，
+    /// 且先前 degraded 的 raw「呃」不得因此被洗成已潤飾。
+    @Test func polishedOnlyEscapeAfterFailedUndoKeepsExactlyThePolishedText() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: Self.previous)
+        let polisher = GatedIntentService()
+        polisher.outcomeByRaw = ["呃": .degraded(reason: "逾時 3 秒"), "一": .newContent("一。"), "復原": .undo]
+        polisher.gatedRaws = ["復原"]
+        let (c, _, hud) = makeStatefulController(env: env, polisher: polisher)
+        c.settings.escapeRetractsPolishedText = false
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("呃"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        c.handleTranscript(.finalized("一"), at: 13.0)
+        c.tick(at: 14.6); await c.lastIntentTask?.value
+        #expect(env.text(in: "A") == Self.previous + "呃一。")
+        c.handleTranscript(.finalized("復原"), at: 15.0)
+        c.tick(at: 16.6)                                              // undo 在途（卡 gate）
+        c.handleTranscript(.finalized("三"), at: 17.0)                // 尾端前進
+        polisher.release(); await c.lastIntentTask?.value
+        #expect(hud.states.contains(.notice("未復原（新內容已接續）")))
+        #expect(env.text(in: "A") == Self.previous + "呃一。復原三")
+        c.escapePressed()
+        #expect(env.text(in: "A") == Self.previous + "一。")
+    }
+
+    /// 只退 raw＋選取即目標：已替換的選取是 LLM 產物，保留；沒有 raw 可退，Esc 只結束聽寫。
+    @Test func polishedOnlyEscapeKeepsReplacedSelection() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "前舊字後")
+        env.select(in: "A", location: 1, length: 2)
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("新字")
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, polisher: polisher, history: history)
+        c.settings.escapeRetractsPolishedText = false
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("新字"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        #expect(env.text(in: "A") == "前新字後")
+        c.escapePressed()
+        #expect(env.text(in: "A") == "前新字後")
+        #expect(hud.states.last == .hidden)
+        #expect(history.finished.last?.finalText == "新字")
+    }
+
+    /// 凍結後仍退（設定開）：使用者凍結後在 session 之後手打的字在範圍外，保留；session 範圍退掉。
+    @Test func frozenEscapeWithSettingOnRetractsSessionRangeAndKeepsTypedSuffix() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: Self.previous)
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("你好。")
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, polisher: polisher, history: history)
+        c.settings.escapeRetractsFrozenSession = true
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("呃你好"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        env.typeUserText("手打"); c.userActivityDetected(at: 13.0)
+        #expect(c.ledger.frozen)
+        c.escapePressed()
+        #expect(env.text(in: "A") == Self.previous + "手打")
+        #expect(hud.states.last == .hidden)
+        #expect(history.finished.last?.finalText == nil, "退光了：History 沒有最終文字")
+        #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.isEmpty)
+    }
+
+    /// 凍結後仍退（設定開）：手打進了 session 範圍內＝內容不符，fail closed：一個字不動、只提示。
+    @Test func frozenEscapeWithSettingOnFailsClosedWhenUserTypedInsideTheSessionRange() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: Self.previous)
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("你好。")
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, polisher: polisher, history: history)
+        c.settings.escapeRetractsFrozenSession = true
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("呃你好"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        env.select(in: "A", location: Self.previous.utf16.count + 1, length: 0)   // 游標移到「你」之後
+        env.typeUserText("X"); c.userActivityDetected(at: 13.0)
+        #expect(env.text(in: "A") == Self.previous + "你X好。")
+        c.escapePressed()
+        #expect(env.text(in: "A") == Self.previous + "你X好。")
+        #expect(hud.states.last == .notice(DictationController.retractionUnverifiedNotice))
+        #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.last?.outcomeText == "fieldMismatch")
+    }
+
+    /// 凍結後仍退（設定開）＋沒有 AX 的 App：一樣 fail closed，只提示。設定不是 verified AX 規則的例外。
+    @Test func frozenEscapeWithSettingOnWithoutAXOnlyNotifies() {
+        let env = StatefulFieldEnvironment()
+        env.axCapable = false
+        env.addField("A", text: Self.previous)
+        let (c, _, hud) = makeStatefulController(env: env)
+        c.settings.escapeRetractsFrozenSession = true
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("字"), at: 10.5)
+        c.userActivityDetected(at: 10.8)
+        c.escapePressed()
+        #expect(env.text(in: "A") == Self.previous + "字")
+        #expect(hud.states.last == .notice(DictationController.retractionUnverifiedNotice))
+    }
+
+    /// 凍結、設定關、只退 raw、而且全部都已潤飾：Esc 本來就不會退任何東西，不該提示「未退回文字」、也不記 insertSkipped。
+    @Test func frozenEscapeStaysQuietWhenNothingWouldBeRetracted() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: Self.previous)
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("你好。")
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, polisher: polisher, history: history)
+        c.settings.escapeRetractsPolishedText = false
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("呃你好"), at: 11.0)
+        c.tick(at: 12.6); await c.lastIntentTask?.value
+        c.userActivityDetected(at: 13.0)
+        c.escapePressed()
+        #expect(env.text(in: "A") == Self.previous + "你好。")
+        #expect(hud.states.last == .hidden)
+        #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.isEmpty)
+    }
 }

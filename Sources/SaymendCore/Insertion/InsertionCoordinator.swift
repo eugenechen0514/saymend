@@ -60,13 +60,10 @@ public final class InsertionCoordinator {
     // 由 controller 在 ledger begin／archive 時設定與清除；延續窗 resume 只呼叫 reset()，這些都不動。
     private var sessionAnchor: Int?
     private var sessionIdentity: FieldIdentity?
-    private var initialText = ""
     /// **欄位鏡像**：本 session 從 anchor 起實際寫在欄位上的文字。每個物理寫入都在本型別內同步更新——
     /// 所有寫入都經這裡，不會漏站。與 `SessionLedger.sessionText` 的差別：鏡像含尚未落定（潤飾在途）的 raw
     /// 與進行中的 utterance；Esc 退回以它為 expected，才能在潤飾在途時也退得掉（issue #21 的 1.5 秒窗口）。
     public private(set) var displayedText = ""
-    /// Esc 有沒有東西可退：鏡像已偏離 session 起始原文
-    public var hasRetractableText: Bool { displayedText != initialText }
 
     public init(keystroke: any TextInserter,
                 paste: any TextInserter,
@@ -80,10 +77,10 @@ public final class InsertionCoordinator {
 
     /// 新 session：anchor／identity 來自 reader 同一次 snapshot（與 ledger 相同來源），
     /// initialText＝選取即目標的原選取（鏡像從它開始），一般聽寫為空。
+    /// 起始原文本身不用留：Esc 的退回目標由呼叫端從帳本取（issue #46），這裡只需要鏡像。
     public func beginSession(anchor: Int?, identity: FieldIdentity?, initialText: String = "") {
         sessionAnchor = anchor
         sessionIdentity = identity
-        self.initialText = initialText
         displayedText = initialText
         currentUtteranceText = ""
     }
@@ -92,7 +89,6 @@ public final class InsertionCoordinator {
     public func endSession() {
         sessionAnchor = nil
         sessionIdentity = nil
-        initialText = ""
         displayedText = ""
         currentUtteranceText = ""
     }
@@ -234,17 +230,18 @@ public final class InsertionCoordinator {
         }
     }
 
-    /// Esc：把本 session 寫在欄位上的**全部**文字退回 session 起始原文（issue #21）——含已潤飾、
-    /// 已修正、潤飾在途的 raw 與進行中的 utterance。沒東西可退時零寫入、安靜回 `.replaced`。
+    /// Esc：把本 session 寫在欄位上的**全部**文字（含已潤飾、已修正、潤飾在途的 raw 與進行中的 utterance）
+    /// 一次驗證、一次替換成 `target`（issue #21／#46）。target 由呼叫端依設定決定：session 起始原文
+    /// （一併退掉已潤飾）或帳本的已潤飾鏡像（只退 raw）。鏡像已等於 target＝沒東西可退：零寫入、安靜回 `.replaced`。
     /// 缺 anchor／identity／AX → `.unverified`；identity 或內容不符 → `.fieldMismatch`。兩者都一個字不動。
-    public func retractSession() -> SessionReplaceOutcome {
-        guard hasRetractableText else { return .replaced }
+    public func retractSession(to target: String) -> SessionReplaceOutcome {
+        guard displayedText != target else { return .replaced }
         guard let ax = rangeReplacer, let anchor = sessionAnchor, let identity = sessionIdentity else {
             return .unverified
         }
         return performVerifiedReplace(ax, identity: identity, location: anchor,
-                                      expected: displayedText, with: initialText) {
-            self.displayedText = self.initialText
+                                      expected: displayedText, with: target) {
+            self.displayedText = target
             self.currentUtteranceText = ""
         }
     }
