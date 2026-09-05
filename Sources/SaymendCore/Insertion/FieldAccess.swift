@@ -1,3 +1,72 @@
+/// AX 欄位 identity（issue #21／#43）：綁定 session 起始的那個 element，而不是靠 offset＋文字猜。
+/// 兩個欄位 offset 相同、文字相同、卻不是同一個的情況（表單相鄰欄位、maxlength 自動跳格）只有 identity 抓得到。
+/// Core 不持有 AXUIElement，只拿 registry 發出的 opaque token；也不拿 hash 冒充 identity。
+public struct FieldIdentity: Equatable, Hashable, Sendable {
+    public let token: UInt64
+
+    public init(token: UInt64) {
+        self.token = token
+    }
+}
+
+/// Opaque identity registry。production AX（`areEqual` = CFEqual）與測試 fake 共用同一個 token／equality／release seam，
+/// 所以「identity 比對永遠 true」這類 mutation 會直接破壞 final-field 測試，不會只測到假實作。
+///
+/// **引用計數**：reader→ledger 與 FeedbackCoordinator 會各自 pin 同一個 element。不計數的話，先釋放的一方會把
+/// 另一方仍在用的 token 弄死（`matches` 變 false → overlay 中途消失，或刪字驗證誤判 fail closed）。
+/// 全部持有者釋放後 entry 才移除；此後同一 element 再登記會拿到**新** token——舊 session 殘留的 token
+/// 不能對上新 session 的欄位。
+public final class FieldIdentityRegistry<Element> {
+    private struct Entry {
+        let element: Element
+        var holders: Int
+    }
+    private var nextToken: UInt64 = 1
+    private var entries: [UInt64: Entry] = [:]
+    private let areEqual: (Element, Element) -> Bool
+
+    public init(areEqual: @escaping (Element, Element) -> Bool) {
+        self.areEqual = areEqual
+    }
+
+    /// 登記（或再登記）一個 element，回傳其 token 並增加一個持有者。
+    public func identity(for element: Element) -> FieldIdentity {
+        if let key = entries.first(where: { areEqual($0.value.element, element) })?.key {
+            entries[key]!.holders += 1
+            return FieldIdentity(token: key)
+        }
+        let token = nextToken
+        nextToken &+= 1
+        entries[token] = Entry(element: element, holders: 1)
+        return FieldIdentity(token: token)
+    }
+
+    /// token 是否仍指向與 `element` 相同的元素；已釋放或未知的 token 一律 false。
+    public func matches(_ identity: FieldIdentity, element: Element) -> Bool {
+        guard let entry = entries[identity.token] else { return false }
+        return areEqual(entry.element, element)
+    }
+
+    /// token 對應的原始 element（App 端拿它做 AX 查詢）；已釋放回 nil。
+    public func element(for identity: FieldIdentity) -> Element? {
+        entries[identity.token]?.element
+    }
+
+    /// 仍有持有者的 entry 數
+    public var count: Int { entries.count }
+
+    /// 減少一個持有者；歸零即移除。nil／未知 token／多釋放皆為 no-op，計數不會變負。
+    public func release(_ identity: FieldIdentity?) {
+        guard let identity, var entry = entries[identity.token] else { return }
+        entry.holders -= 1
+        if entry.holders <= 0 {
+            entries.removeValue(forKey: identity.token)
+        } else {
+            entries[identity.token] = entry
+        }
+    }
+}
+
 /// 聚焦欄位快照（熱鍵按下瞬間取得，規格 §3.6）。
 /// selectedRange／caretLocation 一律 UTF-16 單位（AX 慣例）；contextBefore/After 是游標（或選取）
 /// 前後的窗口文字，僅作 LLM 語境，不參與任何範圍計算。
@@ -15,6 +84,9 @@ public struct FieldContext: Equatable, Sendable {
     public var hasFocusedElement: Bool
     public var isSecure: Bool
     public var caretLocation: Int?
+    /// 聚焦元素的 identity token（issue #43）；nil＝reader 讀不到 element（無 AX）。
+    /// 由 App 端 registry 發出，controller 存進 ledger、archive 時經 `releaseFieldIdentity` 歸還。
+    public var fieldIdentity: FieldIdentity?
     public var selectedRange: SelectedRange?
     public var selectedText: String?
     public var contextBefore: String?
@@ -26,6 +98,7 @@ public struct FieldContext: Equatable, Sendable {
     public init(hasFocusedElement: Bool = false,
                 isSecure: Bool = false,
                 caretLocation: Int? = nil,
+                fieldIdentity: FieldIdentity? = nil,
                 selectedRange: SelectedRange? = nil,
                 selectedText: String? = nil,
                 contextBefore: String? = nil,
@@ -35,6 +108,7 @@ public struct FieldContext: Equatable, Sendable {
         self.hasFocusedElement = hasFocusedElement
         self.isSecure = isSecure
         self.caretLocation = caretLocation
+        self.fieldIdentity = fieldIdentity
         self.selectedRange = selectedRange
         self.selectedText = selectedText
         self.contextBefore = contextBefore
@@ -54,6 +128,14 @@ public struct FieldContext: Equatable, Sendable {
 
 public protocol FieldContextProviding: AnyObject {
     func snapshot() -> FieldContext
+    /// session archive 時歸還 `snapshot().fieldIdentity` 發出的 token（issue #43）。
+    /// registry 有引用計數：FeedbackCoordinator 可能同時持有同一 element 的 token，這裡只減自己那一份。
+    func releaseFieldIdentity(_ identity: FieldIdentity?)
+}
+
+public extension FieldContextProviding {
+    /// 沒有 identity 概念的 reader（無 AX、測試 fake）不需要做任何事。
+    func releaseFieldIdentity(_ identity: FieldIdentity?) {}
 }
 
 public enum RangeReplaceResult: Equatable, Sendable {

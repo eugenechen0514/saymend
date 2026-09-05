@@ -134,17 +134,39 @@ enum AXFieldAccess {
     }
 }
 
-/// 聚焦欄位快照：secure 偵測＋游標錨位（UTF-16）
+/// Session-bound AX element registry（issue #43）。FieldIdentity 是 opaque token；真正的 identity 以 **CFEqual**
+/// 比較保留的 AXUIElement——不能用 CFHash（hash collision 會把同 App 的另一欄誤認為原欄），也不能用 Swift `===`
+/// （同一元素每次 `AXUIElementCopyAttributeValue` 回的是新 wrapper）。
+/// AXFieldReader 與 FeedbackCoordinator 共用同一個實例，兩邊對同一元素拿到同一個 token；引用計數見 FieldIdentityRegistry。
+final class AXFieldRegistry {
+    private let registry = FieldIdentityRegistry<AXUIElement>(areEqual: { CFEqual($0, $1) })
+
+    func identity(for element: AXUIElement) -> FieldIdentity { registry.identity(for: element) }
+    func matches(_ identity: FieldIdentity, element: AXUIElement) -> Bool { registry.matches(identity, element: element) }
+    func element(for identity: FieldIdentity) -> AXUIElement? { registry.element(for: identity) }
+    func release(_ identity: FieldIdentity?) { registry.release(identity) }
+}
+
+/// 聚焦欄位快照：secure 偵測＋游標錨位（UTF-16）＋元素 identity token
 final class AXFieldReader: FieldContextProviding {
     private let profiles: (any AppProfileStore)?
+    private let registry: AXFieldRegistry
     private let clipboardFallback = ClipboardSelectionReader()
 
-    init(profiles: (any AppProfileStore)? = nil) {
+    init(profiles: (any AppProfileStore)? = nil, registry: AXFieldRegistry) {
         self.profiles = profiles
+        self.registry = registry
     }
 
     func snapshot() -> FieldContext {
         guard let element = AXFieldAccess.focusedElement() else { return FieldContext() }
+        return snapshot(of: element)
+    }
+
+    /// 每次呼叫都會替 `element` 登記一個持有者（issue #43）：呼叫端要嘛把 `fieldIdentity` 交給 ledger、
+    /// 要嘛立即 `releaseFieldIdentity`——否則計數歸不了零，同一元素在新 session 會拿到舊 token。
+    /// 密碼欄位不登記：controller 對它不會 begin，登記了就沒人歸還。
+    func snapshot(of element: AXUIElement) -> FieldContext {
         var context = FieldContext(hasFocusedElement: true)
         var subroleRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef) == .success,
@@ -152,6 +174,7 @@ final class AXFieldReader: FieldContextProviding {
             context.isSecure = true
             return context
         }
+        context.fieldIdentity = registry.identity(for: element)
         // 前景 App 欄位在 secure 短路之後填（密碼欄位快照維持最小資訊，規格 §4.7 FrontAppInfo）
         context.frontAppBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         context.frontAppName = NSWorkspace.shared.frontmostApplication?.localizedName
@@ -187,6 +210,10 @@ final class AXFieldReader: FieldContextProviding {
             }
         }
         return context
+    }
+
+    func releaseFieldIdentity(_ identity: FieldIdentity?) {
+        registry.release(identity)
     }
 }
 
