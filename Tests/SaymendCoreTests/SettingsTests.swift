@@ -92,6 +92,30 @@ func keychainStoreRoundTrip() throws {
     #expect(reloaded.ocrContextEnabled)    // 開啟後持久化
 }
 
+/// issue #46：Esc 退字的兩個設定。key 字面值是 persistence 契約，測試釘死。
+@Test func escapeRetractionSettingsDefaultAndPersist() {
+    let (s, d) = freshSettings()
+    #expect(s.escapeRetractsPolishedText)       // 預設開：取消＝「這次不算」，連已潤飾的一起退
+    #expect(!s.escapeRetractsFrozenSession)     // 預設關：凍結後不再改寫欄位的契約優先
+
+    s.escapeRetractsPolishedText = false
+    s.escapeRetractsFrozenSession = true
+    #expect(d.object(forKey: "escapeRetractsPolishedText") as? Bool == false)
+    #expect(d.object(forKey: "escapeRetractsFrozenSession") as? Bool == true)
+    let reloaded = AppSettings(defaults: d, secrets: InMemorySecretStore())
+    #expect(!reloaded.escapeRetractsPolishedText)
+    #expect(reloaded.escapeRetractsFrozenSession)
+}
+
+/// 型別錯誤回落各自的預設，而不是 `bool(forKey:)` 的一律 false、也不是把數字 1 當 true。
+@Test func escapeRetractionSettingsFallBackToDefaultsOnWrongTypes() {
+    let (s, d) = freshSettings()
+    d.set("false", forKey: "escapeRetractsPolishedText")
+    d.set(1, forKey: "escapeRetractsFrozenSession")
+    #expect(s.escapeRetractsPolishedText)
+    #expect(!s.escapeRetractsFrozenSession)
+}
+
 @Test func sessionLanguageOverrideIsTransient() {
     let suite = "test-\(UUID().uuidString)"
     let s = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())

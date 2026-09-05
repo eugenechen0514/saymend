@@ -55,6 +55,9 @@ public final class AppSettings: @unchecked Sendable {
         static let historyEnabled = "historyEnabled"
         static let historyRetentionDays = "historyRetentionDays"
         static let ocrContextEnabled = "ocrContextEnabled"
+        // Esc 退字的兩個邊界（issue #46）。key 字面值是 persistence 契約，測試以字面值釘住。
+        static let escapeRetractsPolishedText = "escapeRetractsPolishedText"
+        static let escapeRetractsFrozenSession = "escapeRetractsFrozenSession"
         static let defaultCoreModeID = "defaultCoreModeID"
         static let providerKind = "providerKind"
         static let cliPathOverride = "claudeCLIPathOverride"
@@ -333,6 +336,31 @@ public final class AppSettings: @unchecked Sendable {
     public var historyEnabled: Bool {
         get { defaults.object(forKey: K.historyEnabled) as? Bool ?? true }
         set { defaults.set(newValue, forKey: K.historyEnabled) }
+    }
+
+    /// Esc 是否連已落定的潤飾結果一起退掉（issue #46）。預設開：取消的心智模型是「這次不算」；
+    /// 若預設只退 raw，會留下使用者得再手動清掉的半截文字。關閉時只退 raw（含潤飾在途與正在說的），
+    /// 保留已潤飾落定的部分。
+    public var escapeRetractsPolishedText: Bool {
+        get { readBool(K.escapeRetractsPolishedText, default: true) }
+        set { defaults.set(newValue, forKey: K.escapeRetractsPolishedText) }
+    }
+
+    /// 凍結後按 Esc 是否仍退回本 session 的文字（issue #46）。預設關：凍結的契約是使用者動手後程式不再改欄位。
+    /// 開啟後仍受 verified AX 規則約束（#44）：只替換 session 範圍、凍結後手打在範圍外的字保留；
+    /// 手打進範圍內＝內容不符、無 AX＝無法驗證，兩者都一個字不動只提示。
+    public var escapeRetractsFrozenSession: Bool {
+        get { readBool(K.escapeRetractsFrozenSession, default: false) }
+        set { defaults.set(newValue, forKey: K.escapeRetractsFrozenSession) }
+    }
+
+    /// UserDefaults 會把 `Int` bridge 成 `NSNumber`，直接 `as? Bool` 會把 1 誤收為 true。
+    /// 先核對 Core Foundation type ID，才能真的做到「型別錯誤回落預設」。
+    private func readBool(_ key: String, default defaultValue: Bool) -> Bool {
+        guard let object = defaults.object(forKey: key),
+              CFGetTypeID(object as CFTypeRef) == CFBooleanGetTypeID(),
+              let value = object as? Bool else { return defaultValue }
+        return value
     }
 
     /// OCR 螢幕語境備援開關（規格 §4.7）。預設關（opt-in）：螢幕擷取最具侵入性，
