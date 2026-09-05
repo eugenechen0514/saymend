@@ -176,7 +176,8 @@ public final class InsertionCoordinator {
     public func replaceStaleTail(_ snap: UtteranceSnapshot,
                                  at location: Int,
                                  with newText: String) -> StaleTailOutcome {
-        guard let ax = rangeReplacer, let identity = sessionIdentity else { return .unsupported }
+        // anchor 也在前置條件裡：沒有它就沒辦法同步鏡像，寧可不寫（其他三個會刪字的方法同此）
+        guard let ax = rangeReplacer, let anchor = sessionAnchor, let identity = sessionIdentity else { return .unsupported }
         // 零長度快照沒有可校驗的錨——那樣的「替換」等於在算出來的位置盲插，寧可放棄
         guard !snap.text.isEmpty else { return .mismatch }
         switch ax.verifyRange(fieldIdentity: identity, location: location, expected: snap.text) {
@@ -187,9 +188,7 @@ public final class InsertionCoordinator {
                                                          expected: snap.text, with: newText) == .replaced else {
                 return .mismatch   // 兩步之間變動：放棄，原文留在螢幕上
             }
-            if let anchor = sessionAnchor {
-                replaceInMirror(utf16Offset: location - anchor, expected: snap.text, with: newText)
-            }
+            replaceInMirror(utf16Offset: location - anchor, expected: snap.text, with: newText)
             return .replaced
         }
     }

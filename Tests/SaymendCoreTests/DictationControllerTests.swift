@@ -198,6 +198,55 @@ import Testing
     #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.first?.outcomeText == "fieldMismatch")
 }
 
+/// 審查（#44）抓到：Esc 退回成功後 ledger.sessionText 沒同步，archiveSession 會把使用者剛丟掉的文字當 finalText 寫進 History。
+@MainActor
+@Test func escapeRetractionSyncsLedgerSoHistoryFinalTextIsEmpty() async {
+    let polisher = GatedIntentService()
+    polisher.outcome = .newContent("哈囉。")
+    let history = FakeHistory()
+    let (c, _, _, _, _, _) = makeController(polisher: polisher, history: history)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("哈囉"), at: 11.0)
+    c.tick(at: 12.6); await c.lastIntentTask?.value
+    #expect(c.ledger.sessionText == "哈囉。")
+    c.escapePressed()
+    #expect(history.finished.last?.finalText == nil, "已退回的文字不得成為該次聽寫的最終文字；實際：\(history.finished.last?.finalText ?? "nil")")
+}
+
+/// 審查（#44）抓到：語音「復原」作為第一句（沒有步驟可回）時，退指令話語遇 AX 校驗不符也要凍結——
+/// 與其他每個 fieldMismatch 出口一致；只有 .unverified／.tailAdvanced 是「留著、鏡像它、不凍結」。
+@MainActor
+@Test func voiceUndoWithNothingToUndoFreezesOnFieldMismatch() async {
+    let intent = GatedIntentService()
+    intent.outcome = .undo
+    let ax = FakeRangeReplacer(); ax.verifyResult = .mismatch
+    let history = FakeHistory()
+    let (c, _, _, _, _, hud) = makeController(polisher: intent, rangeReplacer: ax, history: history)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("復原"), at: 11.0)          // 第一句就是 undo：ledger 沒有版本
+    c.tick(at: 12.6); await c.lastIntentTask?.value
+    #expect(c.ledger.frozen)
+    #expect(hud.states.contains(.notice("欄位已被外部改動，本段停止修正")))
+    #expect(!hud.states.contains(.notice("沒有可復原的步驟")))
+    #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.first?.outcomeText == "fieldMismatch")
+}
+
+/// 同一情境、無 AX：指令話語留著、鏡像它、不凍結、提示沒有步驟。
+@MainActor
+@Test func voiceUndoWithNothingToUndoWithoutAXKeepsCommandAndDoesNotFreeze() async {
+    let intent = GatedIntentService()
+    intent.outcome = .undo
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: nil)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("復原"), at: 11.0)
+    c.tick(at: 12.6); await c.lastIntentTask?.value
+    #expect(!c.ledger.frozen)
+    #expect(key.ops == [.insert("復原")])
+    #expect(c.ledger.sessionText == "復原", "退不掉的指令話語要進鏡像")
+    #expect(!c.ledger.canUndo, "不建版本")
+    #expect(hud.states.contains(.notice("沒有可復原的步驟")))
+}
+
 // MARK: - issue #43：session 起始欄位 identity 的 pin／release
 
 /// reader 在熱鍵按下的 snapshot 裡給出 identity token，controller 必須把它存進 ledger（與 axAnchor 同住）。
@@ -1113,7 +1162,8 @@ import Testing
 @MainActor
 @Test func undoRequestedWhileIntentInFlightRefuses() async {
     let intent = GatedIntentService()
-    let (c, _, asr, key, _, hud) = makeController(polisher: intent)
+    let ax = FakeRangeReplacer()                // 預設翻轉後 undo 走 AX；拿住它才能驗最後那次替換真的發生
+    let (c, _, asr, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.1)                 // 鎖定
     intent.outcome = .newContent("第一句。")
@@ -1139,6 +1189,7 @@ import Testing
     c.undoRequested()                          // 落定後復原恢復可用
     #expect(hud.states.contains(.notice("已復原")))
     #expect(c.ledger.sessionText == "第一句。")
+    #expect(ax.calls.last?.expected == "第一句。第二句。" && ax.calls.last?.new == "第一句。")
 }
 
 @MainActor
@@ -1570,7 +1621,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(ax.calls.isEmpty)                       // 封存後不得再碰選取
 }
 
-// MARK: - M2 債清償：密碼欄位聽寫中切入、lostText 剪貼簿急救
+// MARK: - M2 債清償：密碼欄位聽寫中切入、剪貼簿急救
 
 @MainActor
 @Test func secureFieldMidSessionStopsInsertionAndSession() {

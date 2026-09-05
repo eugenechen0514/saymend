@@ -478,7 +478,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 }
 
 // MARK: - 回收晚到的潤飾（M10-C #7）
-// 前一句已不在尾端（後面接了下一句），改以絕對範圓帶校驗替換，並保留游標。
+// 前一句已不在尾端（後面接了下一句），改以絕對範圍帶校驗替換，並保留游標。
 
 @Test func staleTailIsRecoveredInPlace() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 40)
@@ -515,6 +515,17 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .unsupported)
+}
+
+@Test func staleTailUnsupportedWithoutAnchor() throws {
+    // 審查（#44）：其他三個會刪字的方法都在開頭 guard anchor，replaceStaleTail 原本只在成功後才 `if let anchor` 更新鏡像——
+    // 沒 anchor 時會真的寫欄位、鏡像卻不動。現在一律 fail closed。
+    let (c, _, _, ax) = makeAXCoordinator(anchor: nil)
+    try c.insertFinalized("第一段")
+    let snap = c.snapshotAndBeginNext()
+    #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .unsupported)
+    #expect(ax.verifyCalls.isEmpty && ax.preservingCaretCalls.isEmpty)
+    #expect(c.displayedText == "第一段")
 }
 
 @Test func staleTailUnsupportedWithoutIdentity() throws {
@@ -557,7 +568,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func staleTailRecoveryDoesNotAdvanceTheCounter() throws {
     // counter 的語意是「尾端是否前進」。中段改寫沒有改變誰是尾端——
-    // 若遞增，下一句自己的快照會對不上，被迫也走慢路徧（其實它仍在尾端）。
+    // 若遞增，下一句自己的快照會對不上，被迫也走慢路徑（其實它仍在尾端）。
     let (c, _, _, ax) = makeAXCoordinator(anchor: 40)
     try c.insertFinalized("第一段")
     let first = c.snapshotAndBeginNext()

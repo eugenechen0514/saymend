@@ -217,7 +217,7 @@ final class AXFieldReader: FieldContextProviding {
     }
 }
 
-/// AX 範圓替換：identity 校驗 → 讀值校驗 → 設 AXSelectedTextRange → 設 AXSelectedText。
+/// AX 範圍替換：identity 校驗 → 讀值校驗 → 設 AXSelectedTextRange → 設 AXSelectedText。
 /// identity 校驗（issue #43／#44）：現在聚焦的元素必須 CFEqual 於 session 起始登記的那個，否則 `.mismatch`——
 /// 這是「會刪字的操作一律需要 verified AX」四項檢查裡，唯一能抓到同 App 內焦點切換的一項。
 /// `focusedElement` 可注入只為了讓這道閘門有單元測試；production 用預設值。

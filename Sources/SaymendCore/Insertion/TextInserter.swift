@@ -12,6 +12,5 @@ public protocol TextInserter: AnyObject {
 }
 
 public enum InserterError: Error, Equatable {
-    case unsupported
-    case postFailed
+    case postFailed     // 事件建構失敗、寫入剪貼簿失敗：依原子契約，一個字都沒動
 }

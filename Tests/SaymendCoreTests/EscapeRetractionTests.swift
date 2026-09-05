@@ -150,7 +150,8 @@ import Testing
         env.select(in: "A", location: 1, length: 2)               // 「舊字」
         let polisher = GatedIntentService()
         polisher.outcome = .newContent("新字")
-        let (c, _, _) = makeStatefulController(env: env, polisher: polisher)
+        let history = FakeHistory()
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher, history: history)
         c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
         c.handleTranscript(.finalized("新字"), at: 11.0)          // 緩衝：不上屏
         #expect(env.text(in: "A") == "前舊字後")
@@ -158,6 +159,7 @@ import Testing
         #expect(env.text(in: "A") == "前新字後")
         c.escapePressed()
         #expect(env.text(in: "A") == "前舊字後")
+        #expect(history.finished.last?.finalText == "舊字", "History 的最終文字要反映退回後的欄位：原選取")
     }
 
     /// 凍結後 Esc：整段留在欄位上（#39 的守衛；是否仍退由 #46 的設定決定）。

@@ -202,6 +202,7 @@ public final class DictationController {
             // 編輯過欄位，我們不再知道欄位長什麼樣。整段文字原封保留，Esc 的另一半語意「結束聽寫」照常執行。
             // （凍結後是否仍退回本 session 的文字，由 #46 的設定決定；預設不退。）
             if coordinator.hasRetractableText {
+                // utteranceText 在這裡例外地是**整段鏡像**而非單句：Esc 要退的本來就是整段，凍結擋下的也是整段
                 recordInsertEvent(kind: "insertSkipped", classification: "frozen",
                                   utteranceText: coordinator.displayedText)
                 retractionNotice = "已凍結，未退回文字"
@@ -214,7 +215,9 @@ public final class DictationController {
             let retracting = coordinator.displayedText
             switch coordinator.retractSession() {
             case .replaced:
-                break
+                // 欄位已退回 session 起始原文：帳本鏡像跟上，否則 archiveSession 會把使用者剛丟掉的文字
+                // 當成這次聽寫的 finalText 寫進 History。不建版本——session 馬上封存，沒有東西可復原。
+                ledger.synchronizeObservedTail(ledger.initialText)
             case .unverified:
                 recordInsertEvent(kind: "insertSkipped", classification: "unverified", utteranceText: retracting)
                 retractionNotice = Self.retractionUnverifiedNotice
@@ -881,12 +884,27 @@ public final class DictationController {
             hud.present(.notice("已凍結，無法復原")); return
         }
         guard let step = ledger.undo() else {
-            // 沒步驟可回：把指令話語從欄位退掉（它不是內容）。退不掉（無 verified AX）就留著，
-            // 並讓帳本鏡像它——不建版本，我們什麼都沒改寫。
-            if coordinator.replaceTail(commandSnapshot, with: "") != .replaced, !commandSnapshot.text.isEmpty {
-                ledger.synchronizeObservedTail(ledger.sessionText + commandSnapshot.text)
+            // 沒步驟可回：把指令話語從欄位退掉（它不是內容）。
+            switch coordinator.replaceTail(commandSnapshot, with: "") {
+            case .replaced:
+                hud.present(.notice("沒有可復原的步驟"))
+            case .unverified, .tailAdvanced:
+                // 退不掉（無 verified AX／尾端已前進）就留著，並讓帳本鏡像它——不建版本，我們什麼都沒改寫
+                if !commandSnapshot.text.isEmpty {
+                    ledger.synchronizeObservedTail(ledger.sessionText + commandSnapshot.text)
+                }
+                hud.present(.notice("沒有可復原的步驟"))
+            case .fieldMismatch:
+                // 欄位或聚焦元素已不是我們寫的那個：與其他每個 fieldMismatch 出口一致——鏡像、凍結、提示
+                recordInsertEvent(kind: "insertSkipped", classification: "fieldMismatch",
+                                  utteranceText: commandSnapshot.text)
+                if !commandSnapshot.text.isEmpty {
+                    ledger.synchronizeObservedTail(ledger.sessionText + commandSnapshot.text)
+                }
+                ledger.freeze()
+                feedback?.sessionFrozen()
+                hud.present(.notice("欄位已被外部改動，本段停止修正"))
             }
-            hud.present(.notice("沒有可復原的步驟"))
             return
         }
         switch coordinator.replaceSession(commandSnapshot: commandSnapshot, with: step.to) {

@@ -94,7 +94,7 @@ final class GatedIntentService: IntentServing, @unchecked Sendable {
     }
 }
 
-/// 剪貼簿急救 spy（InserterError.lostText 的最後手段）
+/// 剪貼簿急救 spy（欄位寫不進去、或 session 已無法承接 outcome 時的最後手段）
 final class ClipboardSpy {
     private(set) var texts: [String] = []
     func rescue(_ text: String) { texts.append(text) }
