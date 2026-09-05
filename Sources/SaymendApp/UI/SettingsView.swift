@@ -199,14 +199,7 @@ struct GeneralSettingsTab: View {
 
     private var generalForm: some View {
         Form {
-            Section("聽寫") {
-                Picker("聽寫熱鍵", selection: $hotkey) {
-                    ForEach(HotkeyChoice.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                }
-                Picker("輸出語系", selection: $language) {
-                    ForEach(OutputLanguage.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                }
-            }
+            dictationSection
             asrEngineSection
             whisperLocalSection
             Section("LLM Provider") {
@@ -272,6 +265,28 @@ struct GeneralSettingsTab: View {
         .onChange(of: oaiEdit) { _, v in settings.oaiEditTimeout = v }
         .onChange(of: cliPolish) { _, v in settings.cliPolishTimeout = v }
         .onChange(of: cliEdit) { _, v in settings.cliEditTimeout = v }
+    }
+
+    /// 聽寫基本設定＋ Esc 退字的兩個邊界（issue #46）。說明必須是實際可見的 `Text`：
+    /// `EscapeRetractionSettingsUITests` 從完整 `GeneralSettingsTab.body` 展開到這裡找它們。
+    @ViewBuilder private var dictationSection: some View {
+        Section("聽寫") {
+            Picker("聽寫熱鍵", selection: $hotkey) {
+                ForEach(HotkeyChoice.allCases, id: \.self) { Text($0.displayName).tag($0) }
+            }
+            Picker("輸出語系", selection: $language) {
+                ForEach(OutputLanguage.allCases, id: \.self) { Text($0.displayName).tag($0) }
+            }
+            // 兩個 case 直接展開而非 ForEach：ForEach 的內容是惰性 closure，可見性測試的反射看不進去
+            escapeRetractionControl(.polishedText)
+            escapeRetractionControl(.frozenSession)
+        }
+    }
+
+    @ViewBuilder private func escapeRetractionControl(_ option: EscapeRetractionSetting) -> some View {
+        Toggle(option.title, isOn: option.binding(to: settings))
+        Text(option.explanation)
+            .font(.caption).foregroundStyle(.secondary)
     }
 
     /// 語音辨識引擎單選與 Whisper 遠端設定（M8 spec §6.2）。
