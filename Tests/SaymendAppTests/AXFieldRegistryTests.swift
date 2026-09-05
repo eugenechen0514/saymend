@@ -46,7 +46,9 @@ import SaymendCore
     }
 
     /// snapshot(of:) 對任一元素都要把 identity 填進 FieldContext——這是 controller 拿到 token 的唯一入口。
-    /// 用 system-wide 元素：沒有 AX 權限時屬性讀取全部失敗（非 secure、無 caret），但 identity 仍必須填。
+    /// 用 system-wide 偽元素：它本身不支援 kAXSubroleAttribute（AXUIElementCopyAttributeValue 回
+    /// kAXErrorAttributeUnsupported），**與行程是否有輔助使用權限無關**，所以不論授權與否都穩定落在非 secure 分支；
+    /// caret／selection 同樣讀不到（nil），但 identity 仍必須填。
     @Test func snapshotOfElementFillsFieldIdentity() {
         let r = AXFieldRegistry()
         let reader = AXFieldReader(registry: r)

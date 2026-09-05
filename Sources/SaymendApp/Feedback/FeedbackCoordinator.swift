@@ -24,6 +24,8 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
     /// 釘定時機（首繪）與比對語意（CFEqual）不變。
     private let registry: AXFieldRegistry
     private var sessionIdentity: FieldIdentity?
+    /// registry 回的是**第一個登記者**存的 wrapper，未必與本次 focusedElement() 是同一個 Swift 實例——
+    /// 但兩者 CFEqual 相等即指向同一個 accessibility 物件，對所有 AX 查詢可互換。
     private var sessionElement: AXUIElement? {
         sessionIdentity.flatMap { registry.element(for: $0) }
     }
@@ -295,7 +297,9 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
     deinit {
         // 防禦性拆除（M3 終審 minor）：目前為 App 生命週期單例，deinit 實務不可達；
         // 但若日後可重建，跟隨中釋放會留孤兒 timer 與 run-loop source。
-        // deinit 無 actor 隔離：只做去註冊，不碰其他 MainActor 狀態。
+        // deinit 無 actor 隔離：只做去註冊，不碰其他 MainActor 狀態——包括 sessionIdentity 那一份
+        // registry 引用（issue #43）：這裡不歸還，若日後 coordinator 可重建，須在可預期的拆除路徑上
+        // 顯式呼叫 releaseSessionIdentity()，否則該 token 的計數永遠少一次歸還。
         pollTimer?.invalidate()
         if let observer = axObserver {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
