@@ -210,8 +210,9 @@ public final class InsertionCoordinator {
 
     /// 刪舊打新＋鐵律回復。
     /// `deleteBackward` 刻意放在 do 區塊之外：依 TextInserter 的原子契約（issue #38），它拋錯＝一個字
-    /// 都沒動，欄位仍是原文、無需回復，直接往上拋交給呼叫端 keepRaw 即可。鐵律回復只需守
-    /// 「刪成功、補插失敗」這一段。
+    /// 都沒動，欄位仍是原文、無需回復——這裡若誤觸回復邏輯反而會把原文再打一次。錯誤原樣往上拋，
+    /// 由呼叫端各自處置（replaceTail 路徑 keepRaw；replaceSession 路徑凍結 ledger）。
+    /// 鐵律回復只需守「刪成功、補插失敗」這一段。
     private func deleteAndRetype(expectedLength: Int, originalText: String, newText: String) throws {
         if expectedLength > 0 {
             try keystroke.deleteBackward(count: expectedLength)

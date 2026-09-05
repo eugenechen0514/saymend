@@ -193,6 +193,39 @@ private func makeCoordinator() -> (InsertionCoordinator, RecordingInserter, Reco
     #expect(!key.ops.contains(.insert("新")))
 }
 
+/// issue #38 ③：deleteAndRetype 的鐵律回復只包住「刪成功、補插失敗」，`deleteBackward` 刻意留在 do 之外。
+/// 成立的前提是 TextInserter 的原子契約——刪除拋錯＝一個字都沒動、欄位仍是原文——所以協調器
+/// **不可**誤觸回復邏輯（那會把原文再打一次變成重複），要原樣把錯誤往上拋、帳本一動不動。
+@Test func replaceTailPropagatesDeleteFailureWithoutAttemptingRestore() throws {
+    let (c, key, paste) = makeCoordinator()
+    try c.insertFinalized("原文")
+    let snap = c.snapshotAndBeginNext()
+    let counterBefore = c.currentTailSnapshot().counter
+    key.failDeletesRemaining = 1
+    #expect(throws: InserterError.postFailed) {
+        try c.replaceTail(snap, with: "新文")
+    }
+    #expect(key.ops == [.insert("原文")], "刪除拋錯後不得補插任何東西（原文仍在欄位上）；實際：\(key.ops)")
+    #expect(paste.ops.isEmpty)
+    #expect(c.currentTailSnapshot().counter == counterBefore, "帳本一動不動")
+}
+
+/// 同上，走 replaceSession 的 keystroke 路徑（無 AX、空指令快照 → 直接進 deleteAndRetype）。
+@Test func replaceSessionPropagatesDeleteFailureWithoutAttemptingRestore() throws {
+    let (c, key, paste) = makeCoordinator()
+    try c.insertFinalized("原文")
+    _ = c.snapshotAndBeginNext()
+    let command = c.currentTailSnapshot()         // 零長度：沒有指令話語要退
+    let counterBefore = command.counter
+    key.failDeletesRemaining = 1
+    #expect(throws: InserterError.postFailed) {
+        try c.replaceSession(commandSnapshot: command, expectedSessionText: "原文", with: "新文", axAnchor: nil)
+    }
+    #expect(key.ops == [.insert("原文")])
+    #expect(paste.ops.isEmpty)
+    #expect(c.currentTailSnapshot().counter == counterBefore)
+}
+
 @Test func replaceTailRestoresOriginalWhenInsertFails() throws {
     let (c, key, paste) = makeCoordinator()
     try c.insertFinalized("呃你好")
