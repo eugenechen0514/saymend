@@ -151,3 +151,81 @@ import Testing
     l.begin(axAnchor: nil)
     #expect(l.initialText == "")
 }
+
+// MARK: - 已潤飾文字鏡像（issue #46：Esc 只退 raw 時的保留目標）
+
+/// polished 鏡像不能存「最後一次完整 session 全文」：A degraded、B polished 時完整全文是 A+B，
+/// 會把未潤飾的 A 一起留下。追加落定與全文替換落定必須分開表達。
+@Test func appendPolishedExtendsPolishedMirrorButObservedRawDoesNot() {
+    var l = SessionLedger()
+    l.begin(axAnchor: nil)
+    #expect(l.polishedText == "")
+    l.appendPolished("你好。")                                  // A 潤飾落定
+    #expect(l.sessionText == "你好。" && l.polishedText == "你好。")
+    #expect(l.canUndo)
+    l.synchronizeObservedTail(l.sessionText + "呃這句沒潤")       // B degraded：raw 留在欄位
+    #expect(l.sessionText == "你好。呃這句沒潤")
+    #expect(l.polishedText == "你好。", "degraded 的 raw 不得取得 polished 身分")
+    l.appendPolished("再見。")                                  // C 潤飾落定
+    #expect(l.sessionText == "你好。呃這句沒潤再見。")
+    #expect(l.polishedText == "你好。再見。")
+}
+
+@Test func commitMarksWholeTextPolished() {
+    var l = SessionLedger()
+    l.begin(axAnchor: nil)
+    l.synchronizeObservedTail("呃你好")                          // raw 上屏
+    l.commit("你好。")                                          // 修正／全文替換落定：整段都是 LLM 產物
+    #expect(l.sessionText == "你好。" && l.polishedText == "你好。")
+}
+
+@Test func commitRawBuildsVersionWithoutGrantingPolishedStatus() {
+    var l = SessionLedger()
+    l.begin(axAnchor: nil)
+    l.appendPolished("A。")
+    l.commitRaw("A。原文")                                      // 有效 outcome 套用失敗、raw 照留（keepRaw）
+    #expect(l.sessionText == "A。原文")
+    #expect(l.polishedText == "A。")
+    let step = l.undo()
+    #expect(step?.from == "A。原文" && step?.to == "A。")       // 仍是一版，可復原
+    #expect(l.polishedText == "A。")
+}
+
+@Test func undoRevertsPolishedMirrorAlongWithText() {
+    var l = SessionLedger()
+    l.begin(axAnchor: nil)
+    l.appendPolished("A。")
+    l.appendPolished("B。")
+    #expect(l.polishedText == "A。B。")
+    _ = l.undo()
+    #expect(l.sessionText == "A。" && l.polishedText == "A。")
+    _ = l.undo()
+    #expect(l.sessionText == "" && l.polishedText == "", "undo 後 Esc 目標不得留著已不在欄位上的未來版本")
+}
+
+@Test func restoreFailedUndoPutsVersionAndPolishedMirrorBack() {
+    var l = SessionLedger()
+    l.begin(axAnchor: nil)
+    l.appendPolished("A。")
+    l.commitRaw("A。原文")
+    let step = l.undo()!
+    #expect(l.sessionText == "A。")
+    l.restoreFailedUndo(step)                                   // 物理 undo 失敗：欄位仍是 step.from
+    #expect(l.sessionText == "A。原文")
+    #expect(l.polishedText == "A。")
+    #expect(l.canUndo)
+    let again = l.undo()
+    #expect(again?.from == "A。原文" && again?.to == "A。")
+}
+
+@Test func escapeRetractionTargetIsInitialTextOrPolishedMirror() {
+    var l = SessionLedger()
+    l.begin(axAnchor: 3, initialText: "原選取")
+    #expect(l.polishedText == "原選取", "起始原文本來就不是我們寫的，視同保留")
+    l.commit("改寫後")
+    l.synchronizeObservedTail("改寫後呃還在說")
+    #expect(l.escapeRetractionTarget(includingPolishedText: true) == "原選取")
+    #expect(l.escapeRetractionTarget(includingPolishedText: false) == "改寫後")
+    l.archive()
+    #expect(l.polishedText == "")
+}
