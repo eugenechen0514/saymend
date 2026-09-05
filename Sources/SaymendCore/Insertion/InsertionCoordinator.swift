@@ -234,17 +234,18 @@ public final class InsertionCoordinator {
         }
     }
 
-    /// Esc：把本 session 寫在欄位上的**全部**文字退回 session 起始原文（issue #21）——含已潤飾、
-    /// 已修正、潤飾在途的 raw 與進行中的 utterance。沒東西可退時零寫入、安靜回 `.replaced`。
+    /// Esc：把本 session 寫在欄位上的**全部**文字（含已潤飾、已修正、潤飾在途的 raw 與進行中的 utterance）
+    /// 一次驗證、一次替換成 `target`（issue #21／#46）。target 由呼叫端依設定決定：session 起始原文
+    /// （一併退掉已潤飾）或帳本的已潤飾鏡像（只退 raw）。鏡像已等於 target＝沒東西可退：零寫入、安靜回 `.replaced`。
     /// 缺 anchor／identity／AX → `.unverified`；identity 或內容不符 → `.fieldMismatch`。兩者都一個字不動。
-    public func retractSession() -> SessionReplaceOutcome {
-        guard hasRetractableText else { return .replaced }
+    public func retractSession(to target: String) -> SessionReplaceOutcome {
+        guard displayedText != target else { return .replaced }
         guard let ax = rangeReplacer, let anchor = sessionAnchor, let identity = sessionIdentity else {
             return .unverified
         }
         return performVerifiedReplace(ax, identity: identity, location: anchor,
-                                      expected: displayedText, with: initialText) {
-            self.displayedText = self.initialText
+                                      expected: displayedText, with: target) {
+            self.displayedText = target
             self.currentUtteranceText = ""
         }
     }

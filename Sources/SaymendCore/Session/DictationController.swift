@@ -213,7 +213,7 @@ public final class DictationController {
             // 含已潤飾、已修正、潤飾在途的 raw 與進行中的 utterance，不再只退當前話語。
             // 缺 anchor／identity／AX、identity 不符或內容不符：一個字都不動，只提示（裁定 3：不碰剪貼簿）。
             let retracting = coordinator.displayedText
-            switch coordinator.retractSession() {
+            switch coordinator.retractSession(to: ledger.initialText) {
             case .replaced:
                 // 欄位已退回 session 起始原文：帳本鏡像跟上，否則 archiveSession 會把使用者剛丟掉的文字
                 // 當成這次聽寫的 finalText 寫進 History。不建版本——session 馬上封存，沒有東西可復原。
