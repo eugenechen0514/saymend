@@ -112,13 +112,17 @@ struct HistoryCopyButton: View {
 
     var body: some View {
         Button(HistoryClipboardText.copyButton) {
+            // 「（未定稿）」的 session 沒有最終文字：空字串不寫，更不能拿它洗掉救援。
+            guard !text.isEmpty else { return }
             // 按下當下才查，不用快照：分頁開著時背景聽寫可能剛落了一份救援。
-            if clipboard.rescueStillInClipboard != nil {
+            // 先收尾在途 paste 再判斷——救援可能正被它暫時擠開，直接看會漏判、跳過確認就覆寫。
+            if clipboard.rescueInClipboardBeforeWriting() != nil {
                 confirmingOverwrite = true
             } else {
                 clipboard.copyForUser(text)
             }
         }
+        .disabled(text.isEmpty)
         .alert(HistoryClipboardText.overwriteRescueTitle, isPresented: $confirmingOverwrite) {
             Button(HistoryClipboardText.overwrite, role: .destructive) { clipboard.copyForUser(text) }
             Button(HistoryClipboardText.cancel, role: .cancel) {}

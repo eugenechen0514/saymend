@@ -269,6 +269,22 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(backing.string(forType: .string) == "U", "clear 之後寫不進去必須同步還原；實際 \(backing.string(forType: .string) ?? "nil")")
     }
 
+    /// 收尾要把被擠開的救援放回去、卻寫不進去：剪貼簿此刻是空的（clear 之後寫失敗，沒有東西可以再放回），
+    /// 至少不能宣稱救援還在——否則 History 分頁會為一份不存在的救援跳確認、使用者以為它安全存放。
+    @Test func failingToPutTheRescueBackDoesNotClaimItIsStillThere() throws {
+        let backing = makePasteboard(seed: "U")
+        let pb = SetStringFailingPasteboard(backing: backing, failingAttempts: [3])   // 第 3 次＝收尾放回 R
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("救援 R")                              // 第 1 次
+        try channel.withTransientWrite("A") {}                // 第 2 次
+        timer.now = 0.3
+        timer.fireDue()                                       // 第 3 次：失敗
+        #expect(pb.setStringAttempts == 3)
+        #expect(channel.rescueStillInClipboard == nil)
+        #expect(backing.string(forType: .string) == nil, "已知限制：clear 後寫不進去，剪貼簿留空（PR 揭露）")
+    }
+
     /// 使用者主動複製寫不進去：同上，剪貼簿維持原樣。
     @Test func copyForUserThatFailsToWriteLeavesTheClipboardAsItWas() {
         let backing = makePasteboard(seed: "U")

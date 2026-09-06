@@ -35,12 +35,20 @@ final class FakeKeyEventChannel: KeyEventChannel {
 final class SetStringFailingPasteboard: SystemPasteboard {
     let backing: NSPasteboard
     private(set) var setStringAttempts = 0
-    init(backing: NSPasteboard) { self.backing = backing }
+    /// 只讓這些次（1-based）的 setString 失敗；nil＝每次都失敗。
+    var failingAttempts: Set<Int>?
+    init(backing: NSPasteboard, failingAttempts: Set<Int>? = nil) {
+        self.backing = backing
+        self.failingAttempts = failingAttempts
+    }
     var changeCount: Int { backing.changeCount }
     var pasteboardItems: [NSPasteboardItem]? { backing.pasteboardItems }
     func clearContents() -> Int { backing.clearContents() }
     func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool {
         setStringAttempts += 1
+        if let failingAttempts, !failingAttempts.contains(setStringAttempts) {
+            return backing.setString(string, forType: dataType)
+        }
         return false
     }
     func writeObjects(_ objects: [NSPasteboardWriting]) -> Bool { backing.writeObjects(objects) }

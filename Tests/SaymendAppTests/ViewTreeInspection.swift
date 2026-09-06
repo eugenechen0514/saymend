@@ -33,6 +33,24 @@ enum ViewTreeInspection {
         }
     }
 
+    /// 樹裡第一顆 `Button<Text>` 的 action closure——用來真的按下去（issue #42：分支邏輯要被測試鎖住）。
+    /// SwiftUI 把它存成 `ButtonAction { closure: @MainActor () -> () }`。
+    /// alert 的 `actions:` closure 內的按鈕不在這棵樹裡（尚未被求值），拿不到是預期的。
+    static func firstButtonAction(in value: Any, depth: Int = 0) -> (@MainActor () -> Void)? {
+        guard depth < 120 else { return nil }
+        if value is Button<Text> {
+            guard let action = Mirror(reflecting: value).children.first(where: { $0.label == "action" })?.value
+            else { return nil }
+            return Mirror(reflecting: action).children
+                .compactMap { $0.value as? @MainActor () -> Void }
+                .first
+        }
+        for child in Mirror(reflecting: value).children {
+            if let action = firstButtonAction(in: child.value, depth: depth + 1) { return action }
+        }
+        return nil
+    }
+
     private static func isDirectlyHidden(_ mirror: Mirror) -> Bool {
         mirror.children.contains {
             $0.label == "modifier"
