@@ -116,14 +116,20 @@ final class ClipboardChannel {
         return text
     }
 
-    /// 救援（失敗路徑的最後手段）：立即落地，**不保存使用者原本的內容**——單一 slot、R 必須佔住，
+    /// 救援（失敗路徑的最後手段）：立即落地，**不保存使用者原本的內容**——R 必須佔住，
     /// 而且沒有任何訊號能告訴我們 R 已被取回（Cmd+V 不改 changeCount），U 沒有合法的自動還原時機。
     /// 落地後只有使用者自己的寫入會取代它：後續 paste 只把它暫時擠開、收尾放回。
+    ///
+    /// 同一輪累積（修訂 issue #42 取捨 4 的單一 slot、後者取代前者）：剪貼簿此刻仍是我方上一份救援時，
+    /// 新片段**直接串接在後面、不加分隔符**——這些片段本來就會依序落進同一個欄位形成連續文字。
+    /// 使用者一貼過或複製過別的東西 changeCount 就前進，`rescueStillInClipboard` 變 nil，下一次自然重新開始一輪；
+    /// 這條規則因此不需要任何 session 訊號。`settle()` 之後才讀是必要的（見 `rescueInClipboardBeforeWriting`）。
     func rescue(_ text: String) {
         settle()
-        // 沒寫成：剪貼簿已放回原樣，不能宣稱救援在剪貼簿裡（原本就是救援的話，restore 已重新記下它）
-        guard overwrite(with: text) else { return }
-        landedRescue = (text, pasteboard.changeCount)
+        let accumulated = (rescueStillInClipboard ?? "") + text
+        // 沒寫成：剪貼簿已放回累積前的舊救援，不能宣稱新的全文在剪貼簿裡（restore 已重新記下舊救援）
+        guard overwrite(with: accumulated) else { return }
+        landedRescue = (accumulated, pasteboard.changeCount)
     }
 
     /// 使用者主動複製（History 分頁）：覆寫——呼叫端在此之前已用 `rescueStillInClipboard` 提示過。
