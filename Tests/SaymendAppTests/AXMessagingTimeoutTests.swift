@@ -22,11 +22,13 @@ import Testing
     /// （header：傳 system-wide object 才會套用到本行程送出的所有訊息；傳別的元素只影響那顆元素）。
     @Test func appliesPointTwoSecondsToTheSystemWideElementExactlyOnce() {
         var captured: [(element: AXUIElement, seconds: Float)] = []
-        _ = AXMessagingTimeout.applyGlobally(systemWideElement: AXUIElementCreateSystemWide,
-                                             set: { element, seconds in
-                                                 captured.append((element, seconds))
-                                                 return .success
-                                             })
+        // element 工廠刻意**不傳**，走 production 預設——這條斷言的重點就是「預設拿到的是 system-wide
+        // element」。傳進去等於自己驗自己（實測：把預設換成 AXUIElementCreateApplication 的 mutation
+        // 在傳入版本下存活，正是 header 說的「設在別的元素上只影響那顆元素」那個語意錯誤）。
+        _ = AXMessagingTimeout.applyGlobally(set: { element, seconds in
+            captured.append((element, seconds))
+            return .success
+        })
         #expect(captured.count == 1)
         #expect(captured.first?.seconds == 0.2)
         #expect(captured.first.map { CFEqual($0.element, AXUIElementCreateSystemWide()) } == true)
