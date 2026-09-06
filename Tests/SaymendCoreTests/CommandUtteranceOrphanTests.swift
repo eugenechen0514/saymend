@@ -99,6 +99,9 @@ import Testing
         #expect(!c.ledger.frozen)
         #expect(c.ledger.sessionText == "首句改一下")                                      // A1
         #expect(updates(feedback).last?.text == "首句改一下")                              // A3
+        // .unverified 的底線文字與「指令話語落地時那一次 update」恰好同值，光比對 text 分不出
+        // keepRaw 有沒有補發 update；補一條次數斷言把 keepRaw → emitFeedback() 這條線釘住。
+        #expect(updates(feedback).count == 4)
         c.userActivityDetected(at: 15.0)
         c.escapePressed()
         #expect(history.finished.last?.finalText == "首句改一下")                          // A2
@@ -182,6 +185,9 @@ import Testing
         #expect(!c.ledger.frozen)
         #expect(c.ledger.sessionText == "首句復原")                                        // A1
         #expect(updates(feedback).last?.text == "首句復原")                                // A3
+        // .unverified 的底線文字與「指令話語落地時那一次 update」恰好同值，光比對 text 分不出
+        // keepRaw 有沒有補發 update；補一條次數斷言把 keepRaw → emitFeedback() 這條線釘住。
+        #expect(updates(feedback).count == 4)
         c.userActivityDetected(at: 15.0)
         c.escapePressed()
         #expect(history.finished.last?.finalText == "首句復原")                            // A2
