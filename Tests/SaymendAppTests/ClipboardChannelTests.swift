@@ -309,6 +309,70 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(pb.string(forType: .string) == "救援 R", "settle 收尾已把 R 放回")
     }
 
+    // MARK: rescue 累積——同一輪救援串接（issue #42 取捨 4 修訂）
+
+    /// 連續兩次救援、中間沒人動剪貼簿：第二段接在第一段後面（無分隔符），不是取代它。
+    /// 舊規則是單一 slot、後者取代前者——#37 之後救援會常態化，一段話講三句就只剩最後一句。
+    @Test func aSecondRescueAppendsToTheFirstWhenTheClipboardIsStillOurs() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲")
+        channel.rescue("乙")
+        #expect(pb.string(forType: .string) == "甲乙", "同一輪救援必須串接；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
+    }
+
+    /// 使用者中途複製了別的東西：changeCount 前進、那一輪結束，下一次救援重新開始，
+    /// 不得把使用者那份或更早的救援黏上去。
+    @Test func aRescueAfterTheUserCopiedSomethingStartsAFreshRound() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲")
+        pb.clearContents()
+        pb.setString("使用者複製的 X", forType: .string)
+        channel.rescue("乙")
+        #expect(pb.string(forType: .string) == "乙", "新的一輪只有新片段；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "乙")
+    }
+
+    /// 累積要跨得過 paste 的暫時擠開／放回：收尾把救援放回後，下一次救援仍接在它後面而不是重新開始。
+    @Test func accumulationSurvivesAPasteThatDisplacedAndRestoredTheRescue() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("甲")
+        try channel.withTransientWrite("A") {}
+        timer.now = 0.3
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "甲", "前提：收尾把救援放回")
+        channel.rescue("乙")
+        #expect(pb.string(forType: .string) == "甲乙", "實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
+    }
+
+    /// 累積寫不進去：不得兩頭皆空、也不得只剩新片段——剪貼簿要維持累積前的舊救援，且仍認得它。
+    @Test func aFailedAccumulationKeepsThePreviousRescueInTheClipboard() {
+        let backing = makePasteboard(seed: "U")
+        let pb = SetStringFailingPasteboard(backing: backing, failingAttempts: [2])   // 第 2 次＝寫入「甲乙」
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲")
+        channel.rescue("乙")
+        #expect(pb.setStringAttempts == 3, "第 3 次是失敗後放回舊救援；實際 \(pb.setStringAttempts)")
+        #expect(backing.string(forType: .string) == "甲", "實際 \(backing.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲")
+    }
+
+    /// 三段累積：`landedRescue` 必須記成累積後的全文，只記最後一段的話第三次會接錯。
+    @Test func threeRescuesInARowAccumulateInOrder() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲")
+        channel.rescue("乙")
+        channel.rescue("丙")
+        #expect(pb.string(forType: .string) == "甲乙丙", "實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙丙")
+    }
+
     // MARK: body 拋錯與 Cmd+C 備援讀取
 
     private struct BodyFailure: Error {}
