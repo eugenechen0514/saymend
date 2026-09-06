@@ -94,7 +94,7 @@ final class SetStringFailingPasteboard: SystemPasteboard {
         channel.failAtConstruction = 1
         let pb = makePasteboard(seed: "使用者原本的剪貼簿")
         let changeCountBefore = pb.changeCount
-        let inserter = PasteInserter(channel: channel, pasteboard: pb)
+        let inserter = PasteInserter(channel: channel, clipboard: ClipboardChannel(pasteboard: pb, timer: FakeClipboardTimer()))
         do {
             try inserter.insert("聽寫文字")
             Issue.record("第 1 次建構會失敗，insert 不該正常回傳")
@@ -113,7 +113,7 @@ final class SetStringFailingPasteboard: SystemPasteboard {
         let channel = FakeKeyEventChannel()
         let backing = makePasteboard(seed: "使用者原本的剪貼簿")
         let pb = SetStringFailingPasteboard(backing: backing)
-        let inserter = PasteInserter(channel: channel, pasteboard: pb)
+        let inserter = PasteInserter(channel: channel, clipboard: ClipboardChannel(pasteboard: pb, timer: FakeClipboardTimer()))
         do {
             try inserter.insert("聽寫文字")
             Issue.record("setString 回 false，insert 不該正常回傳")
@@ -123,5 +123,40 @@ final class SetStringFailingPasteboard: SystemPasteboard {
                     "剪貼簿必須在拋錯前同步還原；實際：\(backing.string(forType: .string) ?? "nil")")
             #expect(channel.posted.isEmpty, "不得送出 Cmd+V")
         }
+    }
+
+    // MARK: PasteInserter × ClipboardChannel（issue #42）——在真正的呼叫點驗證兩個交錯
+
+    /// ②-b：連續兩次 paste（第二次在第一次的 300ms 內）。舊版第二次保存到的是第一次寫進去的 A1，
+    /// 兩次還原後剪貼簿＝A1、使用者的 U 消失。
+    @Test func consecutivePasteInsertsInsideTheWindowGiveTheUsersClipboardBack() throws {
+        let channel = FakeKeyEventChannel()
+        let pb = makePasteboard(seed: "使用者原本的剪貼簿")
+        let timer = FakeClipboardTimer()
+        let inserter = PasteInserter(channel: channel, clipboard: ClipboardChannel(pasteboard: pb, timer: timer))
+        try inserter.insert("A1")
+        timer.now = 0.1
+        try inserter.insert("A2")
+        #expect(channel.posted.count == 4)
+        #expect(timer.waits.count == 1, "第二次必須先等第一次的安全窗；實際 \(timer.waits)")
+        timer.now = 0.6
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "使用者原本的剪貼簿", "舊版這裡會是 A1")
+    }
+
+    /// ②-a：paste 後 300ms 內失敗路徑呼叫救援。舊版 paste 的還原排程會把救援內容洗回 U。
+    @Test func rescueInsideAPasteWindowIsNotOverwrittenByThePasteRestore() throws {
+        let channel = FakeKeyEventChannel()
+        let pb = makePasteboard(seed: "使用者原本的剪貼簿")
+        let timer = FakeClipboardTimer()
+        let clipboard = ClipboardChannel(pasteboard: pb, timer: timer)
+        let inserter = PasteInserter(channel: channel, clipboard: clipboard)
+        try inserter.insert("A")
+        timer.now = 0.25
+        clipboard.rescue("救援內容")
+        timer.now = 0.3
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "救援內容", "舊版這裡會被還原成使用者原本的剪貼簿")
+        #expect(clipboard.rescueStillInClipboard == "救援內容")
     }
 }
