@@ -818,6 +818,13 @@ public final class DictationController {
         case .fieldMismatch:
             recordInsertEvent(kind: "insertSkipped", classification: "fieldMismatch",
                               utteranceText: commandSnapshot.text)
+            // 一個字都沒動（issue #38／#44 的原子契約）＝指令話語仍完整留在畫面上。帳本若不鏡像它，
+            // 它就成了追蹤不到的孤兒：archiveSession 的 finalText 與底線範圍都會少這一段（issue #40）。
+            // 不建版本——我們什麼都沒改寫，沒有東西可復原。與 applyNewContent 及 performUndo
+            // 無步驟版的 fieldMismatch 出口一致。
+            if !commandSnapshot.text.isEmpty {
+                ledger.synchronizeObservedTail(ledger.sessionText + commandSnapshot.text)
+            }
             ledger.freeze()
             feedback?.sessionFrozen()
             hud.present(.notice("欄位已被外部改動，本段停止修正"))
@@ -931,6 +938,11 @@ public final class DictationController {
             recordInsertEvent(kind: "insertSkipped", classification: "fieldMismatch",
                               utteranceText: commandSnapshot.text)
             ledger.restoreFailedUndo(step)
+            // 回捲後的鏡像＝復原前的全文，但欄位上還多了沒被退掉的指令話語——同樣要併回，
+            // 否則它成為孤兒（issue #40）。restoreFailedUndo 之後才做：順序反了會被它蓋掉。
+            if !commandSnapshot.text.isEmpty {
+                ledger.synchronizeObservedTail(ledger.sessionText + commandSnapshot.text)
+            }
             ledger.freeze()
             feedback?.sessionFrozen()
             hud.present(.notice("欄位已被外部改動，本段停止修正"))

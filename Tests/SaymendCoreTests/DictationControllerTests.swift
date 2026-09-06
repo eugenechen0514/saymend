@@ -1087,7 +1087,8 @@ import Testing
     #expect(hud.states.contains(.notice("欄位已被外部改動，本段停止修正")))
     #expect(c.ledger.frozen)
     #expect(key.ops.count == opsBefore)               // 指令話語留在欄位、分毫未動
-    #expect(c.ledger.sessionText == "內容。")
+    // 上一行才剛斷言指令話語仍在欄位上，鏡像就必須含它（issue #40）——否則它是帳本追蹤不到的孤兒。
+    #expect(c.ledger.sessionText == "內容。改一下")
 }
 
 /// 迴歸：延續窗內點 HUD「復原」的接線危險——若滑鼠 leftMouseDown 被當成使用者活動先送進
