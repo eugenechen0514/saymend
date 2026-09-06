@@ -278,6 +278,21 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(backing.string(forType: .string) == "U")
     }
 
+    /// History 分頁按下複製時：救援可能正被在途 paste 暫時擠開（此刻 changeCount 不符），
+    /// 直接看 `rescueStillInClipboard` 會漏判、跳過確認就覆寫。要寫之前的判斷必須先 settle。
+    @Test func rescueInClipboardBeforeWritingSettlesTheInFlightPasteFirst() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("救援 R")
+        try channel.withTransientWrite("A") {}
+        timer.now = 0.1
+        #expect(channel.rescueStillInClipboard == nil, "前提：此刻剪貼簿是 A，直接看會漏判")
+        #expect(channel.rescueInClipboardBeforeWriting() == "救援 R")
+        #expect(timer.waits.count == 1 && abs((timer.waits.first ?? 0) - 0.2) < 1e-9, "實際 \(timer.waits)")
+        #expect(pb.string(forType: .string) == "救援 R", "settle 收尾已把 R 放回")
+    }
+
     // MARK: body 拋錯與 Cmd+C 備援讀取
 
     private struct BodyFailure: Error {}

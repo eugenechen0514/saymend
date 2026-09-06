@@ -30,7 +30,8 @@ final class MainQueueClipboardTimer: ClipboardTimer {
     func schedule(after seconds: TimeInterval, _ block: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: block)
     }
-    func wait(_ seconds: TimeInterval) { Thread.sleep(forTimeInterval: seconds) }
+    /// 不用 `Thread.sleep`：那會把 HotkeyMonitor 的 event tap 一起卡住，連我們自己剛送的合成 Cmd+V 都送不到目標 App。
+    func wait(_ seconds: TimeInterval) { EventTapFriendlyWait.wait(seconds) }
 }
 
 /// 剪貼簿的唯一寫入口（issue #42）：paste 的暫時寫入、Cmd+C 備援的暫時清空、失敗路徑的救援、History 分頁的複製
@@ -130,6 +131,13 @@ final class ClipboardChannel {
     func copyForUser(_ text: String) {
         settle()
         _ = overwrite(with: text)
+    }
+
+    /// 要覆寫剪貼簿之前問「會蓋掉救援嗎」：先把在途 paste 收尾（它可能正暫時擠開救援，此刻 changeCount 不符），
+    /// 再看。直接讀 `rescueStillInClipboard` 會在那 300ms 內漏判、跳過確認就覆寫。
+    func rescueInClipboardBeforeWriting() -> String? {
+        settle()
+        return rescueStillInClipboard
     }
 
     /// 自救援落地後剪貼簿沒被任何人覆寫 → 該救援文字；否則 nil。
