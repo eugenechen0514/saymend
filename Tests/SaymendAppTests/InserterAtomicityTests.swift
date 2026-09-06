@@ -29,7 +29,7 @@ final class FakeKeyEventChannel: KeyEventChannel {
 
 /// 假剪貼簿（issue #41）：儲存交給包起來的真 NSPasteboard，只攔截 `setString` 讓它回 false 且不寫入——
 /// 模擬 pasteboard server 拒絕寫入。其餘操作原樣轉發，所以「還原」是否真的發生可以從底層 NSPasteboard 讀回來驗。
-final class SetStringFailingPasteboard: PasteboardChannel {
+final class SetStringFailingPasteboard: SystemPasteboard {
     let backing: NSPasteboard
     private(set) var setStringAttempts = 0
     init(backing: NSPasteboard) { self.backing = backing }
@@ -41,6 +41,7 @@ final class SetStringFailingPasteboard: PasteboardChannel {
         return false
     }
     func writeObjects(_ objects: [NSPasteboardWriting]) -> Bool { backing.writeObjects(objects) }
+    func string(forType dataType: NSPasteboard.PasteboardType) -> String? { backing.string(forType: dataType) }
 }
 
 /// issue #38：inserter 的失敗必須是原子的——拋錯＝一個事件都沒送出，正常回傳＝全部送出。
