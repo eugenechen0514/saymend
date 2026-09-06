@@ -14,6 +14,8 @@ final class FakeKeyEventChannel: KeyEventChannel {
     private(set) var posted: [CGEvent] = []
     /// 第一次 post 發生時，已經建構了幾個事件——直接量測「先全部建好、再開始送」這個性質
     private(set) var constructionsAtFirstPost: Int? = nil
+    /// 每次 post 後的掛鉤：模擬目標 App 對合成事件的反應（例如收到 Cmd+C 後寫入剪貼簿）。
+    var onPost: ((CGEvent) -> Void)? = nil
 
     func makeKeyEvent(virtualKey: CGKeyCode, keyDown: Bool) -> CGEvent? {
         constructions += 1
@@ -24,6 +26,7 @@ final class FakeKeyEventChannel: KeyEventChannel {
     func post(_ event: CGEvent) {
         if constructionsAtFirstPost == nil { constructionsAtFirstPost = constructions }
         posted.append(event)
+        onPost?(event)
     }
 }
 
