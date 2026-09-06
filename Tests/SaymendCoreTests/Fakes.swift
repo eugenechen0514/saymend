@@ -143,14 +143,18 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
         var caretUTF16: Int
         var isSecure: Bool
         var selectedRange: FieldContext.SelectedRange?
+        /// 這個欄位所屬 App 的 bundleID（issue #37 shadow 診斷要判讀「同 App 換欄位」還是「跨 App」）
+        var bundleID: String?
     }
     private var fields: [String: State] = [:]
     private var focusedID: String?
     private let registry = FieldIdentityRegistry<String>(areEqual: ==)
     private(set) var axWrites: [(field: String, location: Int, expected: String, new: String)] = []
 
-    func addField(_ id: String, text: String, caretUTF16: Int? = nil, isSecure: Bool = false) {
-        fields[id] = State(text: text, caretUTF16: caretUTF16 ?? text.utf16.count, isSecure: isSecure, selectedRange: nil)
+    func addField(_ id: String, text: String, caretUTF16: Int? = nil, isSecure: Bool = false,
+                  bundleID: String? = nil) {
+        fields[id] = State(text: text, caretUTF16: caretUTF16 ?? text.utf16.count, isSecure: isSecure,
+                           selectedRange: nil, bundleID: bundleID)
         if focusedID == nil { focusedID = id }
     }
     func focus(_ id: String) { precondition(fields[id] != nil); focusedID = id }
@@ -172,9 +176,21 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
         }
         return FieldContext(hasFocusedElement: true, caretLocation: state.caretUTF16,
                             fieldIdentity: registry.identity(for: focusedID),
-                            selectedRange: state.selectedRange, selectedText: selectedText)
+                            selectedRange: state.selectedRange, selectedText: selectedText,
+                            frontAppBundleID: state.bundleID)
     }
     func releaseFieldIdentity(_ identity: FieldIdentity?) { registry.release(identity) }
+
+    /// 輕量閘門（issue #37）：與 production AXFieldReader 同一條邏輯——先 secure、再 identity，
+    /// 且**只用 `registry.matches`**（不登記持有者），所以 lease 不變式不受閘門影響。
+    func fieldGate(sessionIdentity: FieldIdentity?) -> FieldGate {
+        guard let focusedID, let state = fields[focusedID] else { return .unknown }
+        if state.isSecure { return .secure }
+        guard let sessionIdentity else { return .unknown }
+        return registry.matches(sessionIdentity, element: focusedID)
+            ? .same
+            : .different(currentAppBundleID: state.bundleID)
+    }
 
     // MARK: TextInserter（只會插入）
     func insert(_ text: String) throws {

@@ -126,16 +126,52 @@ public struct FieldContext: Equatable, Sendable {
     }
 }
 
+/// 輕量焦點閘門（issue #37 shadow 階段）：每句 finalized 上屏前只需要回答
+/// 「現在聚焦的還是不是 session 起始那個元素、是不是密碼欄位」，不需要 range／選取／全文。
+/// 換掉完整 snapshot 之後，每句的 AX 屬性讀取從 4–5 次降到 2 次，且不再有「聽寫途中對目前焦點
+/// 發合成 Cmd+C」的隱患（snapshot 的選取備援路徑）。
+///
+/// **`.unknown` 是安全值**：讀不到焦點、或兩邊沒有 identity 可比（無 AX 的 App）都落在這裡，
+/// 呼叫端一律當作「照常上屏」——issue #21 的裁定，純追加永遠不得因缺 AX 而停。
+public enum FieldGate: Equatable, Sendable {
+    /// AX 明確：焦點就是 session 起始那個 element
+    case same
+    /// AX 明確：焦點已換到別的 element（附現在的前景 App bundleID，供診斷判讀同 App 或跨 App）
+    case different(currentAppBundleID: String?)
+    /// 目前焦點是密碼欄位
+    case secure
+    /// 讀不到焦點／沒有 identity 可比 → 維持 #21，照常追加
+    case unknown
+}
+
 public protocol FieldContextProviding: AnyObject {
     func snapshot() -> FieldContext
     /// session archive 時歸還 `snapshot().fieldIdentity` 發出的 token（issue #43）。
     /// registry 有引用計數：FeedbackCoordinator 可能同時持有同一 element 的 token，這裡只減自己那一份。
     func releaseFieldIdentity(_ identity: FieldIdentity?)
+    /// 焦點閘門（issue #37）。`sessionIdentity` 是 session 起始登記的那個 element token（nil＝沒有）。
+    /// 實作**只能**用 `FieldIdentityRegistry.matches`，不得呼叫 `identity(for:)`——後者會多發一個持有者，
+    /// 破壞「每個非 nil token 恰歸還一次」的 lease 不變式（issue #43）。
+    func fieldGate(sessionIdentity: FieldIdentity?) -> FieldGate
 }
 
 public extension FieldContextProviding {
     /// 沒有 identity 概念的 reader（無 AX、測試 fake）不需要做任何事。
     func releaseFieldIdentity(_ identity: FieldIdentity?) {}
+
+    /// 由 `snapshot()` 推導的預設閘門：對不在意閘門的 reader，行為與「完整 snapshot ＋ 當場歸還 token」
+    /// 逐位元相同（同樣一次 snapshot、同樣一次歸還），只是把 secure 與 identity 兩件事一起答出來。
+    /// 有能力做輕量查詢的 reader（App 端 AXFieldReader）自行覆寫，省掉整份 snapshot 的跨行程 IPC。
+    func fieldGate(sessionIdentity: FieldIdentity?) -> FieldGate {
+        let context = snapshot()
+        // 閘門用的 token 不採用，當場歸還（issue #43）。nil 不呼叫 reader——比照 controller 的 releaseFieldLease，
+        // 讓「每個非 nil token 恰歸還一次」在測試裡乾淨可驗。
+        if let current = context.fieldIdentity { releaseFieldIdentity(current) }
+        // secure 必須排在 identity 之前：密碼欄位不登記 identity，兩邊都沒有 token 可比。
+        if context.isSecure { return .secure }
+        guard let sessionIdentity, let current = context.fieldIdentity else { return .unknown }
+        return current == sessionIdentity ? .same : .different(currentAppBundleID: context.frontAppBundleID)
+    }
 }
 
 public enum RangeReplaceResult: Equatable, Sendable {

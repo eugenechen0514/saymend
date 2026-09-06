@@ -107,6 +107,8 @@ public final class DictationController {
     private var historySessionID: String?
     /// 熱鍵按下當下的前景 App 名稱（第 7 層動態上下文，規格 §4.7）
     private var capturedFrontAppName: String?
+    /// 熱鍵按下當下的前景 App bundleID（issue #37 shadow 診斷：判讀「同 App 換欄位」還是「跨 App」）
+    private var capturedFrontAppBundleID: String?
     /// OCR 備援落地的螢幕參考文字（趕上哪句算哪句——M4 設計裁決 5）
     private var capturedOCRText: String?
     /// internal 供測試 await（OCR 非同步落地，趕上哪句算哪句——M4 設計裁決 5）
@@ -322,14 +324,23 @@ public final class DictationController {
         case .finalized(let text, let quality):
             // M2 遺留債：聽寫中焦點切進密碼欄位（Tab、程式切換焦點——滑鼠/鍵盤活動已由凍結涵蓋，
             // 但焦點可以不經這兩者移動）。規格 §5.3：密碼欄位一個字都不能進。硬停整個 session。
-            if let field = fieldReader?.snapshot() {
-                // 這次 snapshot 只為密碼守衛，token 不採用、當場歸還（issue #43：每個 snapshot 的 token
-                // 要嘛交給 ledger、要嘛立即歸還，否則 registry 計數歸不了零）
-                releaseFieldLease(field.fieldIdentity)
-                if field.isSecure {
-                    abortForSecureField()
-                    return
-                }
+            //
+            // issue #37 shadow：這裡原本每句都做一次完整 snapshot，只為讀一個 isSecure bool
+            // （4–5 次 AX IPC，且在有選取＋白名單 App 時會對目前焦點發合成 Cmd+C）。改成輕量閘門後，
+            // 手上同時有「此刻焦點是不是 session 起始那個欄位」——**但這一階段只記診斷、不改行為**。
+            // 閘門用的 token 由實作自行歸還／根本不登記（issue #43 的 lease 不變式因此中性）。
+            switch fieldReader?.fieldGate(sessionIdentity: ledger.fieldIdentity) {
+            case .secure:
+                abortForSecureField()
+                return
+            case .different(let currentAppBundleID):
+                // shadow 模式（issue #37）：只記一筆診斷，然後照常往下走——不攔、不凍、不救剪貼簿、不發 notice。
+                // 先蒐集真實世界的誤判率（尤其 Electron 家族 CFEqual 的穩定性），那是後續要不要真的開閘的唯一關卡。
+                // kind 刻意用新的 insertWouldSkip：沿用 insertSkipped 會位移既有那些以索引／count 斷言 history 的測試。
+                recordInsertEvent(kind: "insertWouldSkip", classification: "fieldChanged",
+                                  utteranceText: text, detail: fieldChangeDetail(current: currentAppBundleID))
+            case .same, .unknown, .none:
+                break   // .unknown＝讀不到焦點或無 identity 可比（無 AX 的 App）：維持 #21，照常上屏
             }
             // **必須在密碼欄位守衛之後**（issue #10）：診斷列會把定稿文字原樣落進資料庫，
             // 寫在守衛之前等於在密碼欄位裡留下一份使用者說的話。
@@ -519,6 +530,7 @@ public final class DictationController {
                     coordinator.beginSession(anchor: field.caretLocation, identity: field.fieldIdentity)
                 }
                 capturedFrontAppName = field.frontAppName
+                capturedFrontAppBundleID = field.frontAppBundleID
                 if settings.historyEnabled, let history {
                     let hid = UUID().uuidString
                     historySessionID = hid
@@ -975,6 +987,18 @@ public final class DictationController {
     /// 插入層事件補列（M7 §4）：kind 二分——insertFailed＝coordinator 拋錯（真 I/O 失敗）、
     /// insertSkipped＝守衛拒絕（原文正確保留，非失敗）。與正常 outcome 列共用 gate 與 session，
     /// 時序天然在 outcome 列之後（dispatch 先記、apply 後跑），回查時兩列相鄰。
+    /// shadow 診斷的 detail（issue #37）。格式：
+    /// - 同 App 內換欄位（Tab／maxlength 自動跳格／頁面 JS 搬焦點）：`sameApp:<bundleID>`
+    /// - 跨 App（焦點被別的 App 搶走）：`crossApp:<session 起始 bundleID>→<現在的 bundleID>`
+    /// 讀不到的 bundleID 一律寫 `?`——分不出同 App 或跨 App 時保守歸入 crossApp，
+    /// 免得把「其實已經換 App」的樣本混進 sameApp 那組、低估風險。
+    private func fieldChangeDetail(current: String?) -> String {
+        if let session = capturedFrontAppBundleID, let current, session == current {
+            return "sameApp:\(session)"
+        }
+        return "crossApp:\(capturedFrontAppBundleID ?? "?")→\(current ?? "?")"
+    }
+
     private func recordInsertEvent(kind: String, classification: String,
                                    utteranceText: String, detail: String? = nil) {
         guard settings.historyEnabled, let hid = historySessionID else { return }

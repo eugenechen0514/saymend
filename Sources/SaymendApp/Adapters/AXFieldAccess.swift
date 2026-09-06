@@ -180,6 +180,8 @@ final class AXFieldRegistry {
     func matches(_ identity: FieldIdentity, element: AXUIElement) -> Bool { registry.matches(identity, element: element) }
     func element(for identity: FieldIdentity) -> AXUIElement? { registry.element(for: identity) }
     func release(_ identity: FieldIdentity?) { registry.release(identity) }
+    /// 仍有持有者的 entry 數。用來釘住「閘門不得替焦點元素多留持有者」這條 lease 不變式（issue #43／#37）。
+    var entryCount: Int { registry.count }
 }
 
 /// 聚焦欄位快照：secure 偵測＋游標錨位（UTF-16）＋元素 identity token
@@ -189,16 +191,20 @@ final class AXFieldReader: FieldContextProviding {
     private let clipboardFallback = ClipboardSelectionReader()
     /// subrole 讀取可注入只為了讓 secure 三態判定（含逾時重試）有單元測試；production 用預設值。
     private let readSubrole: (AXUIElement) -> (AXError, String?)
+    /// `focusedElement` 可注入只為了讓 `fieldGate` 這道閘門有單元測試（比照 AXInserter）；production 用預設值。
+    private let focusedElement: () -> AXUIElement?
 
     init(profiles: (any AppProfileStore)? = nil, registry: AXFieldRegistry,
-         readSubrole: @escaping (AXUIElement) -> (AXError, String?) = AXFieldAccess.readSubrole) {
+         readSubrole: @escaping (AXUIElement) -> (AXError, String?) = AXFieldAccess.readSubrole,
+         focusedElement: @escaping () -> AXUIElement? = { AXFieldAccess.focusedElement() }) {
         self.profiles = profiles
         self.registry = registry
         self.readSubrole = readSubrole
+        self.focusedElement = focusedElement
     }
 
     func snapshot() -> FieldContext {
-        guard let element = AXFieldAccess.focusedElement() else { return FieldContext() }
+        guard let element = focusedElement() else { return FieldContext() }
         return snapshot(of: element)
     }
 
@@ -265,6 +271,26 @@ final class AXFieldReader: FieldContextProviding {
 
     func releaseFieldIdentity(_ identity: FieldIdentity?) {
         registry.release(identity)
+    }
+
+    /// 輕量焦點閘門（issue #37）：只讀「焦點元素」＋「subrole」兩次 AX 屬性，取代原本每句一次的完整
+    /// `snapshot(of:)`（subrole／selectedTextRange／selectedText／整份 kAXValue，4–5 次跨行程 IPC，
+    /// 而且在有選取＋白名單 App 時還會對目前焦點發一個合成 Cmd+C）。
+    ///
+    /// **只用 `registry.matches`，絕不呼叫 `identity(for:)`**：後者會多發一個持有者，
+    /// 破壞 #43 的 lease 不變式（session 起始那個 token 就再也死不掉）。
+    /// 密碼欄位一樣不登記 identity，比照 `snapshot(of:)` 的既有紀律。
+    ///
+    /// secure 判定與 `snapshot(of:)` **共用同一個 `isSecureField`**（issue #59 的三態＋逾時重試一次＋
+    /// 仍問不出來就 fail closed）。兩處各寫一份的話會漂移，而漂移的後果是「開始聽寫時擋得住、
+    /// 聽寫途中切進去擋不住」——規格 §5.3 破在中途路徑上。
+    func fieldGate(sessionIdentity: FieldIdentity?) -> FieldGate {
+        guard let element = focusedElement() else { return .unknown }
+        if isSecureField(element) { return .secure }
+        guard let sessionIdentity else { return .unknown }
+        return registry.matches(sessionIdentity, element: element)
+            ? .same
+            : .different(currentAppBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
     }
 }
 
