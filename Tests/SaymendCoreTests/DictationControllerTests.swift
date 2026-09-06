@@ -229,6 +229,9 @@ import Testing
     #expect(hud.states.contains(.notice("欄位已被外部改動，本段停止修正")))
     #expect(!hud.states.contains(.notice("沒有可復原的步驟")))
     #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.first?.outcomeText == "fieldMismatch")
+    // 指令話語退不掉、仍在畫面上 → 帳本要鏡像它（issue #40）。這條出口的 synchronizeObservedTail
+    // 本來就寫對了，但先前無人斷言：刪掉那三行全套也不會紅。
+    #expect(c.ledger.sessionText == "復原")
 }
 
 /// 同一情境、無 AX：指令話語留著、鏡像它、不凍結、提示沒有步驟。
