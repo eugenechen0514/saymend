@@ -36,6 +36,16 @@ public final class InsertionCoordinator {
         case unsupported        // 無 AX 範圍能力／無 identity：呼叫端決定降級方式
     }
 
+    /// 純追加（insertFinalized／insertDetached）的結局（issue #37）。
+    /// 刻意**不加** `@discardableResult`：每個呼叫點都必須明白表態要怎麼處理「一個字都沒寫」，
+    /// 忘了處理就是安靜的資料遺失。
+    public enum AppendOutcome: Equatable, Sendable {
+        case inserted
+        /// AX 明確指出焦點已不在 session 欄位（或已切進密碼欄）：**一個字都沒寫**，鏡像／counter 都沒動。
+        /// 帶現在的前景 App bundleID 供診斷判讀同 App 或跨 App（`.secure` 沒有這個資訊，為 nil）。
+        case fieldChanged(currentAppBundleID: String?)
+    }
+
     /// 主 inserter 失敗、備援救回時的分類（issue #1 蒐證）。控制流上是「成功」，
     /// 但過去這條路徑什麼都不留，帳面與一次乾淨插入完全無法區分。
     public enum InserterFallback: String, Sendable {
@@ -51,6 +61,8 @@ public final class InsertionCoordinator {
     private let paste: any TextInserter
     private let rangeReplacer: (any SessionRangeReplacing)?
     private let pasteThreshold: Int
+    /// 寫入前的焦點閘門（issue #37）。nil＝沒有閘門＝維持舊行為（照常寫）。
+    private let fieldGate: ((FieldIdentity?) -> FieldGate)?
 
     public private(set) var currentUtteranceText = ""
     public var currentUtteranceLength: Int { currentUtteranceText.count }
@@ -68,11 +80,13 @@ public final class InsertionCoordinator {
     public init(keystroke: any TextInserter,
                 paste: any TextInserter,
                 rangeReplacer: (any SessionRangeReplacing)? = nil,
-                pasteThreshold: Int = 12) {
+                pasteThreshold: Int = 12,
+                fieldGate: ((FieldIdentity?) -> FieldGate)? = nil) {
         self.keystroke = keystroke
         self.paste = paste
         self.rangeReplacer = rangeReplacer
         self.pasteThreshold = pasteThreshold
+        self.fieldGate = fieldGate
     }
 
     /// 新 session：anchor／identity 來自 reader 同一次 snapshot（與 ledger 相同來源），
@@ -101,12 +115,15 @@ public final class InsertionCoordinator {
     // MARK: - 純追加（永遠照常）
 
     /// finalized 片段上屏。主 inserter 失敗時換另一個（規格 §5.2 逐層降級）。
-    public func insertFinalized(_ text: String) throws {
-        guard !text.isEmpty else { return }
-        try insertWithFallback(text)
+    /// 閘門判定焦點已換時回 `.fieldChanged`：**一個字都沒寫，帳本／鏡像／counter 都不動**。
+    public func insertFinalized(_ text: String) throws -> AppendOutcome {
+        guard !text.isEmpty else { return .inserted }
+        let outcome = try insertWithFallback(text)
+        guard case .inserted = outcome else { return outcome }
         currentUtteranceText += text
         displayedText += text
         insertCounter += 1
+        return .inserted
     }
 
     /// 緩衝模式（選取即目標，M3 設計裁決 1）：finalized 只記帳不上屏。
@@ -122,11 +139,13 @@ public final class InsertionCoordinator {
 
     /// 不掛 utterance 帳本的直接插入：緩衝後續句落地用。
     /// 走 insertWithFallback（長度門檻選 paste／keystroke），成功即 counter 前進、鏡像追加。
-    public func insertDetached(_ text: String) throws {
-        guard !text.isEmpty else { return }
-        try insertWithFallback(text)
+    public func insertDetached(_ text: String) throws -> AppendOutcome {
+        guard !text.isEmpty else { return .inserted }
+        let outcome = try insertWithFallback(text)
+        guard case .inserted = outcome else { return outcome }
         displayedText += text
         insertCounter += 1
+        return .inserted
     }
 
     /// 零長度、現時 counter 的指令快照（零副作用，不動 currentUtteranceText）。
@@ -283,7 +302,7 @@ public final class InsertionCoordinator {
 
     /// 主 inserter 拋錯後**全量**重送給備援。成立的前提是 TextInserter 的原子契約（issue #38）：
     /// 主 inserter 拋錯＝一個字都沒進欄位，重送完整文字才不會留下「前綴＋完整文字」。
-    private func insertWithFallback(_ text: String) throws {
+    private func insertWithFallback(_ text: String) throws -> AppendOutcome {
         let pasteFirst = text.count >= pasteThreshold
         let primary: any TextInserter = pasteFirst ? paste : keystroke
         let secondary: any TextInserter = pasteFirst ? keystroke : paste
@@ -293,5 +312,6 @@ public final class InsertionCoordinator {
             try secondary.insert(text)   // 這裡再拋＝真失敗，交給呼叫端的 insertFailed 路徑
             onInserterFallback?(pasteFirst ? .pasteToKeystroke : .keystrokeToPaste)
         }
+        return .inserted
     }
 }

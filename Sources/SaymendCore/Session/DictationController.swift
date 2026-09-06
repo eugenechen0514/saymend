@@ -178,6 +178,11 @@ public final class DictationController {
     /// Esc 因缺 verified AX 而 fail closed 時的提示（issue #21 裁定 3：只提示，不進剪貼簿——按 Esc 就是要丟掉它）
     static let retractionUnverifiedNotice = "無法確認文字位置，本段未退回，請手動刪除"
 
+    /// 寫入前的焦點閘門攔下一句 raw 時的提示（issue #37）。
+    /// **刻意不歸入 `insertSkipNotice` 那個「未潤飾（…）」家族**：那家族說的是「字在螢幕上、只是潤飾沒套用」，
+    /// 這裡說的是「字根本沒上屏」——對使用者的下一步動作完全不同（前者可以不理，後者要去貼上）。
+    static let fieldChangedNotice = "欄位已切換，內容已入剪貼簿"
+
     public func escapePressed() {
         if isLingering {
             archiveSession()                // 延續窗中按 Esc＝提前定稿（吞掉 Esc 由熱鍵層處理）
@@ -389,8 +394,12 @@ public final class DictationController {
                     return
                 }
                 do {
-                    try coordinator.insertFinalized(text)
-                    emitFeedback()                             // 底線延伸至新上屏文字
+                    switch try coordinator.insertFinalized(text) {
+                    case .inserted:
+                        emitFeedback()                         // 底線延伸至新上屏文字
+                    case .fieldChanged:
+                        break                                  // 閘門尚未接上（issue #37 下一步）
+                    }
                 } catch {
                     // 內容已產生卻落不了地：比照緩衝句插入失敗（:727）救進剪貼簿，別讓使用者白說話。
                     // 這先前是全檔唯一漏掉 clipboardRescue 的同型路徑（另見 :352／:698／:724／:733／:745／:856／:893）。
@@ -767,9 +776,13 @@ public final class DictationController {
                     return
                 }
                 do {
-                    try coordinator.insertDetached(text)
-                    ledger.appendPolished(text)
-                    emitFeedback()                         // 緩衝後續句落地：底線延伸至新內容
+                    switch try coordinator.insertDetached(text) {
+                    case .inserted:
+                        ledger.appendPolished(text)
+                        emitFeedback()                     // 緩衝後續句落地：底線延伸至新內容
+                    case .fieldChanged:
+                        break                              // 閘門尚未接上（issue #37 下一步）
+                    }
                 } catch {
                     rescueToClipboard(text)
                     hud.present(.notice("插入失敗，內容已入剪貼簿"))

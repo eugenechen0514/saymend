@@ -59,8 +59,8 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func shortTextUsesKeystrokeLongUsesPaste() throws {
     let (c, key, paste) = makeCoordinator()
-    try c.insertFinalized("你好")            // 2 字 < 6 → keystroke
-    try c.insertFinalized("這是一段很長的文字啊")  // ≥ 6 → paste
+    _ = try c.insertFinalized("你好")            // 2 字 < 6 → keystroke
+    _ = try c.insertFinalized("這是一段很長的文字啊")  // ≥ 6 → paste
     #expect(key.ops == [.insert("你好")])
     #expect(paste.ops == [.insert("這是一段很長的文字啊")])
     #expect(c.currentUtteranceLength == 12)
@@ -69,22 +69,22 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func insertFallsBackToOtherInserter() throws {
     let (c, key, paste) = makeCoordinator()
     key.failInsertsRemaining = 1
-    try c.insertFinalized("嗨")               // keystroke 失敗 → 改用 paste
+    _ = try c.insertFinalized("嗨")               // keystroke 失敗 → 改用 paste
     #expect(paste.ops == [.insert("嗨")])
 }
 
 @Test func appendWorksWithoutAnySessionOrAX() throws {
     // issue #21 的裁定：純追加的上屏永遠不得因缺 AX／identity 而停——這條是 PR #36 被否決的原因
     let (c, key, _) = makeCoordinator()
-    try c.insertFinalized("沒有 AX")
-    try c.insertDetached("也能寫")
+    _ = try c.insertFinalized("沒有 AX")
+    _ = try c.insertDetached("也能寫")
     #expect(key.ops == [.insert("沒有 AX"), .insert("也能寫")])
     #expect(c.displayedText == "沒有 AX也能寫")
 }
 
 @Test func snapshotCarriesText() throws {
     let (c, _, _) = makeCoordinator()
-    try c.insertFinalized("呃你好")
+    _ = try c.insertFinalized("呃你好")
     let snap = c.snapshotAndBeginNext()
     #expect(snap.text == "呃你好")
     #expect(snap.length == 3)
@@ -102,8 +102,8 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     // 跨片段組字：e + 組合重音符 分兩批抵達，欄位裡已合成 é（1 個字位）；
     // 帳本以字位計、鏡像以原始 UTF-16 保留——AX 範圍替換要的是後者
     let (c, _, _, ax) = makeAXCoordinator(anchor: 7)
-    try c.insertFinalized("e")
-    try c.insertFinalized("\u{301}")
+    _ = try c.insertFinalized("e")
+    _ = try c.insertFinalized("\u{301}")
     #expect(c.currentUtteranceLength == 1)   // 以串接後字串計數，不是片段各自加總
     #expect(c.retractSession(to: "") == .replaced)
     #expect(ax.calls.count == 1)
@@ -115,7 +115,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func beginSessionSeedsMirrorWithInitialTextAndEndClearsIt() throws {
     let (c, _, _, _) = makeAXCoordinator(anchor: 3, initialText: "原選取")
     #expect(c.displayedText == "原選取")
-    try c.insertDetached("後續")
+    _ = try c.insertDetached("後續")
     #expect(c.displayedText == "原選取後續")
     c.endSession()
     #expect(c.displayedText == "")
@@ -125,7 +125,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func resetKeepsMirrorForLingerResume() throws {
     // 延續窗 resume 會呼叫 reset()：同一 session，鏡像與 anchor 都不能被清
     let (c, _, _, ax) = makeAXCoordinator(anchor: 0)
-    try c.insertFinalized("第一句")
+    _ = try c.insertFinalized("第一句")
     _ = c.snapshotAndBeginNext()
     c.reset()
     #expect(c.displayedText == "第一句")
@@ -137,9 +137,9 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     // issue #21 的 1.5 秒窗口：話語閉合（snapshotAndBeginNext）後 currentUtteranceText 歸零，
     // 但字還在欄位上、潤飾還沒回來——鏡像必須仍包含它，Esc 才退得掉
     let (c, _, _, ax) = makeAXCoordinator(anchor: 0)
-    try c.insertFinalized("已經落地的字")
+    _ = try c.insertFinalized("已經落地的字")
     _ = c.snapshotAndBeginNext()               // 潤飾在途
-    try c.insertFinalized("下一句")
+    _ = try c.insertFinalized("下一句")
     #expect(c.currentUtteranceLength == 3)
     #expect(c.displayedText == "已經落地的字下一句")
     #expect(c.retractSession(to: "") == .replaced)
@@ -150,9 +150,9 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func retractSessionReplacesWholeMirrorWithEmptyForTailSession() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 5)
-    try c.insertFinalized("嗨嗨")
+    _ = try c.insertFinalized("嗨嗨")
     _ = c.snapshotAndBeginNext()
-    try c.insertFinalized("第二句")
+    _ = try c.insertFinalized("第二句")
     let stale = c.currentTailSnapshot()
     #expect(c.retractSession(to: "") == .replaced)
     #expect(ax.verifyCalls.count == 1 && ax.calls.count == 1)
@@ -185,7 +185,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func retractSessionWithoutIdentityIsUnverifiedAndTouchesNothing() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 0, identity: nil)
-    try c.insertFinalized("字")
+    _ = try c.insertFinalized("字")
     #expect(c.retractSession(to: "") == .unverified)
     #expect(ax.verifyCalls.isEmpty)
     #expect(key.ops == [.insert("字")])
@@ -194,7 +194,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func retractSessionWithoutAnchorIsUnverified() throws {
     let (c, _, _, ax) = makeAXCoordinator(anchor: nil)
-    try c.insertFinalized("字")
+    _ = try c.insertFinalized("字")
     #expect(c.retractSession(to: "") == .unverified)
     #expect(ax.verifyCalls.isEmpty)
 }
@@ -203,7 +203,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let key = RecordingInserter(), paste = RecordingInserter()
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: nil)
     c.beginSession(anchor: 0, identity: sessionIdentity)
-    try c.insertFinalized("字")
+    _ = try c.insertFinalized("字")
     #expect(c.retractSession(to: "") == .unverified)
     #expect(key.ops == [.insert("字")])
 }
@@ -211,7 +211,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func retractSessionMismatchIsFieldMismatchAndTouchesNothing() throws {
     let (c, _, _, ax) = makeAXCoordinator(anchor: 0)
     ax.verifyResult = .mismatch                             // 焦點已到別的欄位，或內容被改
-    try c.insertFinalized("字")
+    _ = try c.insertFinalized("字")
     #expect(c.retractSession(to: "") == .fieldMismatch)
     #expect(ax.calls.isEmpty)
     #expect(c.displayedText == "字")
@@ -220,7 +220,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func retractSessionSecondStepFailureIsFieldMismatch() throws {
     let (c, _, _, ax) = makeAXCoordinator(anchor: 0)
     ax.replaceResult = .mismatch                            // verify 過、replace 失敗（兩步之間變動）
-    try c.insertFinalized("字")
+    _ = try c.insertFinalized("字")
     #expect(c.retractSession(to: "") == .fieldMismatch)
     #expect(c.displayedText == "字")                       // 鏡像不得樂觀更新
 }
@@ -231,9 +231,9 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     // 前一句尾是 "e"、下一句只有組合重音符：欄位上合成一個字位 é，但兩者屬不同 utterance。
     // 字位語意的 hasSuffix 會說鏡像「不以 \u{301} 結尾」而誤判 mismatch；UTF-16 比對才對得上 AX 的範圍。
     let (c, _, _, ax) = makeAXCoordinator(anchor: 10)
-    try c.insertFinalized("e")
+    _ = try c.insertFinalized("e")
     _ = c.snapshotAndBeginNext()                              // 第一句潤飾在途
-    try c.insertFinalized("\u{301}")
+    _ = try c.insertFinalized("\u{301}")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceTail(snap, with: "\u{301}!") == .replaced)
     #expect(ax.calls.first?.location == 11 && ax.calls.first?.expected == "\u{301}")
@@ -242,7 +242,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func replaceTailUsesVerifiedAXRangeAtMirrorTail() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 10)
-    try c.insertFinalized("呃你好")
+    _ = try c.insertFinalized("呃你好")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceTail(snap, with: "你好。") == .replaced)
     #expect(ax.verifyCalls.count == 1)
@@ -254,9 +254,9 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func replaceTailLocatesTailInUTF16UnitsAfterEarlierText() throws {
     let (c, _, _, ax) = makeAXCoordinator(anchor: 10)
-    try c.insertFinalized("前綴")                            // 2 UTF-16
+    _ = try c.insertFinalized("前綴")                            // 2 UTF-16
     _ = c.snapshotAndBeginNext()
-    try c.insertFinalized("👨‍👩‍👧‍👦好")                       // 11 + 1 = 12 UTF-16，2 個字位
+    _ = try c.insertFinalized("👨‍👩‍👧‍👦好")                       // 11 + 1 = 12 UTF-16，2 個字位
     let snap = c.snapshotAndBeginNext()
     #expect(snap.length == 2)
     #expect(c.replaceTail(snap, with: "好") == .replaced)
@@ -267,9 +267,9 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func replaceTailAbortsWhenTailAdvanced() throws {
     let (c, _, _, ax) = makeAXCoordinator()
-    try c.insertFinalized("第一段")
+    _ = try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
-    try c.insertFinalized("第二段")            // 尾端前進
+    _ = try c.insertFinalized("第二段")            // 尾端前進
     #expect(c.replaceTail(snap, with: "第一段。") == .tailAdvanced)
     #expect(ax.verifyCalls.isEmpty)           // 連驗證都不發：快照已知過期
     #expect(c.displayedText == "第一段第二段")
@@ -277,7 +277,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func replaceTailWithoutIdentityIsUnverifiedAndKeepsRawOnScreen() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 0, identity: nil)
-    try c.insertFinalized("呃你好")
+    _ = try c.insertFinalized("呃你好")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceTail(snap, with: "你好。") == .unverified)
     #expect(ax.verifyCalls.isEmpty)
@@ -288,7 +288,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func replaceTailWithoutAXCapabilityIsUnverified() throws {
     let (c, _, _, ax) = makeAXCoordinator()
     ax.verifyResult = .unsupported                          // App 不支援 AX 讀寫
-    try c.insertFinalized("呃你好")
+    _ = try c.insertFinalized("呃你好")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceTail(snap, with: "你好。") == .unverified)
     #expect(ax.calls.isEmpty)
@@ -297,7 +297,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func replaceTailMismatchIsFieldMismatch() throws {
     let (c, _, _, ax) = makeAXCoordinator()
     ax.verifyResult = .mismatch
-    try c.insertFinalized("呃你好")
+    _ = try c.insertFinalized("呃你好")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceTail(snap, with: "你好。") == .fieldMismatch)
     #expect(ax.calls.isEmpty)
@@ -316,9 +316,9 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func replaceSessionReplacesWholeMirrorViaAX() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 42)
-    try c.insertFinalized("舊文")
+    _ = try c.insertFinalized("舊文")
     _ = c.snapshotAndBeginNext()
-    try c.insertFinalized("指令")
+    _ = try c.insertFinalized("指令")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceSession(commandSnapshot: snap, with: "新文") == .replaced)
     #expect(ax.verifyCalls.count == 1)                      // 先驗證
@@ -334,7 +334,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func replaceSessionAXMismatchAborts() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 42)
     ax.verifyResult = .mismatch
-    try c.insertFinalized("指令")
+    _ = try c.insertFinalized("指令")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceSession(commandSnapshot: snap, with: "新文") == .fieldMismatch)   // 欄位被外力改過：不得亂改
     #expect(key.ops == [.insert("指令")])                   // mismatch 時分毫未動（連指令話語都不退）
@@ -346,7 +346,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     // 舊契約在這裡退回 keystroke 盲退格——那是 #21 destructive 清單裡唯一的 fail-open 點，本票封掉
     let (c, key, _, ax) = makeAXCoordinator(anchor: 1)
     ax.verifyResult = .unsupported
-    try c.insertFinalized("指令")
+    _ = try c.insertFinalized("指令")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceSession(commandSnapshot: snap, with: "新文") == .unverified)
     #expect(key.ops == [.insert("指令")])
@@ -356,7 +356,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func replaceSessionWithoutIdentityIsUnverified() throws {
     let (c, _, _, ax) = makeAXCoordinator(anchor: 1, identity: nil)
-    try c.insertFinalized("指令")
+    _ = try c.insertFinalized("指令")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceSession(commandSnapshot: snap, with: "新文") == .unverified)
     #expect(ax.verifyCalls.isEmpty)
@@ -366,7 +366,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     // verify 過了、替換那步卻失敗（兩步之間狀況變了）：AX 可能留下活選取——判 fieldMismatch，呼叫端凍結
     let (c, key, _, ax) = makeAXCoordinator(anchor: 1)
     ax.replaceResult = .unsupported
-    try c.insertFinalized("指令")
+    _ = try c.insertFinalized("指令")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceSession(commandSnapshot: snap, with: "新文") == .fieldMismatch)
     #expect(key.ops == [.insert("指令")])
@@ -375,9 +375,9 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func replaceSessionTailAdvancedAborts() throws {
     let (c, _, _, ax) = makeAXCoordinator()
-    try c.insertFinalized("指令")
+    _ = try c.insertFinalized("指令")
     let snap = c.snapshotAndBeginNext()
-    try c.insertFinalized("下一段")                          // 尾端前進
+    _ = try c.insertFinalized("下一段")                          // 尾端前進
     #expect(c.replaceSession(commandSnapshot: snap, with: "新") == .tailAdvanced)
     #expect(ax.verifyCalls.isEmpty)
 }
@@ -459,7 +459,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func insertDetachedDoesNotTouchUtteranceLedgerButUpdatesMirror() throws {
     let (c, key, _) = makeCoordinator()
-    try c.insertDetached("直接上屏")
+    _ = try c.insertDetached("直接上屏")
     #expect(key.ops == [.insert("直接上屏")])
     #expect(c.currentUtteranceLength == 0)             // 不掛 utterance 帳本
     #expect(c.displayedText == "直接上屏")             // 但它確實在欄位上
@@ -471,7 +471,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let stale = c.currentTailSnapshot()
     #expect(stale.text.isEmpty)
     #expect(c.currentUtteranceLength == "進行中".count)     // 零副作用：不偷正在累積的緩衝
-    try c.insertDetached("x")                              // counter 前進
+    _ = try c.insertDetached("x")                              // counter 前進
     #expect(c.replaceTail(stale, with: "y") == .tailAdvanced)  // 舊快照自然過期
     let fresh = c.currentTailSnapshot()                    // 現時 counter：立即可用於 replaceSession
     #expect(c.replaceSession(commandSnapshot: fresh, with: "z") == .replaced)
@@ -482,9 +482,9 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func staleTailIsRecoveredInPlace() throws {
     let (c, key, _, ax) = makeAXCoordinator(anchor: 40)
-    try c.insertFinalized("第一段")
+    _ = try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
-    try c.insertFinalized("第二段")                     // 尾端前進 → 正常 replaceTail 已不可用
+    _ = try c.insertFinalized("第二段")                     // 尾端前進 → 正常 replaceTail 已不可用
     #expect(c.replaceTail(snap, with: "第一段。") == .tailAdvanced)   // 前提：確實走不了快路徑
 
     let outcome = c.replaceStaleTail(snap, at: 40, with: "第一段。")
@@ -502,7 +502,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func staleTailAbortsWhenFieldChangedUnderneath() throws {
     let (c, _, _, ax) = makeAXCoordinator(anchor: 40)
     ax.verifyResult = .mismatch                          // 使用者中途手改了該句
-    try c.insertFinalized("第一段")
+    _ = try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .mismatch)
     #expect(ax.preservingCaretCalls.isEmpty)             // 鐵律：校驗不過就一個字都不准寫
@@ -512,7 +512,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     let key = RecordingInserter(), paste = RecordingInserter()
     let c = InsertionCoordinator(keystroke: key, paste: paste, rangeReplacer: nil)
     c.beginSession(anchor: 40, identity: sessionIdentity)
-    try c.insertFinalized("第一段")
+    _ = try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .unsupported)
 }
@@ -521,7 +521,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     // 審查（#44）：其他三個會刪字的方法都在開頭 guard anchor，replaceStaleTail 原本只在成功後才 `if let anchor` 更新鏡像——
     // 沒 anchor 時會真的寫欄位、鏡像卻不動。現在一律 fail closed。
     let (c, _, _, ax) = makeAXCoordinator(anchor: nil)
-    try c.insertFinalized("第一段")
+    _ = try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .unsupported)
     #expect(ax.verifyCalls.isEmpty && ax.preservingCaretCalls.isEmpty)
@@ -530,7 +530,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 
 @Test func staleTailUnsupportedWithoutIdentity() throws {
     let (c, _, _, ax) = makeAXCoordinator(anchor: 40, identity: nil)
-    try c.insertFinalized("第一段")
+    _ = try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .unsupported)
     #expect(ax.verifyCalls.isEmpty)
@@ -539,7 +539,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func staleTailAbortsWhenReplaceFailsBetweenTheTwoSteps() throws {
     let (c, _, _, ax) = makeAXCoordinator(anchor: 40)
     ax.replaceResult = .mismatch                         // 校驗通過但兩步之間變動
-    try c.insertFinalized("第一段")
+    _ = try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .mismatch)
     #expect(c.displayedText == "第一段")
@@ -560,7 +560,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     // 但語意不同，分類錯了不該沒人發現。
     let (c, _, _, ax) = makeAXCoordinator(anchor: 40)
     ax.verifyResult = .unsupported
-    try c.insertFinalized("第一段")
+    _ = try c.insertFinalized("第一段")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceStaleTail(snap, at: 40, with: "第一段。") == .unsupported)
     #expect(ax.preservingCaretCalls.isEmpty)
@@ -570,9 +570,9 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     // counter 的語意是「尾端是否前進」。中段改寫沒有改變誰是尾端——
     // 若遞增，下一句自己的快照會對不上，被迫也走慢路徑（其實它仍在尾端）。
     let (c, _, _, ax) = makeAXCoordinator(anchor: 40)
-    try c.insertFinalized("第一段")
+    _ = try c.insertFinalized("第一段")
     let first = c.snapshotAndBeginNext()
-    try c.insertFinalized("第二段")
+    _ = try c.insertFinalized("第二段")
     let second = c.snapshotAndBeginNext()                // 第二段仍在尾端
 
     #expect(c.replaceStaleTail(first, at: 40, with: "第一段。") == .replaced)
@@ -593,11 +593,11 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     c.onInserterFallback = { seen.append($0) }
 
     paste.failInsertsRemaining = 1
-    try c.insertFinalized("這是一段很長的文字啊")        // ≥6 → 主 paste 失敗、退 keystroke
+    _ = try c.insertFinalized("這是一段很長的文字啊")        // ≥6 → 主 paste 失敗、退 keystroke
     #expect(seen == [.pasteToKeystroke])
 
     key.failInsertsRemaining = 1
-    try c.insertFinalized("嗨")                        // <6 → 主 keystroke 失敗、退 paste
+    _ = try c.insertFinalized("嗨")                        // <6 → 主 keystroke 失敗、退 paste
     #expect(seen == [.pasteToKeystroke, .keystrokeToPaste])
 }
 
@@ -607,8 +607,8 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
     var seen: [InsertionCoordinator.InserterFallback] = []
     c.onInserterFallback = { seen.append($0) }
 
-    try c.insertFinalized("嗨")
-    try c.insertFinalized("這是一段很長的文字啊")
+    _ = try c.insertFinalized("嗨")
+    _ = try c.insertFinalized("這是一段很長的文字啊")
     #expect(seen.isEmpty)
 }
 
@@ -629,10 +629,10 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func retractSessionToPolishedTargetKeepsPolishedTextAndDropsRaw() throws {
     // issue #46「只退 raw」：目標＝已潤飾鏡像。整個 session 範圍一次驗證、一次替換成目標，零鍵盤事件
     let (c, key, _, ax) = makeAXCoordinator(anchor: 5)
-    try c.insertFinalized("呃你好")
+    _ = try c.insertFinalized("呃你好")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceTail(snap, with: "你好。") == .replaced)
-    try c.insertFinalized("再見")                              // 下一句 raw 仍在說
+    _ = try c.insertFinalized("再見")                              // 下一句 raw 仍在說
     #expect(c.displayedText == "你好。再見")
     #expect(c.retractSession(to: "你好。") == .replaced)
     #expect(ax.calls.last?.location == 5 && ax.calls.last?.expected == "你好。再見" && ax.calls.last?.new == "你好。")
@@ -644,7 +644,7 @@ private func makeAXCoordinator(anchor: Int? = 0, identity: FieldIdentity? = sess
 @Test func retractSessionToTargetEqualToMirrorIsQuietNoOp() throws {
     // 全部都已潤飾、沒有 raw 可退：不驗、不寫
     let (c, _, _, ax) = makeAXCoordinator(anchor: 0)
-    try c.insertFinalized("呃")
+    _ = try c.insertFinalized("呃")
     let snap = c.snapshotAndBeginNext()
     #expect(c.replaceTail(snap, with: "你好。") == .replaced)
     let before = ax.calls.count

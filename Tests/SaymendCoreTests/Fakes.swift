@@ -186,9 +186,23 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
     }
     func releaseFieldIdentity(_ identity: FieldIdentity?) { registry.release(identity) }
 
+    /// 閘門查詢**之後**、回傳之前執行一次（預設 nil＝不介入）。用來製造 TOCTOU 的窄窗口：
+    /// 閘門已經答完「焦點還在 A」，就在這一瞬間把焦點搬走。
+    /// 語義刻意與「先算結果、再呼叫 hook、最後回傳」綁死——hook 不影響**本次**的回答，只影響下一次。
+    /// `fieldGateCalls` 讓測試能指定「第幾次查詢之後才搬」（fallback 窗口 W1′ 需要）。
+    var afterFieldGate: (() -> Void)?
+    private(set) var fieldGateCalls = 0
+
     /// 輕量閘門（issue #37）：與 production AXFieldReader 同一條邏輯——先 secure、再 identity，
     /// 且**只用 `registry.matches`**（不登記持有者），所以 lease 不變式不受閘門影響。
     func fieldGate(sessionIdentity: FieldIdentity?) -> FieldGate {
+        let result = computeFieldGate(sessionIdentity: sessionIdentity)
+        fieldGateCalls += 1
+        afterFieldGate?()
+        return result
+    }
+
+    private func computeFieldGate(sessionIdentity: FieldIdentity?) -> FieldGate {
         guard let focusedID, let state = fields[focusedID] else { return .unknown }
         if state.isSecure { return .secure }
         if state.subroleUnknown { return .secureUnknown }
