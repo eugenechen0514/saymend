@@ -893,6 +893,9 @@ public final class DictationController {
             // 沒步驟可回：把指令話語從欄位退掉（它不是內容）。
             switch coordinator.replaceTail(commandSnapshot, with: "") {
             case .replaced:
+                // 指令話語已從欄位物理刪除，底線必須跟著縮回（issue #54）——它上屏時
+                // emitFeedback() 已把底線延伸到它，這裡不重算就會罩著不存在的文字。
+                emitFeedback()
                 hud.present(.notice("沒有可復原的步驟"))
             case .unverified, .tailAdvanced:
                 // 退不掉（無 verified AX／尾端已前進）就留著，並讓帳本鏡像它——不建版本，我們什麼都沒改寫
