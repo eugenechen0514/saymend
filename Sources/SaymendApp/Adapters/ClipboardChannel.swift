@@ -120,11 +120,8 @@ final class ClipboardChannel {
     /// 落地後只有使用者自己的寫入會取代它：後續 paste 只把它暫時擠開、收尾放回。
     func rescue(_ text: String) {
         settle()
-        pasteboard.clearContents()
-        guard pasteboard.setString(text, forType: .string) else {
-            landedRescue = nil                      // 沒寫成就不能宣稱它在剪貼簿裡
-            return
-        }
+        // 沒寫成：剪貼簿已放回原樣，不能宣稱救援在剪貼簿裡（原本就是救援的話，restore 已重新記下它）
+        guard overwrite(with: text) else { return }
         landedRescue = (text, pasteboard.changeCount)
     }
 
@@ -132,8 +129,7 @@ final class ClipboardChannel {
     /// 寫入讓 changeCount 前進，救援紀錄自然失效，不必另外清。
     func copyForUser(_ text: String) {
         settle()
-        pasteboard.clearContents()
-        _ = pasteboard.setString(text, forType: .string)
+        _ = overwrite(with: text)
     }
 
     /// 自救援落地後剪貼簿沒被任何人覆寫 → 該救援文字；否則 nil。
@@ -165,6 +161,16 @@ final class ClipboardChannel {
         activeLease = nil
         guard allowingForeignWrite || pasteboard.changeCount == lease.writeChangeCount else { return }
         restore(lease.target)
+    }
+
+    /// 覆寫（救援、使用者複製）：保存 → clear → setString；寫不進去就同步放回原本的東西——
+    /// 與 #41 同型：失敗不得留下「舊的清掉了、新的沒進去」的兩頭皆空。回傳是否寫成。
+    private func overwrite(with text: String) -> Bool {
+        let target = snapshotTarget()
+        pasteboard.clearContents()
+        if pasteboard.setString(text, forType: .string) { return true }
+        restore(target)
+        return false
     }
 
     /// 暫時寫入前決定收尾要放回什麼：剪貼簿此刻是救援文字就放回它；否則保存使用者內容

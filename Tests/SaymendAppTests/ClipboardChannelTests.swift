@@ -231,13 +231,23 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(channel.rescueStillInClipboard == nil)
     }
 
-    /// 救援寫不進去：不能宣稱它在剪貼簿裡。
-    @Test func rescueThatFailsToWriteIsNotReportedAsInClipboard() {
+    /// 救援寫不進去：不能宣稱它在剪貼簿裡，也不能讓剪貼簿兩頭皆空——使用者原本的內容要還在。
+    @Test func rescueThatFailsToWriteIsNotReportedAndLeavesTheClipboardAsItWas() {
         let backing = makePasteboard(seed: "U")
         let pb = SetStringFailingPasteboard(backing: backing)
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
         channel.rescue("救援 R")
         #expect(channel.rescueStillInClipboard == nil)
+        #expect(backing.string(forType: .string) == "U", "clear 之後寫不進去必須同步還原；實際 \(backing.string(forType: .string) ?? "nil")")
+    }
+
+    /// 使用者主動複製寫不進去：同上，剪貼簿維持原樣。
+    @Test func copyForUserThatFailsToWriteLeavesTheClipboardAsItWas() {
+        let backing = makePasteboard(seed: "U")
+        let pb = SetStringFailingPasteboard(backing: backing)
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.copyForUser("歷史文字 H")
+        #expect(backing.string(forType: .string) == "U")
     }
 
     // MARK: body 拋錯與 Cmd+C 備援讀取
