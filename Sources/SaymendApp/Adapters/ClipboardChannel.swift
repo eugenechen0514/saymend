@@ -48,6 +48,8 @@ final class ClipboardChannel {
         let id: Int
         /// 本 lease 寫完當下的 changeCount：收尾時不相等＝別人（使用者、目標 App）動過，不寫回。
         let writeChangeCount: Int
+        /// 安全窗終點：在此之前假設目標 App 還沒讀走，任何新寫入都得等到它過去。
+        let deadline: TimeInterval
         let target: Items
     }
 
@@ -67,6 +69,7 @@ final class ClipboardChannel {
     /// 暫時寫入（paste）：保存 → clear → setString → body（送 Cmd+V）→ 安全窗後收尾還原。
     /// setString 失敗（#41）：剪貼簿此刻已被清空，**同步**還原、拋 `postFailed`、body 不執行、不排程。
     func withTransientWrite(_ text: String, _ body: () throws -> Void) throws {
+        settle()
         let target = snapshotItems()
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
@@ -74,13 +77,27 @@ final class ClipboardChannel {
             throw InserterError.postFailed
         }
         nextLeaseID += 1
-        let lease = Lease(id: nextLeaseID, writeChangeCount: pasteboard.changeCount, target: target)
+        let lease = Lease(id: nextLeaseID, writeChangeCount: pasteboard.changeCount,
+                          deadline: timer.now + settleDelay, target: target)
         activeLease = lease
         try body()
         timer.schedule(after: settleDelay) { [weak self] in self?.finish(lease) }
     }
 
     // MARK: - 內部
+
+    /// 任何新的剪貼簿動作之前：若有 paste 在途，等它的安全窗走完並收尾——新寫入才不會在目標 App 讀走前把它蓋掉，
+    /// 第二次保存到的也才是使用者的內容而不是我方上一次寫的文字（issue #42 ②-b）。
+    /// 同步阻塞 main thread 最多 settleDelay，只在「上一個 paste 的 300ms 內又有出口動作」時發生。
+    /// 使用者已在窗內寫過別的東西時等也救不回在途 paste，直接收尾（收尾會因 changeCount 不符而不寫回）。
+    private func settle() {
+        guard let lease = activeLease else { return }
+        if pasteboard.changeCount == lease.writeChangeCount {
+            let remaining = lease.deadline - timer.now
+            if remaining > 0 { timer.wait(remaining) }
+        }
+        finish(lease)
+    }
 
     /// 收尾：只有仍是最新 lease、且剪貼簿仍是它寫的內容時才寫回。
     private func finish(_ lease: Lease) {

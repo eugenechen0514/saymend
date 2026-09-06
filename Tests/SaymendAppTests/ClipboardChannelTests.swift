@@ -91,4 +91,54 @@ private func makePasteboard(seed: String) -> NSPasteboard {
             #expect(timer.scheduledCount == 0)
         }
     }
+
+    // MARK: settle——任何新動作前先把在途的 paste 收尾
+
+    /// ②-b：舊版第二次 paste「保存」到的是第一次寫進去的 A1，兩次還原後剪貼簿＝A1、使用者的 U 消失。
+    /// 新規則：第二次先等第一次的安全窗走完並還原 U，再保存——保存到的就是 U。
+    @Test func secondTransientWriteInsideTheWindowSettlesTheFirstBeforeSaving() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        try channel.withTransientWrite("A1") {}
+        timer.now = 0.1
+        var seenAtBody: String?
+        try channel.withTransientWrite("A2") { seenAtBody = pb.string(forType: .string) }
+        #expect(seenAtBody == "A2")
+        #expect(timer.waits.count == 1)
+        #expect(abs((timer.waits.first ?? 0) - 0.2) < 1e-9, "等到第一次的安全窗結束（剩 0.2s）；實際 \(timer.waits)")
+        timer.now = 0.6
+        timer.fireDue()                                  // 兩個排程 block 都觸發：第一個已被內聯收尾，是 no-op
+        #expect(pb.string(forType: .string) == "U", "舊版這裡會是 A1")
+    }
+
+    /// 安全窗已過但排程 block 還沒跑（主佇列忙）：不等待，直接內聯收尾。
+    @Test func settleDoesNotWaitWhenTheWindowAlreadyElapsed() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        try channel.withTransientWrite("A1") {}
+        timer.now = 0.5
+        try channel.withTransientWrite("A2") {}
+        #expect(timer.waits.isEmpty)
+        timer.now = 0.8
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "U")
+    }
+
+    /// 使用者已在窗內複製了別的東西：等也救不回在途 paste，且不得寫回——第二次保存到的是使用者的新內容。
+    @Test func settleDoesNotWaitAfterAForeignWriteAndKeepsIt() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        try channel.withTransientWrite("A1") {}
+        pb.clearContents()
+        pb.setString("X", forType: .string)
+        timer.now = 0.1
+        try channel.withTransientWrite("A2") {}
+        #expect(timer.waits.isEmpty)
+        timer.now = 0.6
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "X")
+    }
 }
