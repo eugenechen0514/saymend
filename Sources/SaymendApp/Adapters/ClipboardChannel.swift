@@ -88,8 +88,31 @@ final class ClipboardChannel {
         let lease = Lease(id: nextLeaseID, writeChangeCount: pasteboard.changeCount,
                           deadline: timer.now + settleDelay, target: target)
         activeLease = lease
-        try body()
+        do {
+            try body()
+        } catch {
+            // 事件沒送成：依 TextInserter 原子契約同步還原，錯誤原樣往外拋（呼叫端退到 keystroke 通道）
+            activeLease = nil
+            restore(target)
+            throw error
+        }
         timer.schedule(after: settleDelay) { [weak self] in self?.finish(lease) }
+    }
+
+    /// 暫時清空並讀取（Cmd+C 選取備援）：保存 → clear → body（送 Cmd+C、等待目標 App 寫入）→ 讀回 → 同步還原。
+    /// 目標 App 的寫入是預期中的 foreign write，收尾照樣還原；沒有 300ms 排程（整段同步）。
+    func withTransientRead(_ body: () -> Void) -> String? {
+        settle()
+        let target = snapshotTarget()
+        pasteboard.clearContents()
+        nextLeaseID += 1
+        let lease = Lease(id: nextLeaseID, writeChangeCount: pasteboard.changeCount,
+                          deadline: timer.now, target: target)
+        activeLease = lease
+        body()
+        let text = pasteboard.string(forType: .string)
+        finish(lease, allowingForeignWrite: true)
+        return text
     }
 
     /// 救援（失敗路徑的最後手段）：立即落地，**不保存使用者原本的內容**——單一 slot、R 必須佔住，
@@ -135,11 +158,12 @@ final class ClipboardChannel {
         finish(lease)
     }
 
-    /// 收尾：只有仍是最新 lease、且剪貼簿仍是它寫的內容時才寫回。
-    private func finish(_ lease: Lease) {
+    /// 收尾：只有仍是最新 lease（被 settle 內聯收尾過的排程 block 是 no-op）、且剪貼簿仍是它寫的內容時才寫回；
+    /// `allowingForeignWrite` 給 Cmd+C 讀取用——目標 App 寫入是預期中的事。
+    private func finish(_ lease: Lease, allowingForeignWrite: Bool = false) {
         guard lease.id == activeLease?.id else { return }
         activeLease = nil
-        guard pasteboard.changeCount == lease.writeChangeCount else { return }
+        guard allowingForeignWrite || pasteboard.changeCount == lease.writeChangeCount else { return }
         restore(lease.target)
     }
 

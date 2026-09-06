@@ -219,4 +219,82 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         channel.rescue("救援 R")
         #expect(channel.rescueStillInClipboard == nil)
     }
+
+    // MARK: body 拋錯與 Cmd+C 備援讀取
+
+    private struct BodyFailure: Error {}
+
+    /// body（送事件）拋錯：同步還原、清掉 lease、不排程、錯誤原樣往外拋；下一次寫入不用等。
+    @Test func bodyThrowingRestoresSynchronouslyAndRethrows() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        do {
+            try channel.withTransientWrite("A") { throw BodyFailure() }
+            Issue.record("body 拋錯，withTransientWrite 不該正常回傳")
+        } catch {
+            #expect(error is BodyFailure, "錯誤要原樣往外拋；實際 \(error)")
+            #expect(pb.string(forType: .string) == "U")
+            #expect(timer.scheduledCount == 0)
+        }
+        try channel.withTransientWrite("B") {}
+        #expect(timer.waits.isEmpty, "失敗的 lease 必須已清掉，不該被當成在途 paste 等待")
+    }
+
+    /// Cmd+C 備援：清空 → body（目標 App 寫入選取）→ 讀回 → 同步還原使用者內容。目標 App 的寫入是預期中的 foreign write。
+    @Test func transientReadReturnsWhatTheTargetWroteAndRestoresTheUser() {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        let read = channel.withTransientRead {
+            #expect(pb.string(forType: .string) == nil, "body 執行時剪貼簿必須已清空，否則讀到的是舊內容")
+            pb.clearContents()
+            pb.setString("目標 App 的選取 S", forType: .string)
+        }
+        #expect(read == "目標 App 的選取 S")
+        #expect(pb.string(forType: .string) == "U", "讀完必須同步還原")
+        #expect(timer.scheduledCount == 0 && timer.waits.isEmpty)
+    }
+
+    /// 目標 App 什麼都沒寫（沒有選取）：回 nil，使用者內容照樣還原。
+    @Test func transientReadReturnsNilWhenTheTargetWroteNothing() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        let read = channel.withTransientRead {}
+        #expect(read == nil)
+        #expect(pb.string(forType: .string) == "U")
+    }
+
+    /// 讀取撞上在途 paste：先等安全窗、收尾還原 U，再清空讀取——不污染在途 paste，最後仍是 U。
+    @Test func transientReadInsideAPasteWindowSettlesFirst() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        try channel.withTransientWrite("A") {}
+        timer.now = 0.1
+        let read = channel.withTransientRead {
+            pb.clearContents()
+            pb.setString("S", forType: .string)
+        }
+        #expect(read == "S")
+        #expect(timer.waits.count == 1 && abs((timer.waits.first ?? 0) - 0.2) < 1e-9, "實際 \(timer.waits)")
+        #expect(pb.string(forType: .string) == "U")
+        timer.now = 0.6
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "U")
+    }
+
+    /// 剪貼簿是救援文字時做 Cmd+C 備援：讀完放回的是 R，且仍認得它是救援。
+    @Test func transientReadWhileARescueIsInClipboardPutsTheRescueBack() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("救援 R")
+        let read = channel.withTransientRead {
+            pb.clearContents()
+            pb.setString("S", forType: .string)
+        }
+        #expect(read == "S")
+        #expect(pb.string(forType: .string) == "救援 R")
+        #expect(channel.rescueStillInClipboard == "救援 R")
+    }
 }
