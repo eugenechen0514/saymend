@@ -2283,6 +2283,11 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 ///
 /// 欄位狀態與剪貼簿內容一致：`insertFinalized` 是 `try insertWithFallback(text)` 成功才更新鏡像
 /// （`InsertionCoordinator.swift:104-110`），拋錯＝帳面乾淨、一個字都沒進欄位。
+///
+/// 注意本測試停在 `handleTranscript` 之後，**沒有**呼叫 `asrStreamEnded`，所以才看得到
+/// `hud.states.last`。真實 hold 流程走完 stream-end 後，這行 notice 會被 `.lingering`
+/// （`DictationController.swift:463-465`）或 `.hidden`（`:601`）蓋掉，使用者實際看不到——
+/// 那是既有的 M8 LOW follow-up。本測試釘的是「有發出正確文案」，不是「使用者最終看得到」。
 @MainActor
 @Test func rawFinalizedInsertFailureRescuesWholeUtteranceToClipboard() {
     let env = StatefulFieldEnvironment()
