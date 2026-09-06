@@ -843,11 +843,7 @@ public final class DictationController {
     /// unsupported＝無法用 AX 確認選取，同樣不動欄位、結果入剪貼簿、封存（#45）。
     private func applySelectionReplacement(_ text: String, range: FieldContext.SelectedRange, original: String) {
         guard !ledger.frozen else {                 // 聽寫中手動活動已凍結：選取完整性不明，放棄
-            recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: text)
-            lastRescueGeneration = ledger.generation
-            clipboardRescue?(text)
-            archiveSession()
-            hud.present(.notice("選取已變動，結果已入剪貼簿"))
+            abandonSelectionReplacement(text, classification: "frozen", notice: "選取已變動，結果已入剪貼簿")
             return
         }
         switch coordinator.replaceSelection(location: range.location, expected: original, with: text) {
@@ -857,23 +853,26 @@ public final class DictationController {
             hud.present(.notice("已替換選取"))
             emitFeedback(oldText: original)           // 選取替換全 span 高亮
         case .selectionChanged:
-            recordInsertEvent(kind: "insertSkipped", classification: "selectionChanged", utteranceText: text)
-            lastRescueGeneration = ledger.generation
-            clipboardRescue?(text)
-            archiveSession()
-            hud.present(.notice("選取已變動，結果已入剪貼簿"))
+            abandonSelectionReplacement(text, classification: "selectionChanged", notice: "選取已變動，結果已入剪貼簿")
         case .unsupported:
             // #21 裁定 2／#45：這是 destructive 清單裡唯一無法用驗證救的刪字路徑——它的觸發條件正是
             // 「熱鍵按下時讀得到選取，替換當下卻讀不到」＝焦點已跑。舊版改用 OS「打字覆蓋選取」盲寫再凍結，
             // 等於相信一個已經對不上的焦點，可能把字打進錯的欄位、蓋掉錯的選取。
             // 與其他所有刪字操作同一條規則：缺 verified AX 就不動欄位、只提示；內容進剪貼簿
             // （#42 起救援不會被 paste 的延遲還原洗掉）。代價：無 AX 範圍能力的 App 不支援選取即目標。
-            recordInsertEvent(kind: "insertSkipped", classification: "unsupported", utteranceText: text)
-            lastRescueGeneration = ledger.generation
-            clipboardRescue?(text)
-            archiveSession()
-            hud.present(.notice("無法替換選取，內容已入剪貼簿"))
+            abandonSelectionReplacement(text, classification: "unsupported", notice: "無法替換選取，內容已入剪貼簿")
         }
+    }
+
+    /// 放棄替換選取：不動欄位、結果進剪貼簿、封存、提示。三種成因（凍結／選取已變／無法用 AX 確認）同一套收尾，
+    /// 只差診斷分類與文案。`lastRescueGeneration`：同世代之後回來的緩衝句 outcome 不得再救一次蓋掉這份。
+    /// notice 必須在 archiveSession（會發 .hidden）之後，否則被蓋掉。
+    private func abandonSelectionReplacement(_ text: String, classification: String, notice: String) {
+        recordInsertEvent(kind: "insertSkipped", classification: classification, utteranceText: text)
+        lastRescueGeneration = ledger.generation
+        clipboardRescue?(text)
+        archiveSession()
+        hud.present(.notice(notice))
     }
 
     /// 復原上一步（口頭 undo 與 Task 9 的 HUD 按鈕共用）。
