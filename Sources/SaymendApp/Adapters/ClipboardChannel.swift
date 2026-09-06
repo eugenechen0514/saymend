@@ -159,8 +159,15 @@ final class ClipboardChannel {
     private func finish(_ lease: Lease, allowingForeignWrite: Bool = false) {
         guard lease.id == activeLease?.id else { return }
         activeLease = nil
-        guard allowingForeignWrite || pasteboard.changeCount == lease.writeChangeCount else { return }
-        restore(lease.target)
+        if allowingForeignWrite || pasteboard.changeCount == lease.writeChangeCount {
+            restore(lease.target)
+            return
+        }
+        // 別人動過：放了內容就讓步。只是被清空（剪貼簿管理器的定時清除之類）而被擠開的是救援時，
+        // 沒有東西可以讓步——救援不放回就沒了，放回去。使用者內容則維持不寫回（清空可能正是其意圖）。
+        if case .rescue = lease.target, (pasteboard.pasteboardItems ?? []).isEmpty {
+            restore(lease.target)
+        }
     }
 
     /// 覆寫（救援、使用者複製）：保存 → clear → setString；寫不進去就同步放回原本的東西——

@@ -231,6 +231,34 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(channel.rescueStillInClipboard == nil)
     }
 
+    /// 取捨 3 的邊界：窗內剪貼簿只是被**清空**（剪貼簿管理器的定時清除之類），沒有任何新內容取代 R——
+    /// 沒有東西可以讓步，收尾就把 R 放回去。只對「別人放了內容」讓步。
+    @Test func aPureClearDuringAPasteThatDisplacedARescueGetsTheRescueBack() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("救援 R")
+        try channel.withTransientWrite("A") {}
+        pb.clearContents()
+        timer.now = 0.3
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "救援 R")
+        #expect(channel.rescueStillInClipboard == "救援 R")
+    }
+
+    /// 同樣的純清空若擠開的是使用者內容 U：維持不寫回——U 沒有救援那種「不落地就沒了」的分量，
+    /// 而清空可能正是使用者（或其工具）的意圖。
+    @Test func aPureClearDuringAPasteThatDisplacedUserContentStaysEmpty() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        try channel.withTransientWrite("A") {}
+        pb.clearContents()
+        timer.now = 0.3
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == nil)
+    }
+
     /// 救援寫不進去：不能宣稱它在剪貼簿裡，也不能讓剪貼簿兩頭皆空——使用者原本的內容要還在。
     @Test func rescueThatFailsToWriteIsNotReportedAndLeavesTheClipboardAsItWas() {
         let backing = makePasteboard(seed: "U")
