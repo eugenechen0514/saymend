@@ -115,6 +115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // AX 訊息 timeout（issue #37）：必須在任何 AX 呼叫之前設定。對 system-wide element 設一次
+        // ＝本行程之後送出的所有 AX 訊息都吃 0.2s 上限，目標 App 卡住時不會連帶拖住掛在 main run loop
+        // 上的熱鍵與 Esc。設失敗只代表沿用系統預設 timeout（功能不受影響），已在函式內留 log。
+        AXMessagingTimeout.applyGlobally()
+
         // 輔助功能權限：沒有就跳系統提示（熱鍵與鍵入都靠它）
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
