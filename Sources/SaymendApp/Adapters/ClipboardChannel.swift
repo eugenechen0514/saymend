@@ -44,13 +44,19 @@ final class ClipboardChannel {
 
     typealias Items = [[NSPasteboard.PasteboardType: Data]]
 
+    /// 暫時寫入結束時要放回去的東西：使用者的內容，或被暫時擠開的救援文字。
+    private enum RestoreTarget {
+        case user(Items)
+        case rescue(String)
+    }
+
     private struct Lease {
         let id: Int
         /// 本 lease 寫完當下的 changeCount：收尾時不相等＝別人（使用者、目標 App）動過，不寫回。
         let writeChangeCount: Int
         /// 安全窗終點：在此之前假設目標 App 還沒讀走，任何新寫入都得等到它過去。
         let deadline: TimeInterval
-        let target: Items
+        let target: RestoreTarget
     }
 
     private let pasteboard: any SystemPasteboard
@@ -58,6 +64,8 @@ final class ClipboardChannel {
     private let timer: any ClipboardTimer
     private var activeLease: Lease?
     private var nextLeaseID = 0
+    /// 最後一次落地的救援與當時的 changeCount：相等＝剪貼簿仍是它；不等＝使用者已覆寫、往前走了。
+    private var landedRescue: (text: String, changeCount: Int)?
 
     init(pasteboard: any SystemPasteboard, settleDelay: TimeInterval = 0.3,
          timer: any ClipboardTimer = MainQueueClipboardTimer()) {
@@ -70,7 +78,7 @@ final class ClipboardChannel {
     /// setString 失敗（#41）：剪貼簿此刻已被清空，**同步**還原、拋 `postFailed`、body 不執行、不排程。
     func withTransientWrite(_ text: String, _ body: () throws -> Void) throws {
         settle()
-        let target = snapshotItems()
+        let target = snapshotTarget()
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
             restore(target)
@@ -82,6 +90,34 @@ final class ClipboardChannel {
         activeLease = lease
         try body()
         timer.schedule(after: settleDelay) { [weak self] in self?.finish(lease) }
+    }
+
+    /// 救援（失敗路徑的最後手段）：立即落地，**不保存使用者原本的內容**——單一 slot、R 必須佔住，
+    /// 而且沒有任何訊號能告訴我們 R 已被取回（Cmd+V 不改 changeCount），U 沒有合法的自動還原時機。
+    /// 落地後只有使用者自己的寫入會取代它：後續 paste 只把它暫時擠開、收尾放回。
+    func rescue(_ text: String) {
+        settle()
+        pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else {
+            landedRescue = nil                      // 沒寫成就不能宣稱它在剪貼簿裡
+            return
+        }
+        landedRescue = (text, pasteboard.changeCount)
+    }
+
+    /// 使用者主動複製（History 分頁）：覆寫並清除救援紀錄——呼叫端在此之前已用 `rescueStillInClipboard` 提示過。
+    func copyForUser(_ text: String) {
+        settle()
+        pasteboard.clearContents()
+        _ = pasteboard.setString(text, forType: .string)
+        landedRescue = nil
+    }
+
+    /// 自救援落地後剪貼簿沒被任何人覆寫 → 該救援文字；否則 nil。
+    /// **不知道使用者貼過沒有**（讀取不改 changeCount）——文案只能說「還在剪貼簿」，不能說「還沒取回」。
+    var rescueStillInClipboard: String? {
+        guard let rescue = landedRescue, rescue.changeCount == pasteboard.changeCount else { return nil }
+        return rescue.text
     }
 
     // MARK: - 內部
@@ -107,6 +143,16 @@ final class ClipboardChannel {
         restore(lease.target)
     }
 
+    /// 暫時寫入前決定收尾要放回什麼：剪貼簿此刻是救援文字就放回它；否則保存使用者內容
+    /// （曾落地的救援若已被使用者覆寫，紀錄一併清掉）。
+    private func snapshotTarget() -> RestoreTarget {
+        if let rescue = landedRescue, rescue.changeCount == pasteboard.changeCount {
+            return .rescue(rescue.text)
+        }
+        landedRescue = nil
+        return .user(snapshotItems())
+    }
+
     /// 逐 item 逐 type 複製 data（沿用 PasteInserter／ClipboardSelectionReader 既有做法）。
     private func snapshotItems() -> Items {
         (pasteboard.pasteboardItems ?? []).map { item in
@@ -118,7 +164,18 @@ final class ClipboardChannel {
         }
     }
 
-    private func restore(_ items: Items) {
+    private func restore(_ target: RestoreTarget) {
+        switch target {
+        case .user(let items):
+            restoreItems(items)
+            landedRescue = nil
+        case .rescue(let text):
+            pasteboard.clearContents()
+            landedRescue = pasteboard.setString(text, forType: .string) ? (text, pasteboard.changeCount) : nil
+        }
+    }
+
+    private func restoreItems(_ items: Items) {
         pasteboard.clearContents()
         guard !items.isEmpty else { return }
         let objects: [NSPasteboardItem] = items.map { entry in

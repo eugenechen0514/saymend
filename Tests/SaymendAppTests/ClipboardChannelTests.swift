@@ -141,4 +141,82 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         timer.fireDue()
         #expect(pb.string(forType: .string) == "X")
     }
+
+    // MARK: rescue——失敗路徑的最後手段，立即落地、之後只被使用者覆寫
+
+    /// ②-a：舊版 paste 的 300ms 還原會把救援內容 R 洗回 U。新規則：救援先等安全窗走完（收尾還原 U），
+    /// 立即落地 R；之後原排程 block 觸發是 no-op，R 留著。
+    @Test func rescueInsideTheWindowSettlesThenLandsAndSurvivesTheScheduledRestore() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        try channel.withTransientWrite("A") {}
+        timer.now = 0.05
+        channel.rescue("救援 R")
+        #expect(abs((timer.waits.first ?? 0) - 0.25) < 1e-9 && timer.waits.count == 1,
+                "先等在途 paste 的安全窗（剩 0.25s）；實際 \(timer.waits)")
+        #expect(pb.string(forType: .string) == "救援 R", "救援必須立即落地")
+        timer.now = 0.3
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "救援 R", "舊版這裡會被還原成 U")
+        #expect(channel.rescueStillInClipboard == "救援 R")
+    }
+
+    /// 救援落地後又有 paste：R 只在安全窗內被 A 暫時擠開，收尾放回的是 R 而不是更早的 U。
+    @Test func transientWriteAfterALandedRescuePutsTheRescueBack() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("救援 R")
+        try channel.withTransientWrite("A") { #expect(pb.string(forType: .string) == "A") }
+        timer.now = 0.3
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "救援 R")
+        #expect(channel.rescueStillInClipboard == "救援 R", "放回之後仍要認得它是救援內容")
+    }
+
+    /// 「還在剪貼簿」只承諾「自落地後沒被任何人覆寫」：使用者複製了別的東西就不再是。
+    @Test func rescueStillInClipboardIsNilOnceAnyoneOverwritesIt() throws {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("救援 R")
+        #expect(channel.rescueStillInClipboard == "救援 R")
+        pb.clearContents()
+        pb.setString("X", forType: .string)
+        #expect(channel.rescueStillInClipboard == nil)
+    }
+
+    /// History 分頁的複製是使用者主動覆寫：救援紀錄清掉。
+    @Test func copyForUserOverwritesAndClearsTheRescueRecord() throws {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("救援 R")
+        channel.copyForUser("歷史文字 H")
+        #expect(pb.string(forType: .string) == "歷史文字 H")
+        #expect(channel.rescueStillInClipboard == nil)
+    }
+
+    /// 取捨 3（PR 揭露）：救援→窗內 paste→窗內使用者複製 X→收尾：不寫回 R，X 是使用者最後一次明確意圖。
+    @Test func foreignWriteDuringAPasteThatDisplacedARescueWinsOverTheRescue() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("救援 R")
+        try channel.withTransientWrite("A") {}
+        pb.clearContents()
+        pb.setString("X", forType: .string)
+        timer.now = 0.3
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "X")
+        #expect(channel.rescueStillInClipboard == nil)
+    }
+
+    /// 救援寫不進去：不能宣稱它在剪貼簿裡。
+    @Test func rescueThatFailsToWriteIsNotReportedAsInClipboard() {
+        let backing = makePasteboard(seed: "U")
+        let pb = SetStringFailingPasteboard(backing: backing)
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("救援 R")
+        #expect(channel.rescueStillInClipboard == nil)
+    }
 }
