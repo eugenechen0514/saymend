@@ -92,13 +92,20 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
             if let known = profiles?.profile(for: bundle).boundsForRangeCapable {
                 capability[bundle] = known             // 持久 profile（內建庫或先前探測）優先
             } else if let element = sessionElement {
-                let probed = Self.supportsBoundsForRange(element)
-                capability[bundle] = probed
-                if var p = profiles?.profile(for: bundle) {   // 探測結果回填持久層（M4）
-                    p.boundsForRangeCapable = probed
-                    profiles?.update(p)
+                if let probed = Self.supportsBoundsForRange(element) {
+                    capability[bundle] = probed
+                    if var p = profiles?.profile(for: bundle) {   // 探測結果回填持久層（M4）
+                        p.boundsForRangeCapable = probed
+                        profiles?.update(p)
+                    }
+                    Self.logger.debug("能力探測 \(bundle, privacy: .public)：BoundsForRange=\(probed)")
+                } else {
+                    // 探測逾時（issue #37 把 AX timeout 收到 0.2s 之後才打得到）：這不是答案，
+                    // 既不入 session 快取也**絕不**回填持久 profile——寫進去就跨重啟保留，
+                    // 且下次進同一個 bundle 會在 91 行短路不再探測，等於永久把該 App 降級成 HUD diff。
+                    // 本輪走 diff 降級，下個 poll tick／下個 session 重新探測。
+                    Self.logger.debug("能力探測逾時 \(bundle, privacy: .public)：不寫入快取，下次重探")
                 }
-                Self.logger.debug("能力探測 \(bundle, privacy: .public)：BoundsForRange=\(probed)")
             }
         }
         guard capability[bundle] == true else {
@@ -155,12 +162,21 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         if let update = lastUpdate { diffFallback(update) }
     }
 
-    /// 元素是否宣告 kAXBoundsForRangeParameterizedAttribute（能力探測）
-    private static func supportsBoundsForRange(_ element: AXUIElement) -> Bool {
-        var namesRef: CFArray?
-        guard AXUIElementCopyParameterizedAttributeNames(element, &namesRef) == .success,
-              let names = namesRef as? [String] else { return false }
+    /// 參數化屬性清單查詢結果 → 能力三態。**nil＝查詢沒完成（逾時），不是「不支援」**。
+    /// 這個分辨是必要的：呼叫端會把 false 寫進持久 profile（FileAppProfileStore 寫檔、跨重啟保留），
+    /// 而探測時機正是 sessionUpdated——使用者正在講話、目標 App 正在重排文字的那一刻，
+    /// Chromium／Electron 主執行緒超過 200ms 很平常。純函式，供單元測試。
+    nonisolated static func boundsForRangeCapability(error: AXError, names: [String]?) -> Bool? {
+        if error == .cannotComplete { return nil }   // header：對方 busy or unresponsive
+        guard error == .success, let names else { return false }
         return names.contains(kAXBoundsForRangeParameterizedAttribute as String)
+    }
+
+    /// 元素是否宣告 kAXBoundsForRangeParameterizedAttribute（能力探測）；nil＝問不出來
+    private static func supportsBoundsForRange(_ element: AXUIElement) -> Bool? {
+        var namesRef: CFArray?
+        let error = AXUIElementCopyParameterizedAttributeNames(element, &namesRef)
+        return boundsForRangeCapability(error: error, names: namesRef as? [String])
     }
 
     /// 首次呼叫＝把目前聚焦元素釘為 session 目標；之後＝驗證焦點仍在同一元素。

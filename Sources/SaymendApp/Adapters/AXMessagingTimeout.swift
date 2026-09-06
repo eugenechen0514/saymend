@@ -22,10 +22,11 @@ enum AXMessagingTimeout {
     /// 對 system-wide element 設定本行程的全域 AX 訊息 timeout。
     /// 回傳 `AXError` 讓呼叫端看得見失敗——設不起來不影響功能（只是沿用系統預設 timeout），
     /// 所以不 crash、不擋啟動，但一律留下 log，不靜默假裝成功。
-    /// 兩個 closure 參數只為了讓這裡有單元測試 seam；production 一律用預設值。
+    /// element 刻意**不開成參數**：header 說得很清楚，設在非 system-wide 元素上只影響那一顆元素，
+    /// 開成參數等於讓「一行就把全域設定退化成單元素設定」變得可能，而測試只驗預設路徑攔不到。
+    /// `set` 是唯一的測試 seam；production 一律用預設值。
     @discardableResult
     static func applyGlobally(seconds: Float = defaultSeconds,
-                              systemWideElement: () -> AXUIElement = AXUIElementCreateSystemWide,
                               set: (AXUIElement, Float) -> AXError = AXUIElementSetMessagingTimeout) -> AXError {
         // header 明列 timeout 必須為正數；且對 system-wide element 傳 0 是「重置回系統預設」，
         // 正是本函式要避免的狀態，故在送進 C API 之前就擋下。
@@ -33,7 +34,7 @@ enum AXMessagingTimeout {
             logger.error("AX 訊息 timeout 設定值不合法（\(seconds) 秒），沿用系統預設")
             return .illegalArgument
         }
-        let result = set(systemWideElement(), seconds)
+        let result = set(AXUIElementCreateSystemWide(), seconds)
         if result != .success {
             logger.error("設定 AX 訊息 timeout 失敗（AXError \(result.rawValue)），沿用系統預設")
         }

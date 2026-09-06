@@ -132,6 +132,41 @@ enum AXFieldAccess {
               size.width > 0, size.height > 0 else { return nil }
         return CGRect(origin: point, size: size)
     }
+
+    /// 密碼欄位（§5.3）subrole 判定的三態結果。
+    /// 舊寫法把「問不出來」與「問到了、不是密碼欄」壓成同一個布林，於是 AX 逾時會 fail open；
+    /// 而 `isSecure` 是規格 §5.3 的總閘門（不錄音、不送 LLM、不寫歷史、不開 session），
+    /// 誤判成 false 的代價是把使用者唸出的密碼送上雲端 provider 並寫進歷史 DB。
+    /// issue #37 把 AX 訊息 timeout 收到 0.2 秒之後，這條路徑才真的打得到，故必須分辨。
+    enum SecureVerdict: Equatable {
+        case secure          // 問到了，subrole 就是密碼欄
+        case notSecure       // 問到了、不是密碼欄；或元素本來就沒有 subrole 這個屬性
+        case unknown         // 查詢沒完成（對方 busy／無回應）——這不是答案
+    }
+
+    /// `AXError.cannotComplete` 的 header 定義正是「messaging failed in some way or because the
+    /// application with which the function is communicating is busy or unresponsive」，也就是逾時，
+    /// 只有它算 `unknown`。其餘錯誤（attributeUnsupported／noValue／notImplemented…）維持既有寬鬆行為：
+    /// 那些是「問到了，元素沒有這個屬性」，大量非 AX-rich 欄位本來就落在這裡，
+    /// 一律 fail closed 會讓聽寫在這些 App 內整個失效（issue #21 的既有契約）。
+    static func secureVerdict(error: AXError, subrole: String?) -> SecureVerdict {
+        switch error {
+        case .success:
+            return subrole == (kAXSecureTextFieldSubrole as String) ? .secure : .notSecure
+        case .cannotComplete:
+            return .unknown
+        default:
+            return .notSecure
+        }
+    }
+
+    /// 讀 kAXSubroleAttribute，把 `AXError` 與（成功時的）subrole 一起交出去——
+    /// 呼叫端要靠 error 分辨逾時，不能只看有沒有拿到字串。
+    static func readSubrole(of element: AXUIElement) -> (AXError, String?) {
+        var ref: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &ref)
+        return (error, ref as? String)
+    }
 }
 
 /// Session-bound AX element registry（issue #43）。FieldIdentity 是 opaque token；真正的 identity 以 **CFEqual**
@@ -152,10 +187,14 @@ final class AXFieldReader: FieldContextProviding {
     private let profiles: (any AppProfileStore)?
     private let registry: AXFieldRegistry
     private let clipboardFallback = ClipboardSelectionReader()
+    /// subrole 讀取可注入只為了讓 secure 三態判定（含逾時重試）有單元測試；production 用預設值。
+    private let readSubrole: (AXUIElement) -> (AXError, String?)
 
-    init(profiles: (any AppProfileStore)? = nil, registry: AXFieldRegistry) {
+    init(profiles: (any AppProfileStore)? = nil, registry: AXFieldRegistry,
+         readSubrole: @escaping (AXUIElement) -> (AXError, String?) = AXFieldAccess.readSubrole) {
         self.profiles = profiles
         self.registry = registry
+        self.readSubrole = readSubrole
     }
 
     func snapshot() -> FieldContext {
@@ -168,9 +207,7 @@ final class AXFieldReader: FieldContextProviding {
     /// 密碼欄位不登記：controller 對它不會 begin，登記了就沒人歸還。
     func snapshot(of element: AXUIElement) -> FieldContext {
         var context = FieldContext(hasFocusedElement: true)
-        var subroleRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef) == .success,
-           let subrole = subroleRef as? String, subrole == (kAXSecureTextFieldSubrole as String) {
+        if isSecureField(element) {
             context.isSecure = true
             return context
         }
@@ -210,6 +247,20 @@ final class AXFieldReader: FieldContextProviding {
             }
         }
         return context
+    }
+
+    /// §5.3 密碼欄位閘門：三態判定 ＋ 逾時重試一次。
+    /// 回 true 代表「是密碼欄」**或**「問不出來」——兩者都必須擋。逾時重試一次是 header 對
+    /// `cannotComplete` 的建議做法（"your assistive application can try to call this function again"）；
+    /// 重試仍是 unknown 就 fail closed：寧可少一次聽寫，不可在密碼欄裡開 session。
+    private func isSecureField(_ element: AXUIElement) -> Bool {
+        let first = readSubrole(element)
+        var verdict = AXFieldAccess.secureVerdict(error: first.0, subrole: first.1)
+        if verdict == .unknown {
+            let retry = readSubrole(element)
+            verdict = AXFieldAccess.secureVerdict(error: retry.0, subrole: retry.1)
+        }
+        return verdict != .notSecure
     }
 
     func releaseFieldIdentity(_ identity: FieldIdentity?) {
@@ -280,8 +331,16 @@ final class AXInserter: SessionRangeReplacing {
         }
 
         var range = CFRange(location: location, length: expected.utf16.count)
-        guard let rangeValue = AXValueCreate(.cfRange, &range),
-              AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, rangeValue) == .success else {
+        guard let rangeValue = AXValueCreate(.cfRange, &range) else { return .unsupported }   // 行程內轉換，沒送出任何訊息
+        guard AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, rangeValue) == .success else {
+            // 與下一條分支對稱：非 .success **不等於**選取沒被設上。AX 是同步 Mach RPC，
+            // `cannotComplete` 只代表我方不等了（header：「This does not necessarily mean that the
+            // function has failed」），慢但活著的 App 之後仍會把選取套上去。呼叫端此時會把
+            // `.unsupported` 轉成 `.fieldMismatch` 並凍結 session，我們不會再寫——欄位裡卻留著一段
+            // 活的選取（Esc 退回時那正是整段 session 文字），使用者下一鍵就會整段蓋掉。
+            // 同一個 Mach port 上訊息保序，補一次 collapse 會蓋掉遲到的選取；若設範圍是真的失敗，
+            // 這次 setCaret 也只是一次注定失敗、無副作用的呼叫。
+            Self.setCaret(element, to: location + expected.utf16.count)
             return .unsupported
         }
         guard AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, newText as CFTypeRef) == .success else {
