@@ -1419,6 +1419,31 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(hud.states.contains(.notice("無法替換選取，內容已入剪貼簿")))
 }
 
+/// 同世代第二句的緩衝 outcome：第一句已把內容救進剪貼簿並封存，第二句回來時不得再救一次——
+/// 剪貼簿只有一格，再救等於把使用者剛被告知「已入剪貼簿」的那份蓋掉（與 selectionChanged 同規則：只救一份）。
+@MainActor
+@Test func selectionWithoutAXRescuesOnlyTheFirstBufferedOutcome() async {
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["第二句"]                    // 只卡第二句：首句立即回
+    intent.outcomeByRaw = ["改成新字": .newContent("新字"), "第二句": .newContent("補充內容。")]
+    let reader = FakeFieldReader()
+    reader.context = selectionField("舊字", location: 0)
+    let spy = ClipboardSpy()
+    let (c, _, _, key, _, _) = makeController(polisher: intent, rangeReplacer: nil, clipboard: spy, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改成新字"), at: 11.0)
+    c.tick(at: 12.6)                                // 首句：緩衝＋建 task
+    let first = c.lastIntentTask
+    c.handleTranscript(.finalized("第二句"), at: 13.0)
+    c.tick(at: 14.6)                                // 第二句：仍 .selectionPending → 緩衝（wasBuffered）
+    await first?.value                              // 首句：.unsupported → 救援＋封存
+    #expect(spy.texts == ["新字"] && !c.ledger.isActive)
+    intent.release()                                // 第二句此刻才回來：session 已封存、本世代已救過一份
+    await c.lastIntentTask?.value
+    #expect(spy.texts == ["新字"], "第二句不得再救一次蓋掉第一份；實際 \(spy.texts)")
+    #expect(key.ops.isEmpty)
+}
+
 @MainActor
 @Test func selectionEscDiscardsBufferWithoutBackspace() {
     let intent = GatedIntentService()
