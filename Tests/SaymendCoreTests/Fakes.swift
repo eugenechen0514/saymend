@@ -146,7 +146,7 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
         /// 與 `isSecure` 分開才量得出「真的密碼欄」與「AX 沒回應」各佔多少（issue #37）。
         var subroleUnknown: Bool
         var selectedRange: FieldContext.SelectedRange?
-        /// 這個欄位所屬 App 的 bundleID（issue #37 shadow 診斷要判讀「同 App 換欄位」還是「跨 App」）
+        /// 這個欄位所屬 App 的 bundleID（issue #37 診斷要判讀「同 App 換欄位」還是「跨 App」）
         var bundleID: String?
     }
     private var fields: [String: State] = [:]
@@ -322,8 +322,16 @@ func makeController(
     let audio = FakeAudio()
     let asr = FakeASR()
     let key = RecordingInserter()
+    // 預設就接上寫入前的焦點閘門（issue #37）：不接的話新路徑在多數測試裡根本不執行，
+    // mutation 也就殺不到。FakeFieldReader 走 protocol 預設實作（由 snapshot() 推導），
+    // 所以每次閘門查詢都多一次 snapshot ＋ 一次 token 歸還——`released.count == snapshots`
+    // 這條 lease 不變式仍然成立（成對增加），但逐項比對 released 陣列的測試要跟著校準。
+    let reader = fieldReader ?? FakeFieldReader.sessionField()   // 預設有 anchor＋identity（issue #44）
     let coordinator = InsertionCoordinator(keystroke: key, paste: pasteInserter,
-                                           rangeReplacer: rangeReplacer, pasteThreshold: pasteThreshold)
+                                           rangeReplacer: rangeReplacer, pasteThreshold: pasteThreshold,
+                                           fieldGate: { [weak reader] identity in
+                                               reader?.fieldGate(sessionIdentity: identity) ?? .unknown
+                                           })
     let hud = FakeHUD()
     let suite = "test-\(UUID().uuidString)"
     let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
@@ -331,7 +339,7 @@ func makeController(
         audio: audio, asr: asr, coordinator: coordinator,
         intent: polisher, hud: hud, settings: settings,
         clipboardRescue: clipboard.map { spy in { spy.rescue($0, round: $1) } },
-        fieldReader: fieldReader ?? FakeFieldReader.sessionField(),   // 預設有 anchor＋identity（issue #44）
+        fieldReader: reader,        // 上方已解析（閘門 closure 要捕捉同一個實例）
         feedback: feedback,
         history: history,
         contextOCR: contextOCR
@@ -349,7 +357,10 @@ func makeStatefulController(
 ) -> (DictationController, FakeASR, FakeHUD) {
     let audio = FakeAudio()
     let asr = FakeASR()
-    let coordinator = InsertionCoordinator(keystroke: env, paste: env, rangeReplacer: env, pasteThreshold: 100)
+    let coordinator = InsertionCoordinator(keystroke: env, paste: env, rangeReplacer: env, pasteThreshold: 100,
+                                           fieldGate: { [weak env] identity in
+                                               env?.fieldGate(sessionIdentity: identity) ?? .unknown
+                                           })
     let hud = FakeHUD()
     let suite = "test-\(UUID().uuidString)"
     let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())

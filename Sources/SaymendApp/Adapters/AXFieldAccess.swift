@@ -283,6 +283,8 @@ final class AXFieldReader: FieldContextProviding {
     /// 輕量焦點閘門（issue #37）：只讀「焦點元素」＋「subrole」兩次 AX 屬性，取代原本每句一次的完整
     /// `snapshot(of:)`（subrole／selectedTextRange／selectedText／整份 kAXValue，4–5 次跨行程 IPC，
     /// 而且在有選取＋白名單 App 時還會對目前焦點發一個合成 Cmd+C）。
+    /// 每句會被呼叫兩次以上（controller 的密碼守衛、coordinator 寫入前、fallback 重送前），
+    /// 所以單次夠輕是前提，不是最佳化的錦上添花。
     ///
     /// **只用 `registry.matches`，絕不呼叫 `identity(for:)`**：後者會多發一個持有者，
     /// 破壞 #43 的 lease 不變式（session 起始那個 token 就再也死不掉）。

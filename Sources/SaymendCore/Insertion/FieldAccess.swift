@@ -126,10 +126,13 @@ public struct FieldContext: Equatable, Sendable {
     }
 }
 
-/// 輕量焦點閘門（issue #37 shadow 階段）：每句 finalized 上屏前只需要回答
+/// 輕量焦點閘門（issue #37）：每句 finalized 上屏前只需要回答
 /// 「現在聚焦的還是不是 session 起始那個元素、是不是密碼欄位」，不需要 range／選取／全文。
-/// 換掉完整 snapshot 之後，每句的 AX 屬性讀取從 4–5 次降到 2 次，且不再有「聽寫途中對目前焦點
-/// 發合成 Cmd+C」的隱患（snapshot 的選取備援路徑）。
+/// 一次查詢只讀 2 個 AX 屬性（焦點元素＋subrole），完整 snapshot 要 4–5 次跨行程 IPC，
+/// 而且在有選取＋白名單 App 時還會對目前焦點發一個合成 Cmd+C。
+/// 一句話會查兩次（controller 的密碼守衛一次、coordinator 寫入前一次；primary 失敗後
+/// 走 fallback 再一次），所以**每句的 AX 讀取數大致與改版前持平**——換來的是攔阻能力，
+/// 不是省 IPC。
 ///
 /// **`.unknown` 是安全值**：讀不到焦點、或兩邊沒有 identity 可比（無 AX 的 App）都落在這裡，
 /// 呼叫端一律當作「照常上屏」——issue #21 的裁定，純追加永遠不得因缺 AX 而停。

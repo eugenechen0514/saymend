@@ -31,7 +31,7 @@ public struct HistoryExchangeRecord: Codable, Equatable, Sendable, FetchableReco
     public var at: Date
     public var utteranceRaw: String
     // "newContent" | "editedSession" | "undo" | "degraded" | "insertFailed" | "insertSkipped"
-    // | "insertWouldSkip"（issue #37 shadow 觀測：閘門若開啟會攔下這一句，本階段未攔阻）
+    // | "outcomeDropped"（issue #37：raw 有片段被寫入前的焦點閘門攔掉，這句的 LLM 結果整個丟棄）
     public var outcomeKind: String
     public var outcomeText: String?
 

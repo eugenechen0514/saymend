@@ -241,7 +241,11 @@ import Testing
 
         #expect(env.text(in: "P") == "", "密碼欄位一個字都不能進")
         #expect(env.text(in: "A") == "")
+        #expect(lastNotice(hud) == DictationController.secureFieldSkipNotice,
+                "文案講的是密碼欄位，不是「欄位已切換」")
         #expect(c.ledger.isActive, "本句只被跳過；硬停留給下一句的 controller 守衛（晚一句）")
+        #expect(!c.ledger.frozen,
+                "**不 freeze**：硬停是下一句 finalized 的 :325 守衛的事，這一層只負責「不寫」")
 
         c.handleTranscript(.finalized("下一句"), at: 11.0)          // controller 的 .secure 守衛在這裡才發動
         #expect(!c.ledger.isActive, "下一句 finalized 時 session 硬停")
@@ -283,14 +287,33 @@ import Testing
         #expect(c.currentTailSnapshot() == before, "insertCounter 不得前進")
     }
 
-    /// `.secure` 在 coordinator 層與 `.different` 同樣不寫（規格 §5.3 的最小滿足）。
+    /// `.secure` 在 coordinator 層與 `.different` 同樣不寫（規格 §5.3 的最小滿足），
+    /// 但回的是**自己的 case** `.secureField(subroleUnknown: false)`——不再借用
+    /// `.fieldChanged(currentAppBundleID: nil)`，兩者的診斷分類與誤判率分母都不同。
     @Test func aSecureGateAlsoBlocksTheWriteAtTheCoordinatorLayer() throws {
         let key = RecordingInserter(), paste = RecordingInserter()
         let c = InsertionCoordinator(keystroke: key, paste: paste, pasteThreshold: 100,
                                      fieldGate: { _ in .secure })
         c.beginSession(anchor: 0, identity: FieldIdentity(token: 1))
-        #expect(try c.insertFinalized("不該寫") == .fieldChanged(currentAppBundleID: nil))
+        #expect(try c.insertFinalized("不該寫") == .secureField(subroleUnknown: false))
+        #expect(try c.insertDetached("也不該寫") == .secureField(subroleUnknown: false))
         #expect(key.ops.isEmpty)
+        #expect(paste.ops.isEmpty)
+        #expect(c.displayedText == "")
+    }
+
+    /// `.secureUnknown`（AX 連兩次問不出 subrole，#59 fail closed）在 coordinator 層同樣不寫，
+    /// 但回的是 `subroleUnknown: true`——「不知道」與「知道」必須在型別上分得出來，
+    /// 否則 0.2s AX timeout 誤殺了多少永遠量不出。
+    @Test func aSubroleUnknownGateBlocksTheWriteAndSaysItIsUnknown() throws {
+        let key = RecordingInserter(), paste = RecordingInserter()
+        let c = InsertionCoordinator(keystroke: key, paste: paste, pasteThreshold: 100,
+                                     fieldGate: { _ in .secureUnknown })
+        c.beginSession(anchor: 0, identity: FieldIdentity(token: 1))
+        #expect(try c.insertFinalized("不該寫") == .secureField(subroleUnknown: true))
+        #expect(try c.insertDetached("也不該寫") == .secureField(subroleUnknown: true))
+        #expect(key.ops.isEmpty)
+        #expect(paste.ops.isEmpty)
         #expect(c.displayedText == "")
     }
 
@@ -304,5 +327,166 @@ import Testing
             #expect(try c.insertFinalized("照常") == .inserted)
             #expect(key.ops == [.insert("照常")], "閘門 \(gate) 必須照常上屏")
         }
+    }
+
+    // MARK: - 19. 密碼欄位攔阻自成一類，且診斷不得留下明文
+
+    /// 密碼欄位攔阻記 `secureField`、**不記 `fieldChanged`**、**不帶 bundleID**。
+    /// 這不是文字美化：`fieldChanged` 那組樣本是之後評估 `CFEqual` 誤判率的**分母**，
+    /// 把「切進密碼欄」（永遠正確的攔阻）混進去，分母就再也算不出誤判率。
+    ///
+    /// `utteranceRaw` 必須是空字串（issue #10／#58 的不變式）：這一列會落進 `history_exchange`，
+    /// 而 `historyEnabled` 預設 true——在可能是密碼欄的地方留下定稿文字等於留下明文。
+    /// 內容照樣進剪貼簿——被救的是使用者對欄位 A 說的話，不是密碼，沒有 §5.3 疑慮。
+    @Test func aSecureFieldSkipIsClassifiedApartFromFieldChangedAndKeepsNoPlaintext() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("P", text: "", isSecure: true)
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, clipboard: clipboard, history: history)
+        c.hotkeyPressed(at: 10.0)
+        env.afterFieldGate = { [weak env] in
+            env?.afterFieldGate = nil
+            env?.focus("P")
+        }
+        c.handleTranscript(.finalized("這段不可上屏"), at: 10.5)
+
+        #expect(skipEvents(history).count == 1, "恰一列診斷")
+        #expect(skipEvents(history).first?.outcomeText == "secureField",
+                "分類自成一類，且不帶 detail——密碼欄位沒有 bundleID，也不該有")
+        #expect(skipEvents(history).first?.utteranceRaw == "",
+                "可能是密碼欄：定稿文字不得落進 history_exchange")
+        #expect(!(skipEvents(history).first?.outcomeText?.hasPrefix("fieldChanged") ?? true),
+                "不得混進誤判率分母那一組")
+        #expect(lastNotice(hud) == DictationController.secureFieldSkipNotice)
+        #expect(clipboard.texts == ["這段不可上屏"], "內容不得遺失")
+        #expect(env.text(in: "P") == "" && env.text(in: "A") == "", "一個字都沒進任何欄位")
+    }
+
+    /// AX 連兩次問不出 subrole（#59 fail closed）走同一條寫入前閘門：行為與 `.secure` 逐字相同，
+    /// 但診斷分類是 `secureUnknown` 且帶 `sessionApp:` ——**格式與 `:325` 那條逐字相同**，
+    /// 兩條路徑的誤殺樣本才合得起來算 0.2s timeout 的誤殺率。
+    /// `utteranceRaw` 同樣留空：「不知道是不是密碼欄」正是最不該留明文的情形。
+    @Test func aSubroleUnknownSkipIsClassifiedApartAndKeepsNoPlaintext() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("Q", text: "", subroleUnknown: true)
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, clipboard: clipboard, history: history)
+        c.hotkeyPressed(at: 10.0)
+        env.afterFieldGate = { [weak env] in
+            env?.afterFieldGate = nil
+            env?.focus("Q")
+        }
+        c.handleTranscript(.finalized("這段也不可上屏"), at: 10.5)
+
+        #expect(skipEvents(history).count == 1, "恰一列診斷")
+        #expect(skipEvents(history).first?.outcomeText == "secureUnknown：sessionApp:com.foo.app",
+                "分類與 detail 格式必須與 :325 那條逐字相同")
+        #expect(skipEvents(history).first?.utteranceRaw == "",
+                "『不知道是不是密碼欄』更不該留明文")
+        #expect(lastNotice(hud) == DictationController.secureFieldSkipNotice)
+        #expect(clipboard.texts == ["這段也不可上屏"], "內容不得遺失")
+        #expect(env.text(in: "Q") == "" && env.text(in: "A") == "", "一個字都沒進任何欄位")
+        #expect(c.ledger.isActive && !c.ledger.frozen,
+                "與 .secure 同：只跳過這一句，不 freeze、不 archive")
+    }
+
+    /// 對照組：`.different` 那組**仍然**記 `fieldChanged`、帶 bundleID、且照舊留下定稿文字
+    /// （那不是密碼欄，明文限制不適用）——沒有被 secure 的分家污染。
+    @Test func aFieldChangedSkipKeepsItsOwnClassificationAndBundleID() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, clipboard: ClipboardSpy(), history: history)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("第一句"), at: 10.5)
+        env.focus("B")
+        c.handleTranscript(.finalized("第二句"), at: 11.0)
+
+        #expect(skipEvents(history).first?.outcomeText == "fieldChanged：sameApp:com.foo.app")
+        #expect(skipEvents(history).first?.utteranceRaw == "第二句", "不是密碼欄：定稿文字照舊留著")
+        #expect(lastNotice(hud) == DictationController.fieldChangedNotice)
+    }
+
+    /// 同一條偷渡防線的 **secure 版**：被密碼欄位攔阻的片段，也不得從潤飾路徑寫回欄位。
+    ///
+    /// 第 7 節釘的是 `.fieldChanged` 分支的 `skippedRaw = true`；`.secureField` 是分家出來的
+    /// 另一條，它自己的 `skippedRaw = true` 必須有獨立的測試釘住——否則後續重構
+    /// （例如照 `insertDetached` 那條「不設 skippedRaw」的註解把 finalized 這條也拿掉）
+    /// 不會有任何測試叫，而這條線是「被閘門拒絕的 raw 不得從潤飾路徑偷渡回欄位」的唯一機制。
+    /// 這條路徑與規格 §5.3 相關：偷渡回來的那段正是「焦點在密碼欄時說的話」。
+    @Test func aSecureBlockedSegmentAlsoDropsItsOutcomeSoItCannotSneakBack() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("P", text: "", isSecure: true)
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("片段一片段二。")            // 潤飾句含被密碼欄位攔掉的那段
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, polisher: polisher,
+                                                 clipboard: ClipboardSpy(), history: history)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("片段一"), at: 10.5)          // 落地
+        // controller 的密碼守衛答完之後才切進密碼欄：走 coordinator 的 `.secureField` 分支
+        env.afterFieldGate = { [weak env] in
+            env?.afterFieldGate = nil
+            env?.focus("P")
+        }
+        c.handleTranscript(.finalized("片段二"), at: 10.8)          // 被密碼欄位擋下
+        env.focus("A")                                             // 焦點回來，排除「潤飾被閘門擋掉」的干擾
+        c.tick(at: 12.4)
+        await c.lastIntentTask?.value
+
+        #expect(env.text(in: "A") == "片段一",
+                "落地那段維持 raw；密碼欄位攔掉那段不得從潤飾路徑偷渡回欄位")
+        #expect(!env.text(in: "A").contains("片段二"))
+        #expect(env.text(in: "P") == "", "密碼欄位一個字都不能進")
+        #expect(droppedEvents(history).count == 1, "outcome 必須被丟棄並留下診斷")
+        #expect(droppedEvents(history).first?.outcomeText == "skippedRaw")
+        #expect(notices(hud) == [DictationController.secureFieldSkipNotice],
+                "跳過當下已提示過，丟棄 outcome 不再發第二則")
+    }
+
+    /// 緩衝句落地（`insertDetached`）路徑上焦點切進的是**密碼欄位**：分類同樣走 `secureField`，
+    /// `utteranceRaw` 同樣留空。兩個呼叫點都得各自表態——只改 `insertFinalized` 那條，
+    /// 這裡會安靜留在 `fieldChanged`，而且把 LLM 的定稿文字寫進可能是密碼欄的診斷列。
+    @Test func aBufferedUtteranceLandingIntoASecureFieldIsClassifiedAsSecureField() async {
+        let intent = GatedIntentService()
+        intent.gatedRaws = ["第二句"]
+        intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
+                               "第二句": .newContent("補充內容。")]
+        let reader = FakeFieldReader()
+        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 4,
+                                      fieldIdentity: FieldIdentity(token: 1),
+                                      selectedRange: .init(location: 4, length: 3),
+                                      selectedText: "原文字")
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, _, key, _, hud) = makeController(polisher: intent, clipboard: clipboard,
+                                                    fieldReader: reader, history: history)
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+        c.tick(at: 12.6)
+        let first = c.lastIntentTask
+        c.handleTranscript(.finalized("第二句"), at: 13.0)
+        c.tick(at: 14.6)
+        await first?.value
+        let opsBeforeLanding = key.ops
+        reader.context = FieldContext(hasFocusedElement: true, isSecure: true)   // 落地前切進密碼欄
+        intent.release()
+        await c.lastIntentTask?.value
+
+        #expect(key.ops == opsBeforeLanding, "密碼欄位一個字都不能進")
+        #expect(clipboard.texts == ["補充內容。"], "內容仍要救——被救的是欄位 A 的話，不是密碼")
+        #expect(hud.states.contains(.notice(DictationController.secureFieldSkipNotice)))
+        let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+        #expect(skipped.last?.outcomeText == "secureField")
+        #expect(skipped.last?.utteranceRaw == "",
+                "可能是密碼欄：LLM 定稿文字不得落進 history_exchange")
+        #expect(!history.exchanges.contains { $0.outcomeText?.hasPrefix("fieldChanged") ?? false },
+                "不得混進誤判率分母那一組")
     }
 }

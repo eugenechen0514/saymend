@@ -130,8 +130,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let axRegistry = AXFieldRegistry()
         let axInserter = AXInserter(registry: axRegistry)
         let axReader = AXFieldReader(profiles: profileStore, registry: axRegistry)
+        // 寫入前的焦點閘門（issue #37）：coordinator 比 controller 早建，所以閘門只能捕捉 reader。
+        // sessionIdentity 由 coordinator 自己（beginSession 記下的那個）帶進來。
+        // reader 不在＝沒有 AX 可問，回 .unknown＝照常上屏（issue #21）。
         let coordinator = InsertionCoordinator(keystroke: keystroke, paste: PasteInserter(),
-                                               rangeReplacer: axInserter)
+                                               rangeReplacer: axInserter,
+                                               fieldGate: { [weak axReader] identity in
+                                                   axReader?.fieldGate(sessionIdentity: identity) ?? .unknown
+                                               })
         let provider = OpenAICompatProvider(configProvider: { [settings] in settings.openAIConfig() })
         // ClaudeCLI（spec §4）：偵測器 UI 與 provider 共用（快取共享）；config 每次呼叫讀取即時生效
         let cliProvider = ClaudeCLIProvider(
