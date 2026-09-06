@@ -48,7 +48,8 @@ final class ClipboardChannel {
     /// 暫時寫入結束時要放回去的東西：使用者的內容，或被暫時擠開的救援文字。
     private enum RestoreTarget {
         case user(Items)
-        case rescue(String)
+        /// 救援連同它的 round：放回時要把 round 一起還原，否則累積中的那一輪會在 paste 擠開／放回之後斷掉。
+        case rescue(String, round: Int)
     }
 
     private struct Lease {
@@ -65,8 +66,9 @@ final class ClipboardChannel {
     private let timer: any ClipboardTimer
     private var activeLease: Lease?
     private var nextLeaseID = 0
-    /// 最後一次落地的救援與當時的 changeCount：相等＝剪貼簿仍是它；不等＝使用者已覆寫、往前走了。
-    private var landedRescue: (text: String, changeCount: Int)?
+    /// 最後一次落地的救援、它屬於哪一輪（round），與當時的 changeCount：
+    /// changeCount 相等＝剪貼簿仍是它；不等＝使用者已覆寫、往前走了。round 見 `rescue(_:round:)`。
+    private var landedRescue: (text: String, round: Int, changeCount: Int)?
 
     init(pasteboard: any SystemPasteboard, settleDelay: TimeInterval = 0.3,
          timer: any ClipboardTimer = MainQueueClipboardTimer()) {
@@ -120,23 +122,38 @@ final class ClipboardChannel {
     /// 而且沒有任何訊號能告訴我們 R 已被取回（Cmd+V 不改 changeCount），U 沒有合法的自動還原時機。
     /// 落地後只有使用者自己的寫入會取代它：後續 paste 只把它暫時擠開、收尾放回。
     ///
-    /// 同一輪累積（修訂 issue #42 取捨 4 的單一 slot、後者取代前者）：剪貼簿此刻仍是我方上一份救援時，
-    /// 新片段**直接串接在後面、不加分隔符**——這些片段本來就會依序落進同一個欄位形成連續文字。
-    /// 只有使用者**複製**過別的東西才會推進 changeCount、讓 `rescueStillInClipboard` 變 nil，下一次重新開始一輪。
-    /// **Cmd+V 不算**（同上：讀取不改 changeCount）：使用者逐句貼上時我們看不見，下一段照樣接上去，
-    /// 他再貼一次就會拿到重複的前段——已知取捨，釘在
-    /// `pastingBetweenRescuesStillAccumulatesSoTheUserSeesTheEarlierPartTwice`。要真的分辨得出來，
-    /// 得在救援落地時另記一個「已提示過使用者」的 session 訊號，不在本次修訂範圍。
+    /// 同一輪累積（修訂 issue #42 取捨 4 的單一 slot、後者取代前者）：剪貼簿此刻仍是我方上一份救援、
+    /// **且屬於同一 round** 時，新片段**直接串接在後面、不加分隔符**——這些片段本來就會依序落進
+    /// 同一個欄位形成連續文字。否則覆寫，重新開始一輪。
+    ///
+    /// `round` 由呼叫端（Core 的 `DictationController`）給，值是 session 世代（`ledger.generation`）。
+    /// 為什麼 changeCount 一個人不夠：**Cmd+V 不推進 changeCount**（讀取不改），所以「session A 救援→
+    /// 使用者貼上→開始 session B→B 又救援」在剪貼簿眼中毫無變化，只看 changeCount 會把 B 黏在 A 後面，
+    /// 使用者貼出來拿到上一段聽寫的殘留（issue #45 的場景每次都踩）。round 是唯一能界定 session 邊界的訊號。
+    /// 釘在 `aRescueFromADifferentRoundOverwritesInsteadOfAppending`。
+    ///
+    /// 代價（刻意取捨）：跨 session 不再串接＝新 session 的第一筆救援會**覆寫掉**上一個 session
+    /// 還沒被取回的救援。兩害相權——黏在一起會讓使用者貼出他沒說過的內容，更糟。
+    ///
+    /// 使用者**複製**過別的東西同樣會結束一輪：changeCount 前進、`rescueStillInClipboard` 變 nil。
+    /// 但同一輪內的 Cmd+V 仍看不見：使用者逐句貼上時下一段照樣接上去，他再貼一次就會拿到重複的前段——
+    /// 已知取捨，釘在 `pastingBetweenRescuesStillAccumulatesSoTheUserSeesTheEarlierPartTwice`。
     ///
     /// `settle()` 必須在讀 `rescueStillInClipboard` **之前**（見 `rescueInClipboardBeforeWriting`）：
     /// paste 在途時剪貼簿是它寫的內容、changeCount 與 `landedRescue` 不符，先讀會判成「不是我方的」而丟掉前一段。
     /// 釘在 `accumulationWorksWhileAPasteIsStillInFlight`。
-    func rescue(_ text: String) {
+    func rescue(_ text: String, round: Int) {
         settle()
-        let accumulated = (rescueStillInClipboard ?? "") + text
-        // 沒寫成：剪貼簿已放回累積前的舊救援，不能宣稱新的全文在剪貼簿裡（restore 已重新記下舊救援）
+        let accumulated = (landedRescueOfRound(round) ?? "") + text
+        // 沒寫成：剪貼簿已放回累積前的舊救援（連同它的 round），不能宣稱新的全文在剪貼簿裡
         guard overwrite(with: accumulated) else { return }
-        landedRescue = (accumulated, pasteboard.changeCount)
+        landedRescue = (accumulated, round, pasteboard.changeCount)
+    }
+
+    /// 可以接上去的前一段：剪貼簿仍是我方上一份救援，**且**那份屬於同一輪。任一條不成立就回 nil＝覆寫。
+    private func landedRescueOfRound(_ round: Int) -> String? {
+        guard let landed = landedRescue, landed.round == round else { return nil }
+        return rescueStillInClipboard
     }
 
     /// 使用者主動複製（History 分頁）：覆寫——呼叫端在此之前已用 `rescueStillInClipboard` 提示過。
@@ -205,7 +222,7 @@ final class ClipboardChannel {
     /// （曾落地的救援若已被使用者覆寫，紀錄一併清掉）。
     private func snapshotTarget() -> RestoreTarget {
         if let rescue = landedRescue, rescue.changeCount == pasteboard.changeCount {
-            return .rescue(rescue.text)
+            return .rescue(rescue.text, round: rescue.round)
         }
         landedRescue = nil
         return .user(snapshotItems())
@@ -227,9 +244,10 @@ final class ClipboardChannel {
         case .user(let items):
             restoreItems(items)
             landedRescue = nil
-        case .rescue(let text):
+        case .rescue(let text, let round):
             pasteboard.clearContents()
-            landedRescue = pasteboard.setString(text, forType: .string) ? (text, pasteboard.changeCount) : nil
+            landedRescue = pasteboard.setString(text, forType: .string)
+                ? (text, round, pasteboard.changeCount) : nil
         }
     }
 

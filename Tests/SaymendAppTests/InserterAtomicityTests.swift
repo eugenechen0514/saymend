@@ -164,7 +164,7 @@ final class SetStringFailingPasteboard: SystemPasteboard {
         let inserter = PasteInserter(channel: channel, clipboard: clipboard)
         try inserter.insert("A")
         timer.now = 0.25
-        clipboard.rescue("救援內容")
+        clipboard.rescue("救援內容", round: 1)
         timer.now = 0.3
         timer.fireDue()
         #expect(pb.string(forType: .string) == "救援內容", "舊版這裡會被還原成使用者原本的剪貼簿")

@@ -55,7 +55,7 @@ public final class DictationController {
     let settings: AppSettings
     private var segmenter: UtteranceSegmenter
     /// 鐵律最後手段：原文救不回時交給剪貼簿（app 端接 NSPasteboard）
-    private let clipboardRescue: ((String) -> Void)?
+    private let clipboardRescue: ((String, Int) -> Void)?
     /// 聚焦欄位快照：密碼欄位拒絕聽寫、session 起點取 AX 錨位（規格 §4.6／§5.3）
     private let fieldReader: (any FieldContextProviding)?
     /// 視覺回饋層（規格 §3.5）：Core 只發語意事件，App 端 FeedbackCoordinator 決定畫不畫、畫哪裡
@@ -119,7 +119,7 @@ public final class DictationController {
                 hud: any HUDPresenting,
                 settings: AppSettings,
                 segmenter: UtteranceSegmenter = UtteranceSegmenter(),
-                clipboardRescue: ((String) -> Void)? = nil,
+                clipboardRescue: ((String, Int) -> Void)? = nil,
                 fieldReader: (any FieldContextProviding)? = nil,
                 feedback: (any SessionFeedbackPresenting)? = nil,
                 history: (any HistoryRecording)? = nil,
@@ -349,7 +349,7 @@ public final class DictationController {
                 // 統一處理，不特別短路。別讓使用者白說話、也別打進錯 App。
                 guard !ledger.frozen else {
                     recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: text)
-                    clipboardRescue?(text)
+                    rescueToClipboard(text)
                     hud.present(.notice("已凍結，內容已入剪貼簿"))
                     return
                 }
@@ -362,14 +362,15 @@ public final class DictationController {
                     // 剪貼簿內容與欄位狀態一致：insertFinalized 是 try insertWithFallback(text) 成功才更新
                     // currentUtteranceText／displayedText／insertCounter（InsertionCoordinator.swift:104-110），
                     // 而 TextInserter 的原子契約（issue #38）保證拋錯＝一個字都沒進欄位——這一段完整落在剪貼簿。
-                    // 只保證「這一段」：同 session 內多個 .finalized 連續插入失敗時，rescue 會逐次覆寫剪貼簿
-                    // （ClipboardChannel.rescue → overwrite），最後只留最後一段。這與 :352 凍結那條同型，
-                    // 此處沒有 dispatch 的 lastRescueGeneration（:694-697）那種「只救一份」的節流。
+                    // 同 session 內多個 .finalized 連續插入失敗時**不會互相覆寫**：走 rescueToClipboard
+                    // 的預設 round（ledger.generation），ClipboardChannel 把同一輪的救援串接成一份
+                    // （issue #42 取捨 4 的修訂）。此處仍沒有 dispatch 的 lastRescueGeneration（:694-697）
+                    // 那種「只救一份」的節流——那是刻意的：每一段都是使用者真的說過的話，都該留下。
                     // 提示會被蓋掉：hold 模式下 asrStreamEnded（:463-465）會接著 present .lingering、
                     // 非 active 時 archiveSession（:601）present .hidden，使用者實際看不到這行 notice。
-                    // 這是既有的 M8 LOW follow-up（notice 被 stream-end 蓋掉），不在本次修正範圍。
-                    // 不記 insertEvent：與 :727 那條緩衝句插入失敗保持一致（最小 diff、一致性優先）。
-                    clipboardRescue?(text)
+                    // 這是既有的 M8 LOW follow-up，已另立 issue #61（安全相關 notice 的最短顯示保證）。
+                    // 不記 insertEvent：與緩衝句插入失敗那條保持一致（最小 diff、一致性優先）。
+                    rescueToClipboard(text)
                     hud.present(.notice("插入失敗，內容已入剪貼簿"))
                 }
             }
@@ -695,7 +696,11 @@ public final class DictationController {
                 switch outcome {
                 case .newContent(let text), .editedSession(let text):
                     lastRescueGeneration = generation
-                    clipboardRescue?(text)
+                    // round 用捕捉到的 `generation`，**不是** `ledger.generation`：這條分支的前提就是
+                    // 世代已過期，救的是**舊 session** 的內容，而使用者此刻可能已經開了新 session
+                    // （`ledger.generation` 已跳號）。用當下的世代會讓這段舊內容被當成新 session 的
+                    // 同一輪而串在它的救援後面——round token 要防的正是這件事。
+                    rescueToClipboard(text, round: generation)
                     hud.present(.notice("選取已變動，結果已入剪貼簿"))
                 case .undo, .degraded:
                     break                              // 無內容可救，安靜丟棄即可
@@ -721,7 +726,7 @@ public final class DictationController {
                 // 若照樣 insertDetached 會把合成鍵入打在使用者現在的游標處（write-after-hands-off）。
                 // 比照所有落地路徑（applyNewContent／applyCorrection 等）的 frozen 守衛，改走剪貼簿急救。
                 guard !ledger.frozen else {
-                    clipboardRescue?(text)
+                    rescueToClipboard(text)
                     hud.present(.notice("已凍結，內容已入剪貼簿"))
                     return
                 }
@@ -730,7 +735,7 @@ public final class DictationController {
                     ledger.appendPolished(text)
                     emitFeedback()                         // 緩衝後續句落地：底線延伸至新內容
                 } catch {
-                    clipboardRescue?(text)
+                    rescueToClipboard(text)
                     hud.present(.notice("插入失敗，內容已入剪貼簿"))
                 }
             case .editedSession:
@@ -742,7 +747,7 @@ public final class DictationController {
                 // text 為空——螢幕上也確實沒有指令話語可退。
                 performUndo(commandSnapshot: coordinator.currentTailSnapshot())
             case .degraded(let reason):
-                clipboardRescue?(snapshot.text)
+                rescueToClipboard(snapshot.text)
                 hud.present(.notice("未處理（\(reason)），轉錄已入剪貼簿"))
             }
             return
@@ -853,7 +858,7 @@ public final class DictationController {
             hud.present(.notice("沒有可復原的內容"))
         case .degraded(let reason):
             // M3 設計裁決 4：LLM 失敗不動選取（寧可不動不可亂改），轉錄入剪貼簿
-            clipboardRescue?(commandRaw)
+            rescueToClipboard(commandRaw)
             hud.present(.notice("未替換（\(reason)），轉錄已入剪貼簿"))
         }
     }
@@ -884,6 +889,14 @@ public final class DictationController {
         }
     }
 
+    /// 剪貼簿救援的唯一出口（issue #42）：帶 round token 給 App 端的 ClipboardChannel，
+    /// 它只把**同一輪**的救援串接起來，跨輪一律覆寫。round 用 `ledger.generation`——
+    /// 一次聽寫 session 就是一輪，同一段話拆成多句救援才會連成一份可貼上的文字。
+    /// 只有救「舊 session 的內容」時才明確傳 round（見 `dispatch` 的世代過期分支）。
+    private func rescueToClipboard(_ text: String, round: Int? = nil) {
+        clipboardRescue?(text, round ?? ledger.generation)
+    }
+
     /// 放棄替換選取：不動欄位、結果進剪貼簿、封存、提示。三種成因（凍結／選取已變／無法用 AX 確認）同一套收尾，
     /// 只差診斷分類與文案。`lastRescueGeneration`：同世代之後回來的緩衝句 outcome 不得再救一次——
     /// #42 累積修訂後第二次救援是**接在後面**而不是蓋掉，少了這道守衛會把同一份內容重複串進剪貼簿。
@@ -891,7 +904,7 @@ public final class DictationController {
     private func abandonSelectionReplacement(_ text: String, classification: String, notice: String) {
         recordInsertEvent(kind: "insertSkipped", classification: classification, utteranceText: text)
         lastRescueGeneration = ledger.generation
-        clipboardRescue?(text)
+        rescueToClipboard(text)
         archiveSession()
         hud.present(.notice(notice))
     }
