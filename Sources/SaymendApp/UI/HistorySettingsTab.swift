@@ -2,18 +2,30 @@ import AppKit
 import SwiftUI
 import SaymendCore
 
+/// History 分頁「複製最終文字」的文案（issue #42）：剪貼簿裡還是上次聽寫救援的內容時，複製前先確認。
+/// 「還在剪貼簿」只代表自救援後沒被別的內容取代——我們不知道使用者貼過沒有（貼上不會動剪貼簿）。
+enum HistoryClipboardText {
+    static let copyButton = "複製最終文字"
+    static let overwriteRescueTitle = "剪貼簿裡還是上次聽寫救援的內容"
+    static let overwriteRescueMessage = "那段文字自救援後還沒被別的內容取代。若你已經貼過了，可以放心覆蓋。"
+    static let overwrite = "覆蓋"
+    static let cancel = "取消"
+}
+
 /// 聽寫歷史瀏覽（規格 §4.9：供回查、複製、除錯）。
 struct HistorySettingsTab: View {
     let store: (any HistoryRecording)?
     let settings: AppSettings
+    let clipboard: ClipboardChannel
     @State private var sessions: [HistorySessionRecord] = []
     @State private var selection: String?
     @State private var enabled: Bool
     @State private var retentionDays: Int
 
-    init(store: (any HistoryRecording)?, settings: AppSettings) {
+    init(store: (any HistoryRecording)?, settings: AppSettings, clipboard: ClipboardChannel = .general) {
         self.store = store
         self.settings = settings
+        self.clipboard = clipboard
         _enabled = State(initialValue: settings.historyEnabled)
         _retentionDays = State(initialValue: settings.historyRetentionDays)
     }
@@ -65,11 +77,8 @@ struct HistorySettingsTab: View {
                 }
                 .frame(height: 120)
                 HStack {
-                    Button("複製最終文字") {
-                        let text = sessions.first { $0.id == selected }?.finalText ?? ""
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(text, forType: .string)
-                    }
+                    HistoryCopyButton(text: sessions.first { $0.id == selected }?.finalText ?? "",
+                                      clipboard: clipboard)
                 }
             }
         }
@@ -91,5 +100,34 @@ struct HistorySettingsTab: View {
     static func qualityLine(_ d: ASRDiagnosticRecord) -> String {
         String(format: "對數機率 %.2f · 壓縮比 %.2f · %d 段",
                d.minAvgLogprob, d.maxCompressionRatio, d.segmentCount)
+    }
+}
+
+/// 「複製最終文字」（issue #42）：走 ClipboardChannel；剪貼簿裡還是上次救援的內容時先確認再覆蓋。
+struct HistoryCopyButton: View {
+    let text: String
+    let clipboard: ClipboardChannel
+    /// 等待使用者確認覆蓋救援內容；true 時顯示確認 alert。
+    @State private var confirmingOverwrite = false
+
+    var body: some View {
+        Button(HistoryClipboardText.copyButton) {
+            // 「（未定稿）」的 session 沒有最終文字：空字串不寫，更不能拿它洗掉救援。
+            guard !text.isEmpty else { return }
+            // 按下當下才查，不用快照：分頁開著時背景聽寫可能剛落了一份救援。
+            // 先收尾在途 paste 再判斷——救援可能正被它暫時擠開，直接看會漏判、跳過確認就覆寫。
+            if clipboard.rescueInClipboardBeforeWriting() != nil {
+                confirmingOverwrite = true
+            } else {
+                clipboard.copyForUser(text)
+            }
+        }
+        .disabled(text.isEmpty)
+        .alert(HistoryClipboardText.overwriteRescueTitle, isPresented: $confirmingOverwrite) {
+            Button(HistoryClipboardText.overwrite, role: .destructive) { clipboard.copyForUser(text) }
+            Button(HistoryClipboardText.cancel, role: .cancel) {}
+        } message: {
+            Text(HistoryClipboardText.overwriteRescueMessage)
+        }
     }
 }

@@ -55,12 +55,18 @@ final class HotkeyMonitor {
         self.tap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        // 剪貼簿的短暫同步等待跑在私有 mode（issue #42）：tap 也掛進去，等待期間事件照流、時間戳不被拖晚，
+        // 我們自己送出的合成 Cmd+V／Cmd+C 也才送得到目標 App。
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, EventTapFriendlyWait.mode)
         CGEvent.tapEnable(tap: tap, enable: true)
     }
 
     func stop() {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
-        if let runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes) }
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, EventTapFriendlyWait.mode)
+        }
         tap = nil
         runLoopSource = nil
     }

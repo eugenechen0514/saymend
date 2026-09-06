@@ -11,6 +11,8 @@ struct SettingsView: View {
     let coreModes: (any CoreModeStore)?
     let detector: ClaudeCLIDetector?
     let tester: ProviderTester?
+    /// History 分頁複製按鈕的剪貼簿出口（issue #42）；預覽態沿用 .general 無害。
+    let clipboard: ClipboardChannel
     /// 本機模型預載／卸載／狀態查詢（M9 §6）：由 App 注入 AppDelegate 對應方法；預設 no-op 供預覽態。
     let whisperLocalPreload: () -> Void
     let whisperLocalUnload: () -> Void
@@ -25,6 +27,7 @@ struct SettingsView: View {
          coreModes: (any CoreModeStore)? = nil,
          detector: ClaudeCLIDetector? = nil,
          tester: ProviderTester? = nil,
+         clipboard: ClipboardChannel = .general,
          whisperLocalPreload: @escaping () -> Void = {},
          whisperLocalUnload: @escaping () -> Void = {},
          whisperLocalState: @escaping @MainActor () async -> ModelLoadState = { .idle },
@@ -36,6 +39,7 @@ struct SettingsView: View {
         self.coreModes = coreModes
         self.detector = detector
         self.tester = tester
+        self.clipboard = clipboard
         self.whisperLocalPreload = whisperLocalPreload
         self.whisperLocalUnload = whisperLocalUnload
         self.whisperLocalState = whisperLocalState
@@ -58,7 +62,7 @@ struct SettingsView: View {
                 .tabItem { Label("詞彙表", systemImage: "character.book.closed") }
             PromptSettingsTab(settings: settings, coreModes: coreModes)
                 .tabItem { Label("Prompt", systemImage: "text.badge.checkmark") }
-            HistorySettingsTab(store: history, settings: settings)
+            HistorySettingsTab(store: history, settings: settings, clipboard: clipboard)
                 .tabItem { Label("歷史", systemImage: "clock.arrow.circlepath") }
             PrivacySettingsTab(settings: settings)
                 .tabItem { Label("隱私", systemImage: "hand.raised") }
