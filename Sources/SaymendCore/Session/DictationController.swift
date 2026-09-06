@@ -357,7 +357,14 @@ public final class DictationController {
                     try coordinator.insertFinalized(text)
                     emitFeedback()                             // 底線延伸至新上屏文字
                 } catch {
-                    hud.present(.notice("插入失敗"))
+                    // 內容已產生卻落不了地：比照緩衝句插入失敗（:727）救進剪貼簿，別讓使用者白說話。
+                    // 這先前是全檔唯一漏掉 clipboardRescue 的同型路徑（其餘見 :352／:692／:718／:727／:739）。
+                    // 剪貼簿內容與欄位狀態一致：insertFinalized 是 try insertWithFallback(text) 成功才更新
+                    // currentUtteranceText／displayedText／insertCounter（InsertionCoordinator.swift:104-110），
+                    // 而 TextInserter 的原子契約（issue #38）保證拋錯＝一個字都沒進欄位——整句在剪貼簿。
+                    // 不記 insertEvent：與 :727 那條緩衝句插入失敗保持一致（最小 diff、一致性優先）。
+                    clipboardRescue?(text)
+                    hud.present(.notice("插入失敗，內容已入剪貼簿"))
                 }
             }
         case .transcribing:

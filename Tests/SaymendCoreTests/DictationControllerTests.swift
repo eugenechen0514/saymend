@@ -2270,3 +2270,30 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(hud.states.last == .listening(mode: .hold, volatile: "今天天"),
             "定稿把正在顯示的暫時文字清掉了——HUD 會在每句話之間閃一下空白")
 }
+
+/// raw 插入失敗必須把整句救進剪貼簿（issue #37 調查時發現的獨立缺陷，M8 LOW follow-up）。
+///
+/// `DictationController` 每一條「內容已產生卻落不了地」的路徑都有 `clipboardRescue`
+/// （凍結、世代過期的緩衝句、緩衝句凍結／插入失敗、degraded…），唯獨 raw 定稿的插入失敗
+/// 只提示「插入失敗」就把整句丟掉——使用者說了一整句話，什麼都沒留下。
+///
+/// 失敗要造兩次：`InsertionCoordinator.insertWithFallback` 會在 primary 失敗後**全量重送**給
+/// secondary（`InsertionCoordinator.swift:286-296`），兩個 inserter 在 `makeStatefulController`
+/// 裡是同一個 env，所以 `failInsertsRemaining = 2` 才會真的拋到 controller 的 catch。
+///
+/// 欄位狀態與剪貼簿內容一致：`insertFinalized` 是 `try insertWithFallback(text)` 成功才更新鏡像
+/// （`InsertionCoordinator.swift:104-110`），拋錯＝帳面乾淨、一個字都沒進欄位。
+@MainActor
+@Test func rawFinalizedInsertFailureRescuesWholeUtteranceToClipboard() {
+    let env = StatefulFieldEnvironment()
+    env.addField("A", text: "PREVIOUS")
+    env.failInsertsRemaining = 2                    // keystroke 與 paste 都失敗
+    let spy = ClipboardSpy()
+    let (c, _, hud) = makeStatefulController(env: env, clipboard: spy)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("使用者說了一整句話"), at: 10.5)
+
+    #expect(env.text(in: "A") == "PREVIOUS", "插入失敗＝一個字都沒進欄位")
+    #expect(spy.texts == ["使用者說了一整句話"], "不讓使用者白說話：整句救進剪貼簿")
+    #expect(hud.states.last == .notice("插入失敗，內容已入剪貼簿"), "文案須與緩衝句插入失敗那條逐字一致")
+}
