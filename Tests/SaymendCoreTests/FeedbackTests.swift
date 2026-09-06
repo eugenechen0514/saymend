@@ -118,6 +118,8 @@ import Testing
         #expect(updates().last?.text == "",
                 "底線仍罩著已被退掉的指令話語；實際：\(updates().last?.text ?? "nil")")
         #expect(updates().count == countBeforeUndo + 1, "退掉之後要再發一次 update")
+        // 純底線更新：指令話語不是「內容異動」，不該帶 highlight 去畫變更框
+        #expect(updates().last?.highlight == nil && updates().last?.oldText == nil)
     }
 
     /// #54 的對照組：退不掉時（無 verified AX）指令話語仍留在畫面上，底線就該維持罩著它。
