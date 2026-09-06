@@ -229,6 +229,9 @@ import Testing
     #expect(hud.states.contains(.notice("欄位已被外部改動，本段停止修正")))
     #expect(!hud.states.contains(.notice("沒有可復原的步驟")))
     #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.first?.outcomeText == "fieldMismatch")
+    // 指令話語退不掉、仍在畫面上 → 帳本要鏡像它（issue #40）。這條出口的 synchronizeObservedTail
+    // 本來就寫對了，但先前無人斷言：刪掉那三行全套也不會紅。
+    #expect(c.ledger.sessionText == "復原")
 }
 
 /// 同一情境、無 AX：指令話語留著、鏡像它、不凍結、提示沒有步驟。
@@ -1087,7 +1090,8 @@ import Testing
     #expect(hud.states.contains(.notice("欄位已被外部改動，本段停止修正")))
     #expect(c.ledger.frozen)
     #expect(key.ops.count == opsBefore)               // 指令話語留在欄位、分毫未動
-    #expect(c.ledger.sessionText == "內容。")
+    // 上一行才剛斷言指令話語仍在欄位上，鏡像就必須含它（issue #40）——否則它是帳本追蹤不到的孤兒。
+    #expect(c.ledger.sessionText == "內容。改一下")
 }
 
 /// 迴歸：延續窗內點 HUD「復原」的接線危險——若滑鼠 leftMouseDown 被當成使用者活動先送進
