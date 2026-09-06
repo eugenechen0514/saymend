@@ -350,7 +350,8 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(channel.rescueStillInClipboard == "甲乙")
     }
 
-    /// 累積寫不進去：不得兩頭皆空、也不得只剩新片段——剪貼簿要維持累積前的舊救援，且仍認得它。
+    /// 累積寫不進去：不得兩頭皆空——剪貼簿要維持累積前的舊救援，且仍認得它，
+    /// 而且這一輪還沒結束：再下一段仍接得在舊救援後面（失敗那段本身靜默遺失，見 PR 揭露）。
     @Test func aFailedAccumulationKeepsThePreviousRescueInTheClipboard() {
         let backing = makePasteboard(seed: "U")
         let pb = SetStringFailingPasteboard(backing: backing, failingAttempts: [2])   // 第 2 次＝寫入「甲乙」
@@ -360,6 +361,48 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(pb.setStringAttempts == 3, "第 3 次是失敗後放回舊救援；實際 \(pb.setStringAttempts)")
         #expect(backing.string(forType: .string) == "甲", "實際 \(backing.string(forType: .string) ?? "nil")")
         #expect(channel.rescueStillInClipboard == "甲")
+        channel.rescue("丙")
+        #expect(backing.string(forType: .string) == "甲丙",
+                "失敗後這一輪要接得下去，不能退回單一 slot；實際 \(backing.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲丙")
+    }
+
+    /// `rescue` 必須先 `settle()` 再讀 `rescueStillInClipboard`：paste 仍在途時剪貼簿是 paste 寫的內容、
+    /// changeCount 與 `landedRescue` 不符，先讀就會判成「不是我方的」而把前一段整個丟掉。
+    /// 救援落在上一個 paste 的 300ms 安全窗內不是邊角情況——既有的
+    /// `rescueInsideTheWindowSettlesThenLandsAndSurvivesTheScheduledRestore` 就是為這個時序寫的。
+    /// 與 `accumulationSurvivesAPasteThatDisplacedAndRestoredTheRescue` 的差別：那條先 `fireDue()`
+    /// 把 lease 收乾淨了，`settle()` 是 no-op，踏不進這條分支。
+    @Test func accumulationWorksWhileAPasteIsStillInFlight() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("甲")
+        try channel.withTransientWrite("A") {}
+        timer.now = 0.1
+        #expect(pb.string(forType: .string) == "A", "前提：paste 仍在途，救援被暫時擠開")
+        channel.rescue("乙")
+        #expect(pb.string(forType: .string) == "甲乙",
+                "settle 要先把救援放回才讀得到它；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
+    }
+
+    /// 已知取捨（本次修訂帶進來的行為退步）：Cmd+V 是讀取、不推進 changeCount，我們看不見使用者貼過，
+    /// 所以下一段照樣接上去。逐句貼上的使用者會在欄位裡拿到重複的前段——
+    /// 舊的「後者取代前者」在這個流程反而是對的。釘成已知行為，免得下次被當 bug 亂改。
+    /// 要真的分辨得出來，得在救援落地時另記「已提示過使用者」的 session 訊號，不在本次修訂範圍。
+    @Test func pastingBetweenRescuesStillAccumulatesSoTheUserSeesTheEarlierPartTwice() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        var pastedIntoTheField = ""
+        channel.rescue("句一")
+        let afterFirstRescue = pb.changeCount
+        pastedIntoTheField += pb.string(forType: .string) ?? ""      // 使用者第一次 Cmd+V＝讀取
+        #expect(pb.changeCount == afterFirstRescue, "讀取不推進 changeCount，我們無從得知使用者貼過")
+        channel.rescue("句二")
+        pastedIntoTheField += pb.string(forType: .string) ?? ""      // 使用者第二次 Cmd+V
+        #expect(pastedIntoTheField == "句一句一句二",
+                "逐句貼上會拿到重複的前段；實際 \(pastedIntoTheField)")
     }
 
     /// 三段累積：`landedRescue` 必須記成累積後的全文，只記最後一段的話第三次會接錯。

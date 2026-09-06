@@ -122,8 +122,15 @@ final class ClipboardChannel {
     ///
     /// 同一輪累積（修訂 issue #42 取捨 4 的單一 slot、後者取代前者）：剪貼簿此刻仍是我方上一份救援時，
     /// 新片段**直接串接在後面、不加分隔符**——這些片段本來就會依序落進同一個欄位形成連續文字。
-    /// 使用者一貼過或複製過別的東西 changeCount 就前進，`rescueStillInClipboard` 變 nil，下一次自然重新開始一輪；
-    /// 這條規則因此不需要任何 session 訊號。`settle()` 之後才讀是必要的（見 `rescueInClipboardBeforeWriting`）。
+    /// 只有使用者**複製**過別的東西才會推進 changeCount、讓 `rescueStillInClipboard` 變 nil，下一次重新開始一輪。
+    /// **Cmd+V 不算**（同上：讀取不改 changeCount）：使用者逐句貼上時我們看不見，下一段照樣接上去，
+    /// 他再貼一次就會拿到重複的前段——已知取捨，釘在
+    /// `pastingBetweenRescuesStillAccumulatesSoTheUserSeesTheEarlierPartTwice`。要真的分辨得出來，
+    /// 得在救援落地時另記一個「已提示過使用者」的 session 訊號，不在本次修訂範圍。
+    ///
+    /// `settle()` 必須在讀 `rescueStillInClipboard` **之前**（見 `rescueInClipboardBeforeWriting`）：
+    /// paste 在途時剪貼簿是它寫的內容、changeCount 與 `landedRescue` 不符，先讀會判成「不是我方的」而丟掉前一段。
+    /// 釘在 `accumulationWorksWhileAPasteIsStillInFlight`。
     func rescue(_ text: String) {
         settle()
         let accumulated = (rescueStillInClipboard ?? "") + text

@@ -885,7 +885,8 @@ public final class DictationController {
     }
 
     /// 放棄替換選取：不動欄位、結果進剪貼簿、封存、提示。三種成因（凍結／選取已變／無法用 AX 確認）同一套收尾，
-    /// 只差診斷分類與文案。`lastRescueGeneration`：同世代之後回來的緩衝句 outcome 不得再救一次蓋掉這份。
+    /// 只差診斷分類與文案。`lastRescueGeneration`：同世代之後回來的緩衝句 outcome 不得再救一次——
+    /// #42 累積修訂後第二次救援是**接在後面**而不是蓋掉，少了這道守衛會把同一份內容重複串進剪貼簿。
     /// notice 必須在 archiveSession（會發 .hidden）之後，否則被蓋掉。
     private func abandonSelectionReplacement(_ text: String, classification: String, notice: String) {
         recordInsertEvent(kind: "insertSkipped", classification: classification, utteranceText: text)
