@@ -112,6 +112,26 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(pb.string(forType: .string) == "U", "舊版這裡會是 A1")
     }
 
+    /// 被 settle 內聯收尾過的第一個排程 block 稍後觸發時，第二次 paste 仍在途：它必須是 no-op，
+    /// 不得把第二個 lease 撞掉——否則接下來的第三次寫入以為沒有在途 paste，不等就覆寫。
+    @Test func aStaleScheduledFinishDoesNotDropTheNewerLease() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        try channel.withTransientWrite("A1") {}
+        timer.now = 0.1
+        try channel.withTransientWrite("A2") {}           // 等 0.2 → now 0.3，A2 的窗到 0.6
+        timer.fireDue()                                   // A1 的 block（0.3 到期）觸發：必須 no-op
+        #expect(pb.string(forType: .string) == "A2", "A2 仍在安全窗內，不得被還原")
+        timer.now = 0.35
+        try channel.withTransientWrite("A3") {}
+        #expect(timer.waits.count == 2 && abs((timer.waits.last ?? 0) - 0.25) < 1e-9,
+                "第三次必須等 A2 的窗（剩 0.25s）；實際 \(timer.waits)")
+        timer.now = 1
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "U")
+    }
+
     /// 安全窗已過但排程 block 還沒跑（主佇列忙）：不等待，直接內聯收尾。
     @Test func settleDoesNotWaitWhenTheWindowAlreadyElapsed() throws {
         let pb = makePasteboard(seed: "U")

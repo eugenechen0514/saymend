@@ -128,12 +128,12 @@ final class ClipboardChannel {
         landedRescue = (text, pasteboard.changeCount)
     }
 
-    /// 使用者主動複製（History 分頁）：覆寫並清除救援紀錄——呼叫端在此之前已用 `rescueStillInClipboard` 提示過。
+    /// 使用者主動複製（History 分頁）：覆寫——呼叫端在此之前已用 `rescueStillInClipboard` 提示過。
+    /// 寫入讓 changeCount 前進，救援紀錄自然失效，不必另外清。
     func copyForUser(_ text: String) {
         settle()
         pasteboard.clearContents()
         _ = pasteboard.setString(text, forType: .string)
-        landedRescue = nil
     }
 
     /// 自救援落地後剪貼簿沒被任何人覆寫 → 該救援文字；否則 nil。
