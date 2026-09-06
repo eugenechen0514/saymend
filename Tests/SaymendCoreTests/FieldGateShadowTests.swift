@@ -14,6 +14,15 @@ import Testing
         history.exchanges.filter { $0.outcomeKind == "insertWouldSkip" }
     }
 
+    /// shadow 的賣點是「使用者看不出任何差別」，而 HUD notice 是唯一使用者會直接看到的行為改變
+    /// （`.notice` 會蓋掉聽寫中的 `.listening`，HUDWindowController 還會為它取消 hideTask）。
+    /// 因此斷言的對象必須是**整個 `.notice` case**，不是某一個字串——只比字串的話，
+    /// 之後有人在 `.different` 分支順手加一句新 notice、把 shadow 悄悄變成使用者可見的行為，
+    /// 這條測試不會叫。
+    private func emittedNoNotice(_ hud: FakeHUD) -> Bool {
+        !hud.states.contains { if case .notice = $0 { return true }; return false }
+    }
+
     /// 寬窗口（同 App 換欄位）：session 起在 A，兩句之間頁面 JS 把焦點跳到 B，第二句抵達。
     /// shadow 模式：記一筆診斷，**文字仍照常寫進 B**。
     @Test func focusMovedToAnotherFieldOfTheSameAppRecordsShadowEventAndStillAppends() {
@@ -35,7 +44,7 @@ import Testing
         #expect(env.text(in: "B") == "第二句", "shadow 不攔阻：第二句仍照常上屏")
         #expect(env.text(in: "A") == "第一句")
         #expect(!c.ledger.frozen, "shadow 不凍結")
-        #expect(!hud.states.contains(.notice("插入失敗")), "shadow 不發 notice")
+        #expect(emittedNoNotice(hud), "shadow 不發任何 notice")
         #expect(c.ledger.isActive, "shadow 不中止 session")
     }
 
@@ -45,7 +54,7 @@ import Testing
         env.addField("A", text: "", bundleID: "com.foo.app")
         env.addField("B", text: "", bundleID: "com.tinyspeck.slackmacgap")
         let history = FakeHistory()
-        let (c, _, _) = makeStatefulController(env: env, history: history)
+        let (c, _, hud) = makeStatefulController(env: env, history: history)
         c.hotkeyPressed(at: 10.0)
         c.handleTranscript(.finalized("第一句"), at: 10.5)
         env.focus("B")
@@ -53,6 +62,7 @@ import Testing
         #expect(shadowEvents(history).first?.outcomeText
                 == "fieldChanged：crossApp:com.foo.app→com.tinyspeck.slackmacgap")
         #expect(env.text(in: "B") == "第二句")
+        #expect(emittedNoNotice(hud), "跨 App 也一樣：shadow 不發任何 notice")
     }
 
     /// 焦點沒動：零診斷事件（誤判率的分母乾不乾淨全看這條）。
@@ -101,6 +111,25 @@ import Testing
         #expect(!c.ledger.isActive, "session 硬停")
         #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
         #expect(shadowEvents(history).isEmpty, "密碼欄位走 secure 分支，不記 shadow 診斷")
+    }
+
+    /// `fieldChangeDetail` 的保守歸類（reviewer M7 存活的那條）：兩邊 bundleID 都讀不到時
+    /// **必須歸入 crossApp**，不得因為「兩邊都是 nil、看起來相等」就寫成 sameApp——
+    /// 那會把「其實已經換 App」的樣本混進 sameApp 那組、低估風險。
+    /// 這條分支近乎不可達（要 identity 登記成功、bundleID 卻兩次都讀不到），但保守規則
+    /// 原本只活在註解裡；這裡把它升級成斷言。
+    @Test func unknownBundleIDsOnBothSidesAreClassifiedAsCrossApp() {
+        let reader = FakeFieldReader.sessionField(token: 1)   // 有 identity、frontAppBundleID 為 nil
+        let history = FakeHistory()
+        let (c, _, _, key, _, _) = makeController(fieldReader: reader, history: history)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("第一句"), at: 10.5)
+        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0,
+                                      fieldIdentity: FieldIdentity(token: 2))   // 換了欄位、仍讀不到 bundleID
+        c.handleTranscript(.finalized("第二句"), at: 11.0)
+        #expect(shadowEvents(history).first?.outcomeText == "fieldChanged：crossApp:?→?",
+                "分不出同 App 或跨 App 時保守歸入 crossApp")
+        #expect(key.ops.contains(.insert("第二句")), "shadow 仍不攔阻")
     }
 
     /// 閘門對 lease 不變式必須中性：整段 session 跑完（含焦點切換）registry 不得有殘留持有者。

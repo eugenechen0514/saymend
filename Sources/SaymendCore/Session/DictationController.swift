@@ -984,9 +984,6 @@ public final class DictationController {
         }
     }
 
-    /// 插入層事件補列（M7 §4）：kind 二分——insertFailed＝coordinator 拋錯（真 I/O 失敗）、
-    /// insertSkipped＝守衛拒絕（原文正確保留，非失敗）。與正常 outcome 列共用 gate 與 session，
-    /// 時序天然在 outcome 列之後（dispatch 先記、apply 後跑），回查時兩列相鄰。
     /// shadow 診斷的 detail（issue #37）。格式：
     /// - 同 App 內換欄位（Tab／maxlength 自動跳格／頁面 JS 搬焦點）：`sameApp:<bundleID>`
     /// - 跨 App（焦點被別的 App 搶走）：`crossApp:<session 起始 bundleID>→<現在的 bundleID>`
@@ -999,6 +996,11 @@ public final class DictationController {
         return "crossApp:\(capturedFrontAppBundleID ?? "?")→\(current ?? "?")"
     }
 
+    /// 插入層事件補列（M7 §4）：kind 三分——insertFailed＝coordinator 拋錯（真 I/O 失敗）、
+    /// insertSkipped＝守衛拒絕（原文正確保留，非失敗）、insertWouldSkip＝shadow 觀測
+    /// （issue #37；閘門「若開啟」會攔下這一句，但本階段未攔阻，文字照常上屏）。
+    /// 與正常 outcome 列共用 gate 與 session，時序天然在 outcome 列之後
+    /// （dispatch 先記、apply 後跑），回查時兩列相鄰。
     private func recordInsertEvent(kind: String, classification: String,
                                    utteranceText: String, detail: String? = nil) {
         guard settings.historyEnabled, let hid = historySessionID else { return }

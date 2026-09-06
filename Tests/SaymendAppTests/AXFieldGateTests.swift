@@ -9,22 +9,31 @@ import SaymendCore
 ///
 /// 這裡驗不到的：真正的密碼欄位 subrole（測試行程建不出 `AXSecureTextField` 元素），
 /// 以及「每句 AX IPC 從 4–5 降到 2」這個成本面事實——只能靠實機驗證。
+///
+/// **`readSubrole` 一律注入**（`notSecureRead`）：`fieldGate` 的 secure 判定走的是 issue #59 的三態
+/// `isSecureField`，逾時兩次就 fail closed 成 `.secure`。不注入的話，這些測試的結果會取決於
+/// 「那個 pid 的行程回不回應 AX」——launchd（pid 1）就不回應，`.different` 那條會變成 `.secure`。
+/// 本 suite 要驗的是 identity 比對，不是 AX 的回應性；secure 路徑另有專屬測試。
 @Suite struct AXFieldGateTests {
 
     private let me = ProcessInfo.processInfo.processIdentifier
+
+    /// 「問到了，這個元素沒有 subrole 屬性」——#59 的 `secureVerdict` 對此維持寬鬆（`.notSecure`），
+    /// 大量非 AX-rich 欄位本來就落在這裡。用它把 secure 判定固定成不擋，讓測試只驗 identity 比對。
+    private let notSecureRead: (AXUIElement) -> (AXError, String?) = { _ in (.attributeUnsupported, nil) }
 
     /// 讀不到焦點＝`.unknown`（維持 #21：呼叫端照常追加），不是 `.different`。
     @Test func noFocusedElementIsUnknown() {
         let r = AXFieldRegistry()
         let token = r.identity(for: AXUIElementCreateApplication(me))
-        let reader = AXFieldReader(registry: r, focusedElement: { nil })
+        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead, focusedElement: { nil })
         #expect(reader.fieldGate(sessionIdentity: token) == .unknown)
     }
 
     /// session 沒有 identity（無 AX 的 App）＝`.unknown`，即使現在讀得到焦點元素。
     @Test func nilSessionIdentityIsUnknown() {
         let r = AXFieldRegistry()
-        let reader = AXFieldReader(registry: r, focusedElement: { AXUIElementCreateApplication(self.me) })
+        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead, focusedElement: { AXUIElementCreateApplication(self.me) })
         #expect(reader.fieldGate(sessionIdentity: nil) == .unknown)
     }
 
@@ -32,7 +41,7 @@ import SaymendCore
     @Test func sameElementIsSame() {
         let r = AXFieldRegistry()
         let token = r.identity(for: AXUIElementCreateApplication(me))
-        let reader = AXFieldReader(registry: r, focusedElement: { AXUIElementCreateApplication(self.me) })
+        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead, focusedElement: { AXUIElementCreateApplication(self.me) })
         #expect(reader.fieldGate(sessionIdentity: token) == .same)
     }
 
@@ -40,7 +49,7 @@ import SaymendCore
     @Test func anotherElementIsDifferent() {
         let r = AXFieldRegistry()
         let token = r.identity(for: AXUIElementCreateApplication(me))
-        let reader = AXFieldReader(registry: r, focusedElement: { AXUIElementCreateApplication(1) })   // launchd
+        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead, focusedElement: { AXUIElementCreateApplication(1) })   // launchd
         guard case .different = reader.fieldGate(sessionIdentity: token) else {
             Issue.record("焦點已換到別的元素，閘門必須回 .different")
             return
@@ -51,7 +60,7 @@ import SaymendCore
     @Test func releasedTokenIsNoLongerTheSameField() {
         let r = AXFieldRegistry()
         let token = r.identity(for: AXUIElementCreateApplication(me))
-        let reader = AXFieldReader(registry: r, focusedElement: { AXUIElementCreateApplication(self.me) })
+        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead, focusedElement: { AXUIElementCreateApplication(self.me) })
         r.release(token)
         #expect(reader.fieldGate(sessionIdentity: token) != .same)
     }
@@ -61,7 +70,7 @@ import SaymendCore
     @Test func gateDoesNotAddAnyHolder() {
         let r = AXFieldRegistry()
         let token = r.identity(for: AXUIElementCreateApplication(me))
-        let reader = AXFieldReader(registry: r, focusedElement: { AXUIElementCreateApplication(self.me) })
+        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead, focusedElement: { AXUIElementCreateApplication(self.me) })
         #expect(reader.fieldGate(sessionIdentity: token) == .same)
         #expect(reader.fieldGate(sessionIdentity: token) == .same)
         #expect(r.entryCount == 1, "閘門不得替焦點元素登記新 entry")
