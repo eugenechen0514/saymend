@@ -1372,21 +1372,76 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(hud.states.contains(.notice("選取已變動，結果已入剪貼簿")))
 }
 
+/// #21 裁定 2／#45：選取即目標在替換當下無法用 AX 確認選取（熱鍵按下時讀得到、替換時讀不到＝焦點已跑）——
+/// 這是唯一無法用驗證救的刪字路徑。舊版用 OS「打字覆蓋選取」盲寫再凍結，可能把字打進錯的地方；
+/// 改為不對欄位發任何事件、內容進剪貼簿（#42 起不會被 paste 還原洗掉）、提示、封存。
 @MainActor
-@Test func selectionWithoutAXTypesOverAndFreezes() async {
+@Test func selectionWithoutAXRescuesToClipboardWithoutTouchingTheField() async {
     let intent = GatedIntentService()
     intent.outcome = .newContent("替換文。")
     let reader = FakeFieldReader()
     reader.context = selectionField("舊字", location: 0)
-    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: nil, fieldReader: reader)
+    let paste = RecordingInserter()
+    let clip = ClipboardSpy()
+    let history = FakeHistory()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, pasteInserter: paste, rangeReplacer: nil,
+                                               clipboard: clip, fieldReader: reader, history: history)
     c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("替換文"), at: 11.0)
     c.tick(at: 12.6)
     await c.lastIntentTask?.value
-    #expect(key.ops == [.insert("替換文。")])       // 打字蓋選取（系統原生行為）
-    #expect(c.ledger.frozen)                       // 立即凍結：無 AX 不可續改（M3 設計裁決 3）
-    #expect(c.ledger.sessionText == "替換文。")
-    #expect(hud.states.contains(.notice("已取代選取（此 App 不支援後續語音修正）")))
+    #expect(key.ops.isEmpty && paste.ops.isEmpty, "不得對欄位發任何事件；實際 key=\(key.ops) paste=\(paste.ops)")
+    #expect(clip.texts == ["替換文。"])
+    #expect(!c.ledger.isActive, "什麼都沒寫進欄位，session 沒有存在的理由")
+    #expect(hud.states.contains(.notice("無法替換選取，內容已入剪貼簿")))
+    let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+    #expect(skipped.contains { $0.outcomeText == "unsupported" })
+}
+
+/// 同一件事從欄位實況看：選取原文一字不動、沒有任何 AX 寫入。
+@MainActor
+@Test func selectionWithoutAXLeavesTheSelectedTextInPlace() async {
+    let env = StatefulFieldEnvironment()
+    env.axCapable = false
+    env.addField("f", text: "前文舊字後文")
+    env.select(in: "f", location: 2, length: 2)                  // 「舊字」
+    let intent = GatedIntentService()
+    intent.outcome = .newContent("新字")
+    let clip = ClipboardSpy()
+    let (c, _, hud) = makeStatefulController(env: env, polisher: intent, clipboard: clip)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改成新字"), at: 11.0)
+    c.tick(at: 12.6)
+    await c.lastIntentTask?.value
+    #expect(env.text(in: "f") == "前文舊字後文", "舊版會用打字蓋選取寫成「前文新字後文」；實際 \(env.text(in: "f"))")
+    #expect(env.axWrites.isEmpty)
+    #expect(clip.texts == ["新字"])
+    #expect(hud.states.contains(.notice("無法替換選取，內容已入剪貼簿")))
+}
+
+/// 同世代第二句的緩衝 outcome：第一句已把內容救進剪貼簿並封存，第二句回來時不得再救一次——
+/// 剪貼簿只有一格，再救等於把使用者剛被告知「已入剪貼簿」的那份蓋掉（與 selectionChanged 同規則：只救一份）。
+@MainActor
+@Test func selectionWithoutAXRescuesOnlyTheFirstBufferedOutcome() async {
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["第二句"]                    // 只卡第二句：首句立即回
+    intent.outcomeByRaw = ["改成新字": .newContent("新字"), "第二句": .newContent("補充內容。")]
+    let reader = FakeFieldReader()
+    reader.context = selectionField("舊字", location: 0)
+    let spy = ClipboardSpy()
+    let (c, _, _, key, _, _) = makeController(polisher: intent, rangeReplacer: nil, clipboard: spy, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改成新字"), at: 11.0)
+    c.tick(at: 12.6)                                // 首句：緩衝＋建 task
+    let first = c.lastIntentTask
+    c.handleTranscript(.finalized("第二句"), at: 13.0)
+    c.tick(at: 14.6)                                // 第二句：仍 .selectionPending → 緩衝（wasBuffered）
+    await first?.value                              // 首句：.unsupported → 救援＋封存
+    #expect(spy.texts == ["新字"] && !c.ledger.isActive)
+    intent.release()                                // 第二句此刻才回來：session 已封存、本世代已救過一份
+    await c.lastIntentTask?.value
+    #expect(spy.texts == ["新字"], "第二句不得再救一次蓋掉第一份；實際 \(spy.texts)")
+    #expect(key.ops.isEmpty)
 }
 
 @MainActor
@@ -1948,29 +2003,6 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
     #expect(skipped.contains { $0.outcomeText == "selectionChanged" })
-}
-
-@MainActor
-@Test func detachedInsertFailureRecordsInsertFailed() async {
-    let intent = GatedIntentService()
-    intent.outcome = .editedSession("正式問候語")
-    let history = FakeHistory()
-    let clip = ClipboardSpy()
-    let reader = FakeFieldReader()
-    reader.context = selectionField("既有選取", location: 0)
-    let paste = RecordingInserter()
-    // rangeReplacer 為 nil → .unsupported → insertDetached；讓兩個 inserter 都失敗
-    let (c, _, _, key, _, _) = makeController(polisher: intent, pasteInserter: paste, rangeReplacer: nil,
-                                              clipboard: clip, fieldReader: reader, history: history)
-    c.hotkeyPressed(at: 10.0)
-    c.hotkeyReleased(at: 10.1)
-    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
-    key.failInsertsRemaining = 2
-    paste.failInsertsRemaining = 2
-    c.tick(at: 12.6)
-    await c.lastIntentTask?.value
-    let failed = history.exchanges.filter { $0.outcomeKind == "insertFailed" }
-    #expect(failed.contains { $0.outcomeText?.hasPrefix("detachedInsertFailed") == true })
 }
 
 @MainActor
