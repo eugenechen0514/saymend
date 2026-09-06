@@ -838,9 +838,9 @@ public final class DictationController {
         }
     }
 
-    /// 一次性替換選取範圍。三種結局（M3 設計裁決 3）：
+    /// 一次性替換選取範圍。三種結局（M3 設計裁決 3，#21 裁定 2 改第三種）：
     /// replaced＝轉常規 session；selectionChanged＝放棄、結果入剪貼簿、封存；
-    /// unsupported＝打字蓋選取＋立即凍結（無 AX 不可續改）。
+    /// unsupported＝無法用 AX 確認選取，同樣不動欄位、結果入剪貼簿、封存（#45）。
     private func applySelectionReplacement(_ text: String, range: FieldContext.SelectedRange, original: String) {
         guard !ledger.frozen else {                 // 聽寫中手動活動已凍結：選取完整性不明，放棄
             recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: text)
@@ -863,22 +863,16 @@ public final class DictationController {
             archiveSession()
             hud.present(.notice("選取已變動，結果已入剪貼簿"))
         case .unsupported:
-            do {
-                try coordinator.insertDetached(text)
-                ledger.commit(text)
-                emitFeedback(oldText: original)       // 高亮先發（此刻仍 active），再凍結
-                ledger.freeze()
-                feedback?.sessionFrozen()             // 立即凍結：無 AX 不可續改
-                sessionTarget = .tail
-                hud.present(.notice("已取代選取（此 App 不支援後續語音修正）"))
-            } catch {
-                recordInsertEvent(kind: "insertFailed", classification: "detachedInsertFailed",
-                                  utteranceText: text, detail: "\(error)")
-                lastRescueGeneration = ledger.generation
-                clipboardRescue?(text)
-                archiveSession()
-                hud.present(.notice("無法替換，結果已入剪貼簿"))
-            }
+            // #21 裁定 2／#45：這是 destructive 清單裡唯一無法用驗證救的刪字路徑——它的觸發條件正是
+            // 「熱鍵按下時讀得到選取，替換當下卻讀不到」＝焦點已跑。舊版改用 OS「打字覆蓋選取」盲寫再凍結，
+            // 等於相信一個已經對不上的焦點，可能把字打進錯的欄位、蓋掉錯的選取。
+            // 與其他所有刪字操作同一條規則：缺 verified AX 就不動欄位、只提示；內容進剪貼簿
+            // （#42 起救援不會被 paste 的延遲還原洗掉）。代價：無 AX 範圍能力的 App 不支援選取即目標。
+            recordInsertEvent(kind: "insertSkipped", classification: "unsupported", utteranceText: text)
+            lastRescueGeneration = ledger.generation
+            clipboardRescue?(text)
+            archiveSession()
+            hud.present(.notice("無法替換選取，內容已入剪貼簿"))
         }
     }
 
