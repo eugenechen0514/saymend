@@ -215,9 +215,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             hud: hud,
             settings: settings,
             clipboardRescue: { text in
-                // 鐵律最後手段：原文進剪貼簿
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
+                // 鐵律最後手段：原文進剪貼簿。走 ClipboardChannel（issue #42）：撞上在途 paste 先等它收尾，
+                // 落地後 paste 的還原不會再把它洗掉。
+                ClipboardChannel.general.rescue(text)
             },
             fieldReader: axReader,
             feedback: feedbackCoordinator,
