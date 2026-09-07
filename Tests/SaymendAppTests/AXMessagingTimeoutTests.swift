@@ -14,7 +14,23 @@ import Testing
     /// 走真正的 `AXUIElementSetMessagingTimeout` 與真正的 system-wide element、用出貨的預設值。
     /// 回 `.success` 才代表我們送出的是合法參數（header：timeout 必須為正數、element 必須有效）。
     /// 設 timeout 是行程內的本機設定，不需要輔助使用權限，所以在測試行程裡也會成功。
+    ///
+    /// **這是唯一會真的動到測試行程全域狀態的測試**：對 system-wide element 設 timeout
+    /// 會套用到本行程之後送出的所有 AX 訊息，也就是同一個 process 裡後面跑的每一條測試
+    /// （AXFieldGateTests／AXTimeoutSemanticsTests 都會對真元素發 AX 訊息）。故必須還原。
+    ///
+    /// 還原方式的依據是 `AXUIElement.h` 對 `AXUIElementSetMessagingTimeout` 的說明：
+    /// 「Setting `timeoutInSeconds` to 0 for the system-wide accessibility object resets the
+    ///  global timeout to its default value」——**沒有 getter**，拿不到原值，官方指定的重置手段就是傳 0。
+    /// （同一段 header 又說 illegal argument「timeout values must be positive」，兩句話看似衝突；
+    ///  實測對 system-wide element 傳 0 回 `.success`，即下面 defer 裡那條斷言。）
+    /// 這裡直接呼叫 C API 而不走 `AXMessagingTimeout.applyGlobally`：後者刻意把 0 擋在門外
+    /// （production 不該把全域 timeout 重置掉），重置是測試專用的收尾動作。
     @Test func productionDefaultsAreAcceptedByTheRealAXAPI() {
+        defer {
+            #expect(AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0) == .success,
+                    "傳 0 給 system-wide element ＝ 重置回系統預設，必須成功，否則後續測試整批吃 0.2s timeout")
+        }
         #expect(AXMessagingTimeout.applyGlobally() == .success)
     }
 

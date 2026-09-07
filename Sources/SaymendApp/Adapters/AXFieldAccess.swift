@@ -180,6 +180,8 @@ final class AXFieldRegistry {
     func matches(_ identity: FieldIdentity, element: AXUIElement) -> Bool { registry.matches(identity, element: element) }
     func element(for identity: FieldIdentity) -> AXUIElement? { registry.element(for: identity) }
     func release(_ identity: FieldIdentity?) { registry.release(identity) }
+    /// 仍有持有者的 entry 數。用來釘住「閘門不得替焦點元素多留持有者」這條 lease 不變式（issue #43／#37）。
+    var entryCount: Int { registry.count }
 }
 
 /// 聚焦欄位快照：secure 偵測＋游標錨位（UTF-16）＋元素 identity token
@@ -189,16 +191,25 @@ final class AXFieldReader: FieldContextProviding {
     private let clipboardFallback = ClipboardSelectionReader()
     /// subrole 讀取可注入只為了讓 secure 三態判定（含逾時重試）有單元測試；production 用預設值。
     private let readSubrole: (AXUIElement) -> (AXError, String?)
+    /// `focusedElement` 可注入只為了讓 `fieldGate` 這道閘門有單元測試（比照 AXInserter）；production 用預設值。
+    private let focusedElement: () -> AXUIElement?
+    /// 前景 App bundleID 可注入只為了讓 `.different` 帶出去的那一格能用**具體值**斷言；production 用預設值。
+    /// 那一格是 shadow 診斷判讀「同 App 換欄位」還是「跨 App」的唯一依據，不給 seam 就只驗得到 case。
+    private let frontmostBundleID: () -> String?
 
     init(profiles: (any AppProfileStore)? = nil, registry: AXFieldRegistry,
-         readSubrole: @escaping (AXUIElement) -> (AXError, String?) = AXFieldAccess.readSubrole) {
+         readSubrole: @escaping (AXUIElement) -> (AXError, String?) = AXFieldAccess.readSubrole,
+         focusedElement: @escaping () -> AXUIElement? = { AXFieldAccess.focusedElement() },
+         frontmostBundleID: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }) {
         self.profiles = profiles
         self.registry = registry
         self.readSubrole = readSubrole
+        self.focusedElement = focusedElement
+        self.frontmostBundleID = frontmostBundleID
     }
 
     func snapshot() -> FieldContext {
-        guard let element = AXFieldAccess.focusedElement() else { return FieldContext() }
+        guard let element = focusedElement() else { return FieldContext() }
         return snapshot(of: element)
     }
 
@@ -207,7 +218,9 @@ final class AXFieldReader: FieldContextProviding {
     /// 密碼欄位不登記：controller 對它不會 begin，登記了就沒人歸還。
     func snapshot(of element: AXUIElement) -> FieldContext {
         var context = FieldContext(hasFocusedElement: true)
-        if isSecureField(element) {
+        // `FieldContext` 只有布林 isSecure：這條路徑照舊把 `.secure` 與 `.unknown` 收斂成 true
+        // （行為與 issue #59 逐字相同，本次不動）。要分辨兩者的是 `fieldGate`。
+        if secureVerdict(of: element) != .notSecure {
             context.isSecure = true
             return context
         }
@@ -249,22 +262,46 @@ final class AXFieldReader: FieldContextProviding {
         return context
     }
 
-    /// §5.3 密碼欄位閘門：三態判定 ＋ 逾時重試一次。
-    /// 回 true 代表「是密碼欄」**或**「問不出來」——兩者都必須擋。逾時重試一次是 header 對
-    /// `cannotComplete` 的建議做法（"your assistive application can try to call this function again"）；
-    /// 重試仍是 unknown 就 fail closed：寧可少一次聽寫，不可在密碼欄裡開 session。
-    private func isSecureField(_ element: AXUIElement) -> Bool {
+    /// §5.3 密碼欄位閘門：三態判定 ＋ 逾時重試一次，**verdict 原樣交出去**。
+    /// `.secure` 與 `.unknown` 都必須擋，但呼叫端要分得出是哪一種（issue #37 的診斷需求），
+    /// 所以這裡不收斂成布林——想擋的人自己判 `!= .notSecure`。
+    /// 逾時重試一次是 header 對 `cannotComplete` 的建議做法（"your assistive application can
+    /// try to call this function again"）；重試仍是 unknown 就 fail closed：
+    /// 寧可少一次聽寫，不可在密碼欄裡開 session。
+    private func secureVerdict(of element: AXUIElement) -> AXFieldAccess.SecureVerdict {
         let first = readSubrole(element)
-        var verdict = AXFieldAccess.secureVerdict(error: first.0, subrole: first.1)
-        if verdict == .unknown {
-            let retry = readSubrole(element)
-            verdict = AXFieldAccess.secureVerdict(error: retry.0, subrole: retry.1)
-        }
-        return verdict != .notSecure
+        let verdict = AXFieldAccess.secureVerdict(error: first.0, subrole: first.1)
+        guard verdict == .unknown else { return verdict }
+        let retry = readSubrole(element)
+        return AXFieldAccess.secureVerdict(error: retry.0, subrole: retry.1)
     }
 
     func releaseFieldIdentity(_ identity: FieldIdentity?) {
         registry.release(identity)
+    }
+
+    /// 輕量焦點閘門（issue #37）：只讀「焦點元素」＋「subrole」兩次 AX 屬性，取代原本每句一次的完整
+    /// `snapshot(of:)`（subrole／selectedTextRange／selectedText／整份 kAXValue，4–5 次跨行程 IPC，
+    /// 而且在有選取＋白名單 App 時還會對目前焦點發一個合成 Cmd+C）。
+    ///
+    /// **只用 `registry.matches`，絕不呼叫 `identity(for:)`**：後者會多發一個持有者，
+    /// 破壞 #43 的 lease 不變式（session 起始那個 token 就再也死不掉）。
+    /// 密碼欄位一樣不登記 identity，比照 `snapshot(of:)` 的既有紀律。
+    ///
+    /// secure 判定與 `snapshot(of:)` **共用同一個 `secureVerdict(of:)`**（issue #59 的三態＋逾時重試一次＋
+    /// 仍問不出來就 fail closed）。兩處各寫一份的話會漂移，而漂移的後果是「開始聽寫時擋得住、
+    /// 聽寫途中切進去擋不住」——規格 §5.3 破在中途路徑上。
+    func fieldGate(sessionIdentity: FieldIdentity?) -> FieldGate {
+        guard let element = focusedElement() else { return .unknown }
+        switch secureVerdict(of: element) {
+        case .secure: return .secure
+        case .unknown: return .secureUnknown   // 一樣擋，但事後分得出這是「不知道」
+        case .notSecure: break
+        }
+        guard let sessionIdentity else { return .unknown }
+        return registry.matches(sessionIdentity, element: element)
+            ? .same
+            : .different(currentAppBundleID: frontmostBundleID())
     }
 }
 
