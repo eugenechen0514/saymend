@@ -532,9 +532,14 @@ import Testing
     // MARK: - 16. 回饋底線：早退不呼叫 emitFeedback 的實測結果
 
     /// `keepRawWithoutVersion` 同步帳本之後會 `emitFeedback()`，本早退分支沒有。
-    /// 但 `emitFeedback()` 算的是 `ledger.sessionText + coordinator.currentUtteranceText`，
-    /// 而同步只是把同一段字從 utterance 側搬到 ledger 側——**和不變**。
-    /// 這條測試釘住這個等價關係：底線在同步前後都是同一串，補不補 `emitFeedback()` 都看不出差別。
+    /// `emitFeedback()` 算的是 `ledger.sessionText + coordinator.currentUtteranceText`，而同步只是把
+    /// 同一段字從 utterance 側搬到 ledger 側——**在「N 的 dispatch 跑完之後才上屏 N+1」這個順序下和不變**，
+    /// 補不補 `emitFeedback()` 都看不出差別。本測試釘住的就是這個順序下的等價關係。
+    ///
+    /// **交錯順序下不成立**（驗收者實測）：若 N 的 LLM 還在途、N+1 先上屏，N+1 的 `emitFeedback()`
+    /// 用的是同步前的 `ledger.sessionText`，底線會暫時短一截，要等下一次 `emitFeedback()` 才補上。
+    /// 這是既有行為、非本次修正引入（修正前那個片段**永遠**回不到底線上），已列為 residual limit；
+    /// 本 PR 不在早退補 `emitFeedback()`（超出驗收者指定的範圍）。
     @Test func theFeedbackUnderlineIsUnchangedByTheLedgerSyncOfAPartialSkip() async {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
@@ -560,6 +565,77 @@ import Testing
         // 下一句照常上屏：底線從「片段一」延伸，證明帳本／鏡像兩側加總後仍是正確的基準。
         c.handleTranscript(.finalized("第三句"), at: 13.0)
         #expect(lastFeedbackText(feedback) == "片段一第三句", "底線接得上，不會少一截")
+    }
+
+    // MARK: - 17. 世代守衛的 isActive 那一半：封存後、還沒開新 session
+
+    /// `SessionLedger.archive()` **不重設 `generation`**（只把 `isActive` 設 false），所以
+    /// 「A 封存了、但還沒開新 session」這個窗口裡 `generation` 仍然相符——只有 `isActive`
+    /// 擋得住。上一條（測試 15）釘的是 `generation` 那一半，這條釘 `isActive` 那一半。
+    ///
+    /// 揭露：這條路徑寫進的是已封存的帳本，`begin()` 會把 `sessionText` 重設成 `initialText`，
+    /// 且 `emitFeedback()`／`archiveSession()` 都不在 `isActive == false` 時讀它——
+    /// 因此**目前沒有下游可觀察後果**，這條是防禦性不變式，不是 bug 重現。
+    @Test func aStaleSkippedOutcomeMustNotWriteIntoAnArchivedLedger() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let polisher = GatedIntentService()
+        polisher.gatedRaws = ["片段一片段二"]
+        polisher.outcome = .newContent("不該落地。")
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher, clipboard: ClipboardSpy())
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("片段一"), at: 10.5)
+        env.focus("B")
+        c.handleTranscript(.finalized("片段二"), at: 10.8)          // 部分跳過
+        env.focus("A")
+        c.tick(at: 12.4)                                           // 話語閉合，LLM 卡在 gate
+        c.escapePressed()                                          // 封存；**不開新 session**
+        #expect(!c.ledger.isActive, "前提：帳本已封存")
+
+        polisher.release()                                         // 遲到的 outcome 這時才回來
+        await c.lastIntentTask?.value
+
+        #expect(c.ledger.sessionText.isEmpty,
+                "已封存的帳本不得被遲到的片段寫回；實際：\(c.ledger.sessionText)")
+    }
+
+    // MARK: - 18. 頭號動機的直接釘子：.editedSession 的改寫基準
+
+    /// 本次修正最嚴重的後果是「下一句 `.editedSession` 拿偏小的 `ledger.sessionText` 當基準」。
+    /// 前面幾條是間接釘子（帳本值、History），這條直接斷言送進 LLM 的 `context.targetText`。
+    ///
+    /// 修正前這個基準會是「首句。」（少掉片段一），而 `replaceSession` 的 AX 驗證用的是**正確的**
+    /// `displayedText`、照樣通過——片段一就被以錯誤基準算出來的整段文字靜默吃掉。
+    @Test func theEditCommandBasisIncludesTheLandedFragmentOfAPartialSkip() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let polisher = GatedIntentService()
+        polisher.outcomeByRaw = ["首句": .newContent("首句。"),
+                                 "片段一片段二": .newContent("片段一片段二。"),
+                                 "改一下": .editedSession("首句片段一改。")]
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher, clipboard: ClipboardSpy())
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("首句"), at: 10.5)
+        c.tick(at: 12.1)
+        await c.lastIntentTask?.value
+
+        c.handleTranscript(.finalized("片段一"), at: 13.0)          // 落地
+        env.focus("B")
+        c.handleTranscript(.finalized("片段二"), at: 13.3)          // 被閘門攔下
+        env.focus("A")
+        c.tick(at: 14.9)
+        await c.lastIntentTask?.value
+        #expect(env.text(in: "A") == "首句。片段一", "前提：欄位上是首句加落地的片段")
+
+        c.handleTranscript(.finalized("改一下"), at: 15.5)          // 指令話語
+        c.tick(at: 17.1)
+        await c.lastIntentTask?.value
+
+        let editCall = polisher.calls.last { $0.raw == "改一下" }
+        #expect(editCall?.context.targetText == "首句。片段一",
+                "改寫基準必須含落地的片段；實際：\(editCall?.context.targetText ?? "nil")")
     }
 
     /// `.unknown` 與 `.same` 一律照常寫（#21 釘子的 coordinator 單元版）。
