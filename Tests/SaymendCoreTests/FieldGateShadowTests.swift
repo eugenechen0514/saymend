@@ -14,6 +14,11 @@ import Testing
         history.exchanges.filter { $0.outcomeKind == "insertWouldSkip" }
     }
 
+    /// 「AX 問不出 subrole，於是 fail closed 當密碼欄擋下」的診斷列（issue #37）。
+    private func secureUnknownEvents(_ history: FakeHistory) -> [HistoryExchangeRecord] {
+        history.exchanges.filter { $0.outcomeKind == "insertSkipped" && $0.outcomeText == "secureUnknown" }
+    }
+
     /// shadow 的賣點是「使用者看不出任何差別」，而 HUD notice 是唯一使用者會直接看到的行為改變
     /// （`.notice` 會蓋掉聽寫中的 `.listening`，HUDWindowController 還會為它取消 hideTask）。
     /// 因此斷言的對象必須是**整個 `.notice` case**，不是某一個字串——只比字串的話，
@@ -111,6 +116,60 @@ import Testing
         #expect(!c.ledger.isActive, "session 硬停")
         #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
         #expect(shadowEvents(history).isEmpty, "密碼欄位走 secure 分支，不記 shadow 診斷")
+        #expect(secureUnknownEvents(history).isEmpty,
+                "AX 明確回答了，不得被記成 secureUnknown——那會污染「AX 沒回應」這組樣本的分子")
+    }
+
+    // MARK: - secureUnknown：fail closed 擋下，但要留下「這是不知道，不是知道」的證據
+
+    /// AX 連續問不出 subrole（#59 fail closed）→ 一樣硬停整個 session（§5.3 一個字都不能進），
+    /// 但**必須留下一筆 `insertSkipped`／`secureUnknown` 診斷**。
+    /// 沒有這筆，「真的密碼欄」與「AX 沒回應被當密碼欄」在事後資料裡長得一模一樣，
+    /// 0.2s timeout 到底誤殺了多少就永遠量不出來。
+    @Test func subroleUnknownMidSessionAbortsAndRecordsDiagnostic() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("U", text: "", subroleUnknown: true, bundleID: "com.slow.app")
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, history: history)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("正常內容"), at: 10.5)
+        env.focus("U")
+        c.handleTranscript(.finalized("這段不可上屏"), at: 11.0)
+        // 行為面：與 .secure 逐字相同——不上屏、硬停、發同一則 notice
+        #expect(env.text(in: "U") == "", "問不出來就當密碼欄：一個字都不能進")
+        #expect(env.text(in: "A") == "正常內容")
+        #expect(!c.ledger.isActive, "session 硬停")
+        #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
+        // 診斷面：分得出來這是「不知道」
+        let events = secureUnknownEvents(history)
+        #expect(events.count == 1)
+        #expect(events.first?.utteranceRaw == "這段不可上屏")
+        #expect(events.first?.outcomeText == "secureUnknown")
+        #expect(shadowEvents(history).isEmpty, "secureUnknown 不是 fieldChanged")
+    }
+
+    /// **順序**：`recordInsertEvent` 必須排在 `abortForSecureField()` **之前**。
+    /// `abortForSecureField` 會 `archiveSession()`，而 archive 把 `historySessionID` 清成 nil，
+    /// `recordInsertEvent` 沒有 hid 就整筆靜默丟掉——順序一對調，最需要的那筆樣本恰好記不到。
+    /// 這條測試同時釘住「session 真的被封存了」，否則「先記」可以靠「不 abort」來滿足。
+    @Test func secureUnknownDiagnosticIsRecordedBeforeTheSessionIsArchived() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("U", text: "", subroleUnknown: true, bundleID: "com.slow.app")
+        let history = FakeHistory()
+        let (c, _, _) = makeStatefulController(env: env, history: history)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("正常內容"), at: 10.5)
+        env.focus("U")
+        c.handleTranscript(.finalized("這段不可上屏"), at: 11.0)
+        #expect(secureUnknownEvents(history).count == 1,
+                "archive 先跑的話 historySessionID 已是 nil，這筆診斷會被靜默丟掉")
+        // 這筆診斷掛在**這個 session** 上——archive 先跑的話 hid 已是 nil，連掛都掛不上去
+        #expect(history.sessions.count == 1)
+        #expect(secureUnknownEvents(history).first?.sessionID == history.sessions.first?.id)
+        #expect(history.finished.count == 1, "session 仍必須被封存（先記診斷不等於不 abort）")
+        #expect(history.finished.first?.id == history.sessions.first?.id)
     }
 
     /// `fieldChangeDetail` 的保守歸類（reviewer M7 存活的那條）：兩邊 bundleID 都讀不到時

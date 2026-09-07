@@ -213,7 +213,9 @@ final class AXFieldReader: FieldContextProviding {
     /// 密碼欄位不登記：controller 對它不會 begin，登記了就沒人歸還。
     func snapshot(of element: AXUIElement) -> FieldContext {
         var context = FieldContext(hasFocusedElement: true)
-        if isSecureField(element) {
+        // `FieldContext` 只有布林 isSecure：這條路徑照舊把 `.secure` 與 `.unknown` 收斂成 true
+        // （行為與 issue #59 逐字相同，本次不動）。要分辨兩者的是 `fieldGate`。
+        if secureVerdict(of: element) != .notSecure {
             context.isSecure = true
             return context
         }
@@ -255,18 +257,18 @@ final class AXFieldReader: FieldContextProviding {
         return context
     }
 
-    /// §5.3 密碼欄位閘門：三態判定 ＋ 逾時重試一次。
-    /// 回 true 代表「是密碼欄」**或**「問不出來」——兩者都必須擋。逾時重試一次是 header 對
-    /// `cannotComplete` 的建議做法（"your assistive application can try to call this function again"）；
-    /// 重試仍是 unknown 就 fail closed：寧可少一次聽寫，不可在密碼欄裡開 session。
-    private func isSecureField(_ element: AXUIElement) -> Bool {
+    /// §5.3 密碼欄位閘門：三態判定 ＋ 逾時重試一次，**verdict 原樣交出去**。
+    /// `.secure` 與 `.unknown` 都必須擋，但呼叫端要分得出是哪一種（issue #37 的診斷需求），
+    /// 所以這裡不收斂成布林——想擋的人自己判 `!= .notSecure`。
+    /// 逾時重試一次是 header 對 `cannotComplete` 的建議做法（"your assistive application can
+    /// try to call this function again"）；重試仍是 unknown 就 fail closed：
+    /// 寧可少一次聽寫，不可在密碼欄裡開 session。
+    private func secureVerdict(of element: AXUIElement) -> AXFieldAccess.SecureVerdict {
         let first = readSubrole(element)
-        var verdict = AXFieldAccess.secureVerdict(error: first.0, subrole: first.1)
-        if verdict == .unknown {
-            let retry = readSubrole(element)
-            verdict = AXFieldAccess.secureVerdict(error: retry.0, subrole: retry.1)
-        }
-        return verdict != .notSecure
+        let verdict = AXFieldAccess.secureVerdict(error: first.0, subrole: first.1)
+        guard verdict == .unknown else { return verdict }
+        let retry = readSubrole(element)
+        return AXFieldAccess.secureVerdict(error: retry.0, subrole: retry.1)
     }
 
     func releaseFieldIdentity(_ identity: FieldIdentity?) {
@@ -281,12 +283,16 @@ final class AXFieldReader: FieldContextProviding {
     /// 破壞 #43 的 lease 不變式（session 起始那個 token 就再也死不掉）。
     /// 密碼欄位一樣不登記 identity，比照 `snapshot(of:)` 的既有紀律。
     ///
-    /// secure 判定與 `snapshot(of:)` **共用同一個 `isSecureField`**（issue #59 的三態＋逾時重試一次＋
+    /// secure 判定與 `snapshot(of:)` **共用同一個 `secureVerdict(of:)`**（issue #59 的三態＋逾時重試一次＋
     /// 仍問不出來就 fail closed）。兩處各寫一份的話會漂移，而漂移的後果是「開始聽寫時擋得住、
     /// 聽寫途中切進去擋不住」——規格 §5.3 破在中途路徑上。
     func fieldGate(sessionIdentity: FieldIdentity?) -> FieldGate {
         guard let element = focusedElement() else { return .unknown }
-        if isSecureField(element) { return .secure }
+        switch secureVerdict(of: element) {
+        case .secure: return .secure
+        case .unknown: return .secureUnknown   // 一樣擋，但事後分得出這是「不知道」
+        case .notSecure: break
+        }
         guard let sessionIdentity else { return .unknown }
         return registry.matches(sessionIdentity, element: element)
             ? .same

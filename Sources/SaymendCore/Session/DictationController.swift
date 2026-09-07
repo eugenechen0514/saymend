@@ -333,6 +333,15 @@ public final class DictationController {
             case .secure:
                 abortForSecureField()
                 return
+            case .secureUnknown:
+                // AX 連續兩次問不出 subrole：依 #59 fail closed，行為與 `.secure` 逐字相同（§5.3 一個字都不能進）。
+                // 但要留下證據說明這是「不知道」——否則真的密碼欄與 AX 沒回應在事後資料裡長得一樣，
+                // 0.2s timeout 誤殺了多少就量不出來。
+                // **必須先記再 abort**：`abortForSecureField()` 會 `archiveSession()`，
+                // 而 archive 把 `historySessionID` 清成 nil，`recordInsertEvent` 沒有 hid 會整筆靜默丟掉。
+                recordInsertEvent(kind: "insertSkipped", classification: "secureUnknown", utteranceText: text)
+                abortForSecureField()
+                return
             case .different(let currentAppBundleID):
                 // shadow 模式（issue #37）：只記一筆診斷，然後照常往下走——不攔、不凍、不救剪貼簿、不發 notice。
                 // 先蒐集真實世界的誤判率（尤其 Electron 家族 CFEqual 的穩定性），那是後續要不要真的開閘的唯一關卡。

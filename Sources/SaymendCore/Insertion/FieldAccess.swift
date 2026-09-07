@@ -138,8 +138,14 @@ public enum FieldGate: Equatable, Sendable {
     case same
     /// AX 明確：焦點已換到別的 element（附現在的前景 App bundleID，供診斷判讀同 App 或跨 App）
     case different(currentAppBundleID: String?)
-    /// 目前焦點是密碼欄位
+    /// AX 明確回答：目前焦點就是密碼欄位
     case secure
+    /// AX 連續兩次問不出 subrole（逾時），依 #59 fail closed 當密碼欄擋下——
+    /// **但這是「不知道」不是「知道」**。行為與 `.secure` 相同，分開只為了讓事後資料
+    /// 分得出「真的密碼欄」與「AX 沒回應被誤殺」：後者若在真實世界很頻繁，
+    /// 代表 0.2s 的 AX 訊息 timeout 太短、或某些 App 天生慢，是要調整的訊號。
+    /// 兩者混成同一個值就永遠量不出這件事。
+    case secureUnknown
     /// 讀不到焦點／沒有 identity 可比 → 維持 #21，照常追加
     case unknown
 }
@@ -168,6 +174,9 @@ public extension FieldContextProviding {
         // 讓「每個非 nil token 恰歸還一次」在測試裡乾淨可驗。
         if let current = context.fieldIdentity { releaseFieldIdentity(current) }
         // secure 必須排在 identity 之前：密碼欄位不登記 identity，兩邊都沒有 token 可比。
+        // 這裡**給不出 `.secureUnknown`**：`FieldContext.isSecure` 是個布林，snapshot 早已把
+        // 「AX 明確說是密碼欄」與「問不出來所以 fail closed」收斂成同一個 true，verdict 已經丟失。
+        // 要分辨得由有能力做輕量查詢的 reader（App 端 AXFieldReader）覆寫本方法自行回報。
         if context.isSecure { return .secure }
         guard let sessionIdentity, let current = context.fieldIdentity else { return .unknown }
         return current == sessionIdentity ? .same : .different(currentAppBundleID: context.frontAppBundleID)

@@ -142,6 +142,9 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
         var text: String
         var caretUTF16: Int
         var isSecure: Bool
+        /// AX 問不出 subrole（連續逾時）：依 #59 fail closed 當密碼欄擋下，但這是「不知道」不是「知道」。
+        /// 與 `isSecure` 分開才量得出「真的密碼欄」與「AX 沒回應」各佔多少（issue #37）。
+        var subroleUnknown: Bool
         var selectedRange: FieldContext.SelectedRange?
         /// 這個欄位所屬 App 的 bundleID（issue #37 shadow 診斷要判讀「同 App 換欄位」還是「跨 App」）
         var bundleID: String?
@@ -152,9 +155,9 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
     private(set) var axWrites: [(field: String, location: Int, expected: String, new: String)] = []
 
     func addField(_ id: String, text: String, caretUTF16: Int? = nil, isSecure: Bool = false,
-                  bundleID: String? = nil) {
+                  subroleUnknown: Bool = false, bundleID: String? = nil) {
         fields[id] = State(text: text, caretUTF16: caretUTF16 ?? text.utf16.count, isSecure: isSecure,
-                           selectedRange: nil, bundleID: bundleID)
+                           subroleUnknown: subroleUnknown, selectedRange: nil, bundleID: bundleID)
         if focusedID == nil { focusedID = id }
     }
     func focus(_ id: String) { precondition(fields[id] != nil); focusedID = id }
@@ -170,7 +173,9 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
     // MARK: FieldContextProviding
     func snapshot() -> FieldContext {
         guard let focusedID, let state = fields[focusedID] else { return FieldContext() }
-        if state.isSecure { return FieldContext(hasFocusedElement: true, isSecure: true) }
+        // fail closed：問不出 subrole 與確定是密碼欄，在 snapshot 這條路徑上收斂成同一個 isSecure
+        // （`FieldContext` 沒有 verdict 欄位，比照 production 的 `snapshot(of:)`）。
+        if state.isSecure || state.subroleUnknown { return FieldContext(hasFocusedElement: true, isSecure: true) }
         let selectedText: String? = state.selectedRange.flatMap { sel in
             range(in: state.text, location: sel.location, utf16Length: sel.length).map { String(state.text[$0]) }
         }
@@ -186,6 +191,7 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
     func fieldGate(sessionIdentity: FieldIdentity?) -> FieldGate {
         guard let focusedID, let state = fields[focusedID] else { return .unknown }
         if state.isSecure { return .secure }
+        if state.subroleUnknown { return .secureUnknown }
         guard let sessionIdentity else { return .unknown }
         return registry.matches(sessionIdentity, element: focusedID)
             ? .same

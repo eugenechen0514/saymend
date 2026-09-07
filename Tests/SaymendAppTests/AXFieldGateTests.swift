@@ -67,10 +67,11 @@ import SaymendCore
 
     // MARK: - §5.3 secure 判定（走 issue #59 的三態 isSecureField，這裡驗的是 fieldGate 這條路徑）
 
-    /// subrole 連續兩次逾時＝問不出來，閘門必須擋（fail closed）。
+    /// subrole 連續兩次逾時＝問不出來，閘門必須擋（fail closed），且回的是 `.secureUnknown`
+    /// 而不是 `.secure`——行為相同，但事後要分得出「真的密碼欄」與「AX 沒回應被誤殺」。
     /// 同時釘住**恰好問兩次**：只問一次等於把 header 對 `cannotComplete` 建議的重試拿掉、
     /// 一次逾時就判死；無限重試則會在卡住的 App 上把每句上屏拖成 N×200ms。
-    @Test func subroleTimingOutTwiceMakesTheGateSecure() {
+    @Test func subroleTimingOutTwiceMakesTheGateSecureUnknown() {
         let r = AXFieldRegistry()
         let token = r.identity(for: AXUIElementCreateApplication(me))
         var reads = 0
@@ -80,7 +81,7 @@ import SaymendCore
                                        return (.cannotComplete, nil)
                                    },
                                    focusedElement: { AXUIElementCreateApplication(self.me) })
-        #expect(reader.fieldGate(sessionIdentity: token) == .secure)
+        #expect(reader.fieldGate(sessionIdentity: token) == .secureUnknown)
         #expect(reads == 2, "逾時要重試一次，且只重試一次")
     }
 
