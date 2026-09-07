@@ -19,12 +19,19 @@ import Testing
         store.finishSession(id: id, finalText: "你好。")
         let sessions = store.recentSessions(limit: 10)
         #expect(sessions.count == 1)
-        #expect(sessions[0].finalText == "你好。")
-        #expect(sessions[0].appName == "TextEdit")
         let ex = store.exchanges(sessionID: id)
         #expect(ex.count == 1)
-        #expect(ex[0].utteranceRaw == "呃你好")
-        #expect(ex[0].outcomeKind == "newContent")
+        // 不可直接 `[0]`：`#expect` 失敗**不會中止函式**，count 一旦不對，下一行的索引就是
+        // `Fatal error: Index out of range`——整個測試行程以 signal 5 結束、排在後面的測試
+        // 全部沒跑（issue #68）。守衛式改寫讓斷言失敗只損失這一條。
+        guard let session = sessions.first, let exchange = ex.first else {
+            Issue.record("預期 session 與 exchange 各恰一筆；實際 \(sessions.count)／\(ex.count)")
+            return
+        }
+        #expect(session.finalText == "你好。")
+        #expect(session.appName == "TextEdit")
+        #expect(exchange.utteranceRaw == "呃你好")
+        #expect(exchange.outcomeKind == "newContent")
     }
 
     @Test func recentSessionsOrdersNewestFirstAndLimits() throws {
@@ -73,9 +80,16 @@ import Testing
                                         maxCompressionRatio: 2.40, segmentCount: 3))
         let rows = store.asrDiagnostics(sessionID: "s")
         #expect(rows.map(\.finalizedText) == ["先說的", "後說的"])
-        #expect(rows[0].minAvgLogprob == -0.85)
-        #expect(rows[0].maxCompressionRatio == 2.40)
-        #expect(rows[0].segmentCount == 3)
+        // 不可直接 `[0]`：`#expect` 失敗**不會中止函式**，count 一旦不對，下一行的索引就是
+        // `Fatal error: Index out of range`——整個測試行程以 signal 5 結束、排在後面的測試
+        // 全部沒跑（issue #68）。守衛式改寫讓斷言失敗只損失這一條。
+        guard let firstRow = rows.first else {
+            Issue.record("預期兩列診斷；實際 \(rows.count)")
+            return
+        }
+        #expect(firstRow.minAvgLogprob == -0.85)
+        #expect(firstRow.maxCompressionRatio == 2.40)
+        #expect(firstRow.segmentCount == 3)
     }
 
     /// 診斷只是輔助資料，生命週期必須完全跟著 session——

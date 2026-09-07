@@ -20,13 +20,22 @@ private func makeDetector(executables: Set<String>,
 actor ProbeCounter { private(set) var count = 0; func bump() { count += 1 } }
 
 @Test func detectorPrefersFirstExecutableCandidate() async {
-    let first = ClaudeCLIDetector.expand(ClaudeCLIDetector.candidates[0])
+    // 索引的是 production 的靜態候選清單：清單若被縮短，直接索引會讓整輪崩掉而不是紅一條（issue #68）。
+    guard let firstCandidate = ClaudeCLIDetector.candidates.first else {
+        Issue.record("候選清單不得為空")
+        return
+    }
+    let first = ClaudeCLIDetector.expand(firstCandidate)
     let (d, _) = makeDetector(executables: [first], versions: [first: "2.1.216 (Claude Code)"])
     #expect(await d.detect(override: nil) == .found(path: first, version: "2.1.216"))
 }
 
 @Test func detectorSkipsNonExecutableAndFallsThrough() async {
     // 第一候選不可執行 → 用第二候選
+    guard ClaudeCLIDetector.candidates.count >= 2 else {
+        Issue.record("本測試需要至少兩個候選；實際 \(ClaudeCLIDetector.candidates.count) 個")
+        return
+    }
     let second = ClaudeCLIDetector.expand(ClaudeCLIDetector.candidates[1])
     let (d, _) = makeDetector(executables: [second], versions: [second: "3.0.1 (Claude Code)"])
     #expect(await d.detect(override: nil) == .found(path: second, version: "3.0.1"))
@@ -39,7 +48,11 @@ actor ProbeCounter { private(set) var count = 0; func bump() { count += 1 } }
 
 @Test func detectorOverrideWinsAndDoesNotFallBack() async {
     // override 壞掉＝notFound（不落回候選——靜默 fallback 會隱藏誤設）
-    let cand = ClaudeCLIDetector.expand(ClaudeCLIDetector.candidates[0])
+    guard let firstCandidate = ClaudeCLIDetector.candidates.first else {
+        Issue.record("候選清單不得為空")
+        return
+    }
+    let cand = ClaudeCLIDetector.expand(firstCandidate)
     let (d, _) = makeDetector(executables: [cand], versions: [cand: "2.1.216 (Claude Code)"])
     #expect(await d.detect(override: "/broken/claude") == .notFound)
     #expect(await d.detect(override: cand) == .found(path: cand, version: "2.1.216"))
