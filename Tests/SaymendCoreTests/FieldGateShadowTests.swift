@@ -15,8 +15,11 @@ import Testing
     }
 
     /// 「AX 問不出 subrole，於是 fail closed 當密碼欄擋下」的診斷列（issue #37）。
+    /// `outcomeText` 是 `secureUnknown：<detail>`，故用 prefix 比對。
     private func secureUnknownEvents(_ history: FakeHistory) -> [HistoryExchangeRecord] {
-        history.exchanges.filter { $0.outcomeKind == "insertSkipped" && $0.outcomeText == "secureUnknown" }
+        history.exchanges.filter {
+            $0.outcomeKind == "insertSkipped" && ($0.outcomeText ?? "").hasPrefix("secureUnknown")
+        }
     }
 
     /// shadow 的賣點是「使用者看不出任何差別」，而 HUD notice 是唯一使用者會直接看到的行為改變
@@ -141,11 +144,13 @@ import Testing
         #expect(env.text(in: "A") == "正常內容")
         #expect(!c.ledger.isActive, "session 硬停")
         #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
-        // 診斷面：分得出來這是「不知道」
+        // 診斷面：分得出來這是「不知道」，但**內容一個字都不得落進 DB**
         let events = secureUnknownEvents(history)
         #expect(events.count == 1)
-        #expect(events.first?.utteranceRaw == "這段不可上屏")
-        #expect(events.first?.outcomeText == "secureUnknown")
+        #expect(events.first?.utteranceRaw == "",
+                "secureUnknown 有可能就是密碼欄（慢 App 的 AXSecureTextField 連兩次逾時），定稿文字一個字都不得落進 history_exchange")
+        #expect(events.first?.outcomeText == "secureUnknown：sessionApp:com.foo.app",
+                "誤殺率要的是「哪個 App、發生幾次」，metadata 就夠；標 sessionApp 是因為這是 session 起始的前景 App，不保證就是逾時的那個")
         #expect(shadowEvents(history).isEmpty, "secureUnknown 不是 fieldChanged")
     }
 

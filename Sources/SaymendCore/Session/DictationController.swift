@@ -339,7 +339,22 @@ public final class DictationController {
                 // 0.2s timeout 誤殺了多少就量不出來。
                 // **必須先記再 abort**：`abortForSecureField()` 會 `archiveSession()`，
                 // 而 archive 把 `historySessionID` 清成 nil，`recordInsertEvent` 沒有 hid 會整筆靜默丟掉。
-                recordInsertEvent(kind: "insertSkipped", classification: "secureUnknown", utteranceText: text)
+                //
+                // **`utteranceRaw` 必須留空**（issue #10 的不變式，本分支同樣適用）：`.secureUnknown`
+                // 的定義就是「不知道這是不是密碼欄」——慢 App 的 AXSecureTextField 連兩次回 cannotComplete
+                // 正是 0.2s timeout 下最可能發生的情境。把定稿文字原樣寫進 `history_exchange` 等於
+                // 在有可能是密碼欄的地方留下一份明文密碼，而 `historyEnabled` 預設為 true，
+                // 這會是預設開啟的行為，不是 opt-in 診斷。§5.3「一個字都不能進」換個容器同樣是違反。
+                // 誤殺率要的是分子／分母與「哪些 App 常逾時」，句子內容對這個目的沒有任何貢獻——
+                // 付出隱私成本卻換不到資訊價值。故只留 metadata。
+                //
+                // detail 標成 `sessionApp:`：這是 **session 起始**的前景 App，不保證就是逾時的那個
+                // （聽寫途中跨 App 換焦點時兩者會不同）。`.secureUnknown` 這個 case 本身不帶 bundleID，
+                // 要拿到「此刻」的前景 App 得另外發一次查詢，不在本次範圍。標籤讓後續判讀看得見這層落差，
+                // 不會把 session 起始 App 誤當成「這個 App 很慢」的證據。
+                recordInsertEvent(kind: "insertSkipped", classification: "secureUnknown",
+                                  utteranceText: "",
+                                  detail: "sessionApp:\(capturedFrontAppBundleID ?? "?")")
                 abortForSecureField()
                 return
             case .different(let currentAppBundleID):
@@ -1008,8 +1023,15 @@ public final class DictationController {
     /// 插入層事件補列（M7 §4）：kind 三分——insertFailed＝coordinator 拋錯（真 I/O 失敗）、
     /// insertSkipped＝守衛拒絕（原文正確保留，非失敗）、insertWouldSkip＝shadow 觀測
     /// （issue #37；閘門「若開啟」會攔下這一句，但本階段未攔阻，文字照常上屏）。
-    /// 與正常 outcome 列共用 gate 與 session，時序天然在 outcome 列之後
-    /// （dispatch 先記、apply 後跑），回查時兩列相鄰。
+    /// 與正常 outcome 列共用 gate 與 session。**時序不是單一規則**，回查歷史排序時要分三種：
+    /// - 落地路徑（insertFailed／insertFallback／insertRecovered／守衛在插入時才拒絕的 insertSkipped）：
+    ///   在該句的 outcome 列**之後**（dispatch 先記、apply 後跑），兩列相鄰。
+    /// - `insertWouldSkip`（issue #37 shadow，:352 的 `.different` 分支）：記在 outcome 列**之前**——
+    ///   閘門跑在上屏之前，該句稍後才產生自己的 outcome 列。
+    /// - `insertSkipped`／`secureUnknown`（:336 分支）：**沒有** outcome 列可相鄰，session 當場 abort。
+    ///
+    /// `utteranceText` 帶的是使用者說的話，會原樣落進 `history_exchange.utteranceRaw`。
+    /// 可能是密碼欄位的路徑一律傳 `""`，改把判讀用的 metadata 放進 `detail`（issue #10 的不變式）。
     private func recordInsertEvent(kind: String, classification: String,
                                    utteranceText: String, detail: String? = nil) {
         guard settings.historyEnabled, let hid = historySessionID else { return }
