@@ -70,12 +70,16 @@ import SaymendCore
     }
 
     /// session archive 後 token 已釋放：即使焦點還在同一元素，舊 token 也不得回 `.same`。
+    /// 比整個 case（不是 `!= .same`）：只擋 `.same` 的話，實作把這格退化成 `.secure` 或 `.unknown`
+    /// 一樣過關——前者會憑空硬停 session，後者會讓 shadow 少記一筆樣本。
     @Test func releasedTokenIsNoLongerTheSameField() {
         let r = AXFieldRegistry()
         let token = r.identity(for: AXUIElementCreateApplication(me))
-        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead, focusedElement: { AXUIElementCreateApplication(self.me) })
+        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead,
+                                   focusedElement: { AXUIElementCreateApplication(self.me) },
+                                   frontmostBundleID: { nil })
         r.release(token)
-        #expect(reader.fieldGate(sessionIdentity: token) != .same)
+        #expect(reader.fieldGate(sessionIdentity: token) == .different(currentAppBundleID: nil))
     }
 
     // MARK: - §5.3 secure 判定（走 issue #59 的三態 isSecureField，這裡驗的是 fieldGate 這條路徑）
