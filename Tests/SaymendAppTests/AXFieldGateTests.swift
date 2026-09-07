@@ -65,6 +65,41 @@ import SaymendCore
         #expect(reader.fieldGate(sessionIdentity: token) != .same)
     }
 
+    // MARK: - §5.3 secure 判定（走 issue #59 的三態 isSecureField，這裡驗的是 fieldGate 這條路徑）
+
+    /// subrole 連續兩次逾時＝問不出來，閘門必須擋（fail closed）。
+    /// 同時釘住**恰好問兩次**：只問一次等於把 header 對 `cannotComplete` 建議的重試拿掉、
+    /// 一次逾時就判死；無限重試則會在卡住的 App 上把每句上屏拖成 N×200ms。
+    @Test func subroleTimingOutTwiceMakesTheGateSecure() {
+        let r = AXFieldRegistry()
+        let token = r.identity(for: AXUIElementCreateApplication(me))
+        var reads = 0
+        let reader = AXFieldReader(registry: r,
+                                   readSubrole: { _ in
+                                       reads += 1
+                                       return (.cannotComplete, nil)
+                                   },
+                                   focusedElement: { AXUIElementCreateApplication(self.me) })
+        #expect(reader.fieldGate(sessionIdentity: token) == .secure)
+        #expect(reads == 2, "逾時要重試一次，且只重試一次")
+    }
+
+    /// 重試救得回來：第二次問到了、不是密碼欄，閘門就照常往下做 identity 比對。
+    /// 沒有這條的話，「重試」可以被實作成一個不影響結果的裝飾動作。
+    @Test func subroleAnsweringOnRetryProceedsToIdentityComparison() {
+        let r = AXFieldRegistry()
+        let token = r.identity(for: AXUIElementCreateApplication(me))
+        var reads = 0
+        let reader = AXFieldReader(registry: r,
+                                   readSubrole: { _ in
+                                       reads += 1
+                                       return reads == 1 ? (.cannotComplete, nil) : (.success, "AXStandardWindow")
+                                   },
+                                   focusedElement: { AXUIElementCreateApplication(self.me) })
+        #expect(reader.fieldGate(sessionIdentity: token) == .same)
+        #expect(reads == 2)
+    }
+
     /// **lease 不變式（#43）**：閘門只能用 `registry.matches`，不得呼叫 `identity(for:)`——
     /// 後者會替焦點元素多留一個持有者，session 起始那個 token 就再也死不掉。
     @Test func gateDoesNotAddAnyHolder() {
