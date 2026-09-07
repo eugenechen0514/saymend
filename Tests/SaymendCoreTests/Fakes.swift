@@ -353,7 +353,8 @@ func makeStatefulController(
     env: StatefulFieldEnvironment,
     polisher: GatedIntentService = GatedIntentService(),
     clipboard: ClipboardSpy? = nil,
-    history: FakeHistory? = nil
+    history: FakeHistory? = nil,
+    feedback: FakeFeedback? = nil
 ) -> (DictationController, FakeASR, FakeHUD) {
     let audio = FakeAudio()
     let asr = FakeASR()
@@ -368,6 +369,6 @@ func makeStatefulController(
         audio: audio, asr: asr, coordinator: coordinator,
         intent: polisher, hud: hud, settings: settings,
         clipboardRescue: clipboard.map { spy in { spy.rescue($0, round: $1) } },
-        fieldReader: env, feedback: nil, history: history, contextOCR: nil)
+        fieldReader: env, feedback: feedback, history: history, contextOCR: nil)
     return (controller, asr, hud)
 }

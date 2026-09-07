@@ -27,6 +27,10 @@ import Testing
         hud.states.compactMap { if case .notice(let s) = $0 { return s }; return nil }
     }
 
+    private func lastFeedbackText(_ feedback: FakeFeedback) -> String? {
+        feedback.events.compactMap { if case .updated(let u) = $0 { return u }; return nil }.last?.text
+    }
+
     private func skipEvents(_ history: FakeHistory) -> [HistoryExchangeRecord] {
         history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
     }
@@ -405,6 +409,157 @@ import Testing
         #expect(droppedEvents(history).isEmpty, "不得多記與閘門無關的假 outcomeDropped")
         #expect(notices(hud).filter { $0 == DictationController.fieldChangedNotice }.count == 1,
                 "跳過那次提示過一則就好，新 session 不該再有")
+    }
+
+
+    // MARK: - 13. 部分片段被跳過：落地的那段仍須進帳本
+
+    /// `skippedRaw` 早退在丟棄 outcome 的同時**必須同步帳本**。
+    /// `snapshotAndBeginNext()` 把已落地的片段從 `coordinator.currentUtteranceText` 移進 snapshot，
+    /// 早退若直接 return，那段字就只存在於欄位與 `coordinator.displayedText`（鏡像），
+    /// `ledger.sessionText` 從頭到尾沒認過它。
+    @Test func aPartiallySkippedUtteranceStillPutsTheLandedFragmentIntoTheLedger() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("片段一片段二。")
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher, clipboard: ClipboardSpy())
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("片段一"), at: 10.5)          // 落地
+        env.focus("B")
+        c.handleTranscript(.finalized("片段二"), at: 10.8)          // 被閘門攔下
+        env.focus("A")
+        c.tick(at: 12.4)
+        await c.lastIntentTask?.value
+
+        #expect(env.text(in: "A") == "片段一", "前提：片段一確實在欄位上")
+        #expect(c.ledger.sessionText == "片段一",
+                "落地的片段必須入帳；否則 History 的 finalText 與下一句的改寫基準都會少這一段")
+        #expect(!c.ledger.canUndo, "只是鏡像校準，沒有潤飾成果可復原＝不推版本")
+    }
+
+    /// session 已有前一句的成果時，同步必須是「既有全文＋本次落地片段」，不是只有片段。
+    /// 只寫 `snapshot.text` 會把前面已定稿的文字整段抹掉。
+    @Test func theLedgerSyncKeepsTheAlreadySettledTextInFrontOfTheLandedFragment() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let polisher = GatedIntentService()
+        polisher.outcomeByRaw = ["首句": .newContent("首句。"),
+                                 "片段一片段二": .newContent("片段一片段二。")]
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher, clipboard: ClipboardSpy())
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("首句"), at: 10.5)
+        c.tick(at: 12.1)
+        await c.lastIntentTask?.value
+        #expect(c.ledger.sessionText == "首句。", "前提：首句已潤飾定稿")
+
+        c.handleTranscript(.finalized("片段一"), at: 13.0)
+        env.focus("B")
+        c.handleTranscript(.finalized("片段二"), at: 13.3)
+        env.focus("A")
+        c.tick(at: 14.9)
+        await c.lastIntentTask?.value
+
+        #expect(c.ledger.sessionText == "首句。片段一", "同步的是尾端追加，不得把前面定稿的文字洗掉")
+    }
+
+    // MARK: - 14. 部分跳過之後封存：History 的 finalText 要含落地的片段
+
+    /// `archiveSession()` 用 `ledger.sessionText` 當 finalText。早退不同步帳本的話，
+    /// 使用者螢幕上明明有「片段一」，History 卻查不到。
+    @Test func historyFinalTextIncludesTheLandedFragmentOfAPartiallySkippedUtterance() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("片段一片段二。")
+        let history = FakeHistory()
+        let (c, asr, _) = makeStatefulController(env: env, polisher: polisher,
+                                                 clipboard: ClipboardSpy(), history: history)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("片段一"), at: 10.5)
+        env.focus("B")
+        c.handleTranscript(.finalized("片段二"), at: 10.8)
+        env.focus("A")
+        c.hotkeyReleased(at: 11.0)
+        asr.continuation?.finish()
+        c.asrStreamEnded(at: 11.1)                                 // flush → 閉合話語 → LLM
+        await c.lastIntentTask?.value
+        c.escapePressed()                                          // 延續窗 Esc＝封存＝定稿入史
+
+        #expect(env.text(in: "A") == "片段一", "前提：欄位上就是片段一")
+        #expect(history.finished.last?.finalText == "片段一",
+                "History 的最終全文不得少掉落地的片段；實際：\(history.finished.last?.finalText ?? "nil")")
+    }
+
+    // MARK: - 15. 世代守衛：舊 session 的片段不得寫進新 session 的帳本
+
+    /// `SessionLedger.synchronizeObservedTail` 無條件覆寫 `sessionText`，而 `skippedRaw` 早退
+    /// **位在 `guard ledger.isActive, ledger.generation == generation` 之前**——
+    /// 既有的 `keepRawWithoutVersion` 沒有這個問題，因為它一律在世代守衛之後才被呼叫。
+    /// 少了世代條件，session A 遲到的 outcome 會把 A 的片段寫進 B 的帳本。
+    @Test func aStaleSkippedOutcomeMustNotWriteIntoTheNextSessionsLedger() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let polisher = GatedIntentService()
+        polisher.gatedRaws = ["片段一片段二"]                        // 只卡 session A 那句
+        polisher.outcomeByRaw = ["片段一片段二": .newContent("不該落地。"),
+                                 "新的一句": .newContent("新的一句。")]
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher, clipboard: ClipboardSpy())
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("片段一"), at: 10.5)
+        env.focus("B")
+        c.handleTranscript(.finalized("片段二"), at: 10.8)          // 部分跳過
+        env.focus("A")
+        c.tick(at: 12.4)                                           // A 的話語閉合，LLM 卡在 gate
+        c.escapePressed()                                          // A 封存（outcome 仍在途）
+        #expect(!c.ledger.isActive, "前提：session A 已封存")
+
+        c.hotkeyPressed(at: 20.0)                                  // 全新的 session B
+        c.handleTranscript(.finalized("新的一句"), at: 20.5)
+        c.tick(at: 22.1)
+        polisher.release()                                         // A 的 outcome 這時才回來
+        await c.lastIntentTask?.value                              // B 的落地串在 A 之後
+
+        #expect(!c.ledger.sessionText.contains("片段一"),
+                "A 的片段不得污染 B 的帳本；實際：\(c.ledger.sessionText)")
+        #expect(c.ledger.sessionText == "新的一句。", "B 的帳本只認 B 自己的成果")
+    }
+
+    // MARK: - 16. 回饋底線：早退不呼叫 emitFeedback 的實測結果
+
+    /// `keepRawWithoutVersion` 同步帳本之後會 `emitFeedback()`，本早退分支沒有。
+    /// 但 `emitFeedback()` 算的是 `ledger.sessionText + coordinator.currentUtteranceText`，
+    /// 而同步只是把同一段字從 utterance 側搬到 ledger 側——**和不變**。
+    /// 這條測試釘住這個等價關係：底線在同步前後都是同一串，補不補 `emitFeedback()` 都看不出差別。
+    @Test func theFeedbackUnderlineIsUnchangedByTheLedgerSyncOfAPartialSkip() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("片段一片段二。")
+        let feedback = FakeFeedback()
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher,
+                                               clipboard: ClipboardSpy(), feedback: feedback)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("片段一"), at: 10.5)
+        env.focus("B")
+        c.handleTranscript(.finalized("片段二"), at: 10.8)
+        env.focus("A")
+        c.tick(at: 12.4)
+        await c.lastIntentTask?.value
+
+        #expect(lastFeedbackText(feedback) == "片段一",
+                "底線本來就已經罩住落地的片段（那時它還在 currentUtteranceText 裡）")
+        #expect(c.ledger.sessionText == "片段一",
+                "同步把同一段字搬到 ledger 側，`ledger.sessionText + currentUtteranceText` 的和不變")
+
+        // 下一句照常上屏：底線從「片段一」延伸，證明帳本／鏡像兩側加總後仍是正確的基準。
+        c.handleTranscript(.finalized("第三句"), at: 13.0)
+        #expect(lastFeedbackText(feedback) == "片段一第三句", "底線接得上，不會少一截")
     }
 
     /// `.unknown` 與 `.same` 一律照常寫（#21 釘子的 coordinator 單元版）。

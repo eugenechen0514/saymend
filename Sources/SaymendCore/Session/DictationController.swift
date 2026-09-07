@@ -803,6 +803,27 @@ public final class DictationController {
         if skippedRaw {
             recordInsertEvent(kind: "outcomeDropped", classification: "skippedRaw",
                               utteranceText: snapshot.text.isEmpty ? sessionBefore : snapshot.text)
+            // **部分片段被跳過時，落地的那段仍須入帳**。`snapshotAndBeginNext()` 已經把它從
+            // `coordinator.currentUtteranceText` 移進 snapshot，早退若直接 return，那段字就只存在於
+            // 欄位與 `coordinator.displayedText`（鏡像），`ledger.sessionText` 從頭到尾沒認過它。兩個後果：
+            // ① `archiveSession()` 拿 `ledger.sessionText` 當 History 的 finalText，會少掉這一段；
+            // ② 更嚴重：下一句若是 `.editedSession`，會拿偏小的 `ledger.sessionText` 當改寫基準，
+            //    而 AX 驗證用的是正確的 `displayedText`、照樣通過——整段被以錯誤基準算出來的文字覆寫。
+            //
+            // 形態比照 `keepRawWithoutVersion`（:1093）：只同步觀測到的尾端、**不推版本**——
+            // 這句沒有潤飾成果可記（outcome 剛被丟棄），也就沒有東西可以復原。
+            //
+            // 世代守衛不可省：`SessionLedger.synchronizeObservedTail` 無條件覆寫 `sessionText`，
+            // 而本早退**位在下面那道 `guard ledger.isActive, ledger.generation == generation` 之前**
+            // （`keepRawWithoutVersion` 沒有這個問題，它一律在世代守衛之後才被呼叫）。少了世代條件，
+            // 「session A 部分跳過 → 使用者按 Esc／封存 → 開了 session B → A 的舊 outcome 這時才回來」
+            // 會把 A 的片段寫進 B 的帳本。
+            //
+            // 早退本身**不移到世代守衛之後**：那會讓「緩衝句＋被跳過」的組合走進 stale-generation 分支
+            // 而多做一次剪貼簿救援（使用者在跳過的當下已經救過一次了）。
+            if !snapshot.text.isEmpty, ledger.isActive, ledger.generation == generation {
+                ledger.synchronizeObservedTail(ledger.sessionText + snapshot.text)
+            }
             return
         }
         // 世代檢查：archive→begin 之後，舊 session 在途的 outcome 一律丟棄——
