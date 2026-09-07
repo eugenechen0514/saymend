@@ -233,12 +233,15 @@ import Testing
         #expect(notices(hud) == [DictationController.fieldChangedNotice])
     }
 
-    // MARK: - 8. .secure 在 coordinator 層也不寫
+    // MARK: - 8. .secure 在 coordinator 層擋下之後，controller 一律硬停
 
-    /// controller 的密碼守衛答完之後、寫入之前焦點才切進密碼欄位：
-    /// 規格 §5.3「一個字都不能進密碼欄」——寫入前的閘門看到 `.secure` 就不寫，這樣就滿足了。
-    /// session 的硬停由 controller 既有的 `.secure` 守衛在**下一句** finalized 時處理（刻意的最小改動）。
-    @Test func focusMovingIntoASecureFieldInsideTheWindowWritesNothing() {
+    /// controller 的密碼守衛答完之後、寫入之前焦點才切進密碼欄位。
+    ///
+    /// **改寫理由**：舊版釘的是「只跳過這一句，硬停留給下一句的 `:341` 守衛」。那條語意有洞——
+    /// session 沒被停掉，斷句器 buffer 裡已經含被擋片段（`segmenter.onTranscript` 跑在閘門查詢之前），
+    /// 話語一閉合整句 raw 就上雲端 LLM，潤飾全文再明文落進 `history_exchange`。裁定改為
+    /// `.secureField` 在任何一層都比照 `:341` 硬停，本測試因此改釘「當場封存」。
+    @Test func focusMovingIntoASecureFieldInsideTheWindowHardStopsTheSession() {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
         env.addField("P", text: "", isSecure: true)
@@ -252,16 +255,9 @@ import Testing
 
         #expect(env.text(in: "P") == "", "密碼欄位一個字都不能進")
         #expect(env.text(in: "A") == "")
-        #expect(lastNotice(hud) == DictationController.secureFieldSkipNotice,
-                "文案講的是密碼欄位，不是「欄位已切換」")
-        #expect(c.ledger.isActive, "本句只被跳過；硬停留給下一句的 controller 守衛（晚一句）")
-        #expect(!c.ledger.frozen,
-                "**不 freeze**：硬停是下一句 finalized 的 :325 守衛的事，這一層只負責「不寫」")
-
-        c.handleTranscript(.finalized("下一句"), at: 11.0)          // controller 的 .secure 守衛在這裡才發動
-        #expect(!c.ledger.isActive, "下一句 finalized 時 session 硬停")
-        #expect(env.text(in: "P") == "")
-        #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
+        #expect(!c.ledger.isActive, "當場硬停，不再等下一句 finalized")
+        #expect(hud.states.contains(.notice("密碼欄位不聽寫")),
+                "文案由 abortForSecureField 自己發，不另發「已入剪貼簿」那則")
     }
 
     // MARK: - 9. 沒接閘門＝維持舊行為
@@ -658,7 +654,10 @@ import Testing
     ///
     /// `utteranceRaw` 必須是空字串（issue #10／#58 的不變式）：這一列會落進 `history_exchange`，
     /// 而 `historyEnabled` 預設 true——在可能是密碼欄的地方留下定稿文字等於留下明文。
-    /// 內容照樣進剪貼簿——被救的是使用者對欄位 A 說的話，不是密碼，沒有 §5.3 疑慮。
+    /// **改寫理由**：分類與「不留明文」兩條不變式逐字保留；剪貼簿救援與 `secureFieldSkipNotice`
+    /// 兩條斷言撤掉——裁定改為硬停，剪貼簿是另一個持久容器（clipboard manager 會留存），
+    /// `:341` 那道守衛今天也不救；提示由 `abortForSecureField()` 自己發的「密碼欄位不聽寫」取代。
+    /// 另補「當場封存」一條。
     @Test func aSecureFieldSkipIsClassifiedApartFromFieldChangedAndKeepsNoPlaintext() {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
@@ -680,15 +679,20 @@ import Testing
                 "可能是密碼欄：定稿文字不得落進 history_exchange")
         #expect(!(skipEvents(history).first?.outcomeText?.hasPrefix("fieldChanged") ?? true),
                 "不得混進誤判率分母那一組")
-        #expect(lastNotice(hud) == DictationController.secureFieldSkipNotice)
-        #expect(clipboard.texts == ["這段不可上屏"], "內容不得遺失")
+        #expect(lastNotice(hud) == "密碼欄位不聽寫")
+        #expect(clipboard.texts.isEmpty,
+                "**不救剪貼簿**：剪貼簿是另一個持久容器，`:341` 那道守衛今天也不救")
         #expect(env.text(in: "P") == "" && env.text(in: "A") == "", "一個字都沒進任何欄位")
+        #expect(!c.ledger.isActive, "硬停")
     }
 
     /// AX 連兩次問不出 subrole（#59 fail closed）走同一條寫入前閘門：行為與 `.secure` 逐字相同，
-    /// 但診斷分類是 `secureUnknown` 且帶 `sessionApp:` ——**格式與 `:325` 那條逐字相同**，
+    /// 但診斷分類是 `secureUnknown` 且帶 `sessionApp:` ——**格式與 `:341` 那條逐字相同**，
     /// 兩條路徑的誤殺樣本才合得起來算 0.2s timeout 的誤殺率。
     /// `utteranceRaw` 同樣留空：「不知道是不是密碼欄」正是最不該留明文的情形。
+    ///
+    /// **改寫理由**：同上一條——分類／detail 格式／不留明文逐字保留，剪貼簿與 notice 兩條
+    /// 依硬停裁定改寫，`ledger.isActive && !frozen` 改成 `!isActive`。
     @Test func aSubroleUnknownSkipIsClassifiedApartAndKeepsNoPlaintext() {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
@@ -705,14 +709,13 @@ import Testing
 
         #expect(skipEvents(history).count == 1, "恰一列診斷")
         #expect(skipEvents(history).first?.outcomeText == "secureUnknown：sessionApp:com.foo.app",
-                "分類與 detail 格式必須與 :325 那條逐字相同")
+                "分類與 detail 格式必須與 :341 那條逐字相同")
         #expect(skipEvents(history).first?.utteranceRaw == "",
                 "『不知道是不是密碼欄』更不該留明文")
-        #expect(lastNotice(hud) == DictationController.secureFieldSkipNotice)
-        #expect(clipboard.texts == ["這段也不可上屏"], "內容不得遺失")
+        #expect(lastNotice(hud) == "密碼欄位不聽寫")
+        #expect(clipboard.texts.isEmpty, "**不救剪貼簿**：與 `.secure` 逐字相同")
         #expect(env.text(in: "Q") == "" && env.text(in: "A") == "", "一個字都沒進任何欄位")
-        #expect(c.ledger.isActive && !c.ledger.frozen,
-                "與 .secure 同：只跳過這一句，不 freeze、不 archive")
+        #expect(!c.ledger.isActive, "與 .secure 同：硬停")
     }
 
     /// 對照組：`.different` 那組**仍然**記 `fieldChanged`、帶 bundleID、且照舊留下定稿文字
@@ -733,22 +736,37 @@ import Testing
         #expect(lastNotice(hud) == DictationController.fieldChangedNotice)
     }
 
-    /// 同一條偷渡防線的 **secure 版**：被密碼欄位攔阻的片段，也不得從潤飾路徑寫回欄位。
+    // MARK: - 13. `.secureField` 的資安不變式：raw 根本不得離開本機
+
+    /// **本次修正的核心**（`.secureField` 一律硬停）。
     ///
-    /// 第 7 節釘的是 `.fieldChanged` 分支的 `skippedRaw = true`；`.secureField` 是分家出來的
-    /// 另一條，它自己的 `skippedRaw = true` 必須有獨立的測試釘住——否則後續重構
-    /// （例如照 `insertDetached` 那條「不設 skippedRaw」的註解把 finalized 這條也拿掉）
-    /// 不會有任何測試叫，而這條線是「被閘門拒絕的 raw 不得從潤飾路徑偷渡回欄位」的唯一機制。
-    /// 這條路徑與規格 §5.3 相關：偷渡回來的那段正是「焦點在密碼欄時說的話」。
-    @Test func aSecureBlockedSegmentAlsoDropsItsOutcomeSoItCannotSneakBack() async {
+    /// **改寫理由**（原 `aSecureBlockedSegmentAlsoDropsItsOutcomeSoItCannotSneakBack`）：
+    /// 舊版建的正是這個情境，卻只斷言 `droppedEvents`——oracle 打錯對象。「只跳過、不 archive」
+    /// 之下 session 與 segmenter 繼續跑：片段在 `segmenter.onTranscript` 就已進 buffer
+    /// （早於閘門查詢），話語閉合時 `processUtterance` 把**含被擋片段**的整句 raw 送
+    /// `intentService.process`（雲端 provider），而 `dispatch` 頂端那道**無條件**的
+    /// `recordExchange` 又跑在 `skippedRaw` 早退**之前**——LLM 潤飾全文（含被擋片段）
+    /// 明文落進 `history_exchange.outcomeText`，`historyEnabled` 預設 true。
+    /// 失敗情境：對欄位 A 說「我的密碼是」→ 焦點被搬到密碼欄 P → 說「1234」→
+    /// 「我的密碼是1234」送雲端 LLM →「我的密碼是 1234。」永久寫進本機 SQLite。
+    ///
+    /// 硬停之後 `abortForSecureField()` 的 `segmenter.hardReset()` 讓那句 raw 永遠不會閉合：
+    /// 沒有 LLM 呼叫，也就沒有 outcome 可寫進歷史。
+    ///
+    /// **本條的射程只到雲端 provider 與 `history_exchange` 兩處。** 第三個持久容器
+    /// `asr_diagnostic` 由下面的 `aSecureBlockedSegmentLeavesNoPlaintextInTheASRDiagnosticTable`
+    /// 釘住——本條的事件全部走 `.finalized(_)`（`quality == nil`），`recordASRDiagnostic`
+    /// 的 `guard let quality` 會直接早退，所以那張表在本條裡**看不見**，不要讀成已被涵蓋。
+    @Test func aSecureBlockedSegmentHardStopsSoTheRawNeverReachesTheLLM() async {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
         env.addField("P", text: "", isSecure: true)
         let polisher = GatedIntentService()
-        polisher.outcome = .newContent("片段一片段二。")            // 潤飾句含被密碼欄位攔掉的那段
+        polisher.outcome = .newContent("片段一片段二。")
+        let clipboard = ClipboardSpy()
         let history = FakeHistory()
         let (c, _, hud) = makeStatefulController(env: env, polisher: polisher,
-                                                 clipboard: ClipboardSpy(), history: history)
+                                                 clipboard: clipboard, history: history)
         c.hotkeyPressed(at: 10.0)
         c.handleTranscript(.finalized("片段一"), at: 10.5)          // 落地
         // controller 的密碼守衛答完之後才切進密碼欄：走 coordinator 的 `.secureField` 分支
@@ -756,24 +774,245 @@ import Testing
             env?.afterFieldGate = nil
             env?.focus("P")
         }
-        c.handleTranscript(.finalized("片段二"), at: 10.8)          // 被密碼欄位擋下
-        env.focus("A")                                             // 焦點回來，排除「潤飾被閘門擋掉」的干擾
+        c.handleTranscript(.finalized("片段二"), at: 10.8)          // 被密碼欄位擋下 → 硬停
+        c.tick(at: 12.4)                                           // 話語永遠不會閉合（segmenter 已 hardReset）
+        await c.lastIntentTask?.value
+
+        #expect(!polisher.calls.contains { $0.raw.contains("片段二") },
+                "焦點在密碼欄時說的話一個字都不得送進雲端 provider；實際：\(polisher.calls.map(\.raw))")
+        #expect(!history.exchanges.contains {
+            $0.utteranceRaw.contains("片段二") || ($0.outcomeText?.contains("片段二") ?? false)
+        }, "history_exchange 任何一列都不得含被擋片段（明文永久落地）；實際：\(history.exchanges)")
+        #expect(!c.ledger.isActive, "session 當場硬停")
+        #expect(history.finished.count == 1, "硬停即封存")
+        #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
+        #expect(env.text(in: "P") == "", "密碼欄位一個字都不能進")
+        // 硬停之後 `historySessionID` 已是 nil，上面那條 `history.exchanges` 的斷言會退化成
+        // 永遠成立；欄位內容這一格是屆時唯一還看得見「潤飾全文偷渡回欄位 A」的 oracle。
+        #expect(env.text(in: "A") == "片段一", "被擋片段不得經 outcome 繞回原欄位")
+        #expect(!clipboard.texts.contains("片段二"),
+                "剪貼簿是另一個持久容器（clipboard manager 會留存），同樣不救")
+    }
+
+    /// `recordASRDiagnostic` 從閘門之前搬到各終點之後（issue #63）之後，**凍結終點**這一格
+    /// 先前沒有任何 oracle：把 `DictationController.swift:410` 那行刪掉全套照樣綠。而它正是
+    /// issue #10 id=116 幻覺樣本的實際路徑（`insertSkipped/frozen`）——`recordASRDiagnostic`
+    /// 的 doc（`:495-500`）拿那筆當存在理由（「診斷若掛在話語或 outcome 上，最需要的樣本恰好
+    /// 記不到」），最該被賭的一格反而沒人守。診斷改成「各終點各寫一次」的自陳失敗模式就是
+    /// 「日後新增終點忘了呼叫只損失樣本」，這條把該賭的那格釘起來。
+    ///
+    /// 斷言用**整份等於**（同 `aFieldChangedSkipStillRecordsTheASRDiagnostic`）：同時釘住
+    /// 「凍結那句有記」與「沒有多記」。界線是「**可能是密碼欄**才不記」，不是「被擋就不記」——
+    /// 凍結不是密碼欄，樣本照留。
+    @Test func aFrozenSkipStillRecordsTheASRDiagnostic() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, clipboard: clipboard, history: history)
+        let quality = TranscriptQuality(minAvgLogprob: -0.25, maxCompressionRatio: 1.125,
+                                        segmentCount: 1)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("第一句", quality: quality), at: 10.5)   // 照常落地
+        c.userActivityDetected(at: 10.8)                                      // 使用者手動編輯 → 凍結
+        #expect(c.ledger.frozen, "前提：確實凍結了")
+        c.handleTranscript(.finalized("第二句", quality: quality), at: 11.0)   // 走凍結終點
+
+        #expect(env.text(in: "A") == "第一句", "前提：凍結後那句不得上屏")
+        #expect(clipboard.texts == ["第二句"], "前提：走的是凍結終點（救剪貼簿）")
+        #expect(lastNotice(hud) == "已凍結，內容已入剪貼簿")
+        #expect(history.diagnostics.map(\.finalizedText) == ["第一句", "第二句"],
+                "凍結不是密碼欄，診斷樣本照留；診斷搬家不得順手把這格弄丟")
+        #expect(skipEvents(history).first?.outcomeText == "frozen", "分類仍是 frozen")
+    }
+
+    /// 同一條資安不變式的**第三張表**：`asr_diagnostic`（`HistoryStore.swift:63-71`，
+    /// SQLite 的明文 `finalizedText` 欄，設定頁歷史 UI 直接顯示）。
+    ///
+    /// 上面那條把射程停在雲端 provider 與 `history_exchange`，是因為它的事件都是
+    /// `.finalized(_)`——`quality == nil`，`recordASRDiagnostic` 的 `guard let quality` 直接早退，
+    /// 這條洩漏路徑在那個骨架下**永遠看不見、永遠會綠**。WhisperKit 每筆定稿都給非 nil quality
+    /// （`WhisperKitEngine.swift:240/253`），`settings.historyEnabled` 預設 true——
+    /// 預設設定下每一句都會落地。故本條刻意帶 quality 進來，讓 oracle 看得見那張表。
+    ///
+    /// 釘的不變式：`recordASRDiagnostic` 必須跑在**所有**密碼欄守衛之後，包含本分支新增的
+    /// 寫入前閘門。修正前它寫在 `:341` 閘門查詢之後、`insertFinalized` 之前——硬停擋住了雲端
+    /// LLM 與 `history_exchange`，卻讓被擋片段的明文先一步進了這張表。
+    ///
+    /// 斷言用**整份等於** `["我的密碼是"]` 而不是 `!contains`：同時釘住「被擋的那句沒寫」與
+    /// 「沒被擋的那句照舊要寫」——否則把 `recordASRDiagnostic` 整個刪掉也會綠。
+    @Test func aSecureBlockedSegmentLeavesNoPlaintextInTheASRDiagnosticTable() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("P", text: "", isSecure: true)
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("我的密碼是1234。")
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, polisher: polisher,
+                                                 clipboard: clipboard, history: history)
+        // 二進位可精確表示的數（-1/4、9/8）：Float 存進 Double 欄位無損，斷言不會測到浮點表示法
+        let quality = TranscriptQuality(minAvgLogprob: -0.25, maxCompressionRatio: 1.125,
+                                        segmentCount: 1)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("我的密碼是", quality: quality), at: 10.5)   // 落地於 A
+        env.afterFieldGate = { [weak env] in
+            env?.afterFieldGate = nil
+            env?.focus("P")
+        }
+        c.handleTranscript(.finalized("1234", quality: quality), at: 10.8)        // 被密碼欄擋下：硬停
         c.tick(at: 12.4)
         await c.lastIntentTask?.value
 
-        #expect(env.text(in: "A") == "片段一",
-                "落地那段維持 raw；密碼欄位攔掉那段不得從潤飾路徑偷渡回欄位")
-        #expect(!env.text(in: "A").contains("片段二"))
+        #expect(history.diagnostics.map(\.finalizedText) == ["我的密碼是"],
+                "被擋片段的定稿明文不得落進 asr_diagnostic，落地成功的那句則必須照舊記得到（issue #10 的樣本不能連帶消失）；實際：\(history.diagnostics.map(\.finalizedText))")
+        #expect(!polisher.calls.contains { $0.raw.contains("1234") },
+                "前提重申：被擋片段同樣不得送雲端；實際：\(polisher.calls.map(\.raw))")
+        #expect(!history.exchanges.contains {
+            $0.utteranceRaw.contains("1234") || ($0.outcomeText?.contains("1234") ?? false)
+        }, "前提重申：history_exchange 任何一列都不得含被擋片段；實際：\(history.exchanges)")
+        #expect(!c.ledger.isActive, "session 當場硬停")
+        #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
         #expect(env.text(in: "P") == "", "密碼欄位一個字都不能進")
-        #expect(droppedEvents(history).count == 1, "outcome 必須被丟棄並留下診斷")
-        #expect(droppedEvents(history).first?.outcomeText == "skippedRaw")
-        #expect(notices(hud) == [DictationController.secureFieldSkipNotice],
-                "跳過當下已提示過，丟棄 outcome 不再發第二則")
+        #expect(!clipboard.texts.contains("1234"), "剪貼簿同樣不救")
+    }
+
+    /// 對照組：**`.fieldChanged` 的診斷照舊要寫**。
+    ///
+    /// 把 `recordASRDiagnostic` 從閘門之前搬到各終點之後，風險有兩面：漏了密碼欄那條是**洩漏**，
+    /// 而漏了其他終點是**樣本靜默消失**（issue #10 那筆 id=116 幻覺正是靠這列才追得到）。
+    /// 上一條釘住前者，本條釘住後者裡最容易和它混淆的一格——同樣是「閘門擋下、一個字都沒寫」，
+    /// 但 `.fieldChanged` 只是換了欄位、不是密碼欄，內容既已進剪貼簿，診斷就沒有不寫的理由。
+    /// 兩條一起把那條界線畫死：不是「被擋就不記」，是「**可能是密碼欄**才不記」。
+    @Test func aFieldChangedSkipStillRecordsTheASRDiagnostic() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, _) = makeStatefulController(env: env, clipboard: clipboard, history: history)
+        let quality = TranscriptQuality(minAvgLogprob: -0.25, maxCompressionRatio: 1.125,
+                                        segmentCount: 1)
+        c.hotkeyPressed(at: 10.0)
+        env.afterFieldGate = { [weak env] in
+            env?.afterFieldGate = nil
+            env?.focus("B")                                        // 換欄位，不是密碼欄
+        }
+        c.handleTranscript(.finalized("這段換了欄位", quality: quality), at: 10.5)
+
+        #expect(env.text(in: "B") == "" && env.text(in: "A") == "", "前提：閘門確實擋下，一個字都沒寫")
+        #expect(clipboard.texts == ["這段換了欄位"], "前提：走的是 `.fieldChanged` 那條（救剪貼簿）")
+        #expect(history.diagnostics.map(\.finalizedText) == ["這段換了欄位"],
+                "不是密碼欄就沒有不記的理由；診斷搬家不得順手把這格的樣本弄丟")
+        #expect(c.ledger.isActive, "`.fieldChanged` 不 archive（裁定 Q2）")
+    }
+
+    /// 同一條資安不變式的 **`.secureUnknown` 版**（#59 fail closed）：行為逐字相同，
+    /// 但必須留下「這是不知道，不是知道」的 metadata——否則 0.2s AX timeout 誤殺多少量不出來。
+    @Test func aSubroleUnknownBlockedSegmentHardStopsAndKeepsOnlyMetadata() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("Q", text: "", subroleUnknown: true)
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("片段一片段二。")
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, polisher: polisher,
+                                                 clipboard: clipboard, history: history)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("片段一"), at: 10.5)
+        env.afterFieldGate = { [weak env] in
+            env?.afterFieldGate = nil
+            env?.focus("Q")
+        }
+        c.handleTranscript(.finalized("片段二"), at: 10.8)
+        c.tick(at: 12.4)
+        await c.lastIntentTask?.value
+
+        #expect(!polisher.calls.contains { $0.raw.contains("片段二") },
+                "『可能是密碼欄』的片段同樣不得送雲端；實際：\(polisher.calls.map(\.raw))")
+        #expect(!history.exchanges.contains {
+            $0.utteranceRaw.contains("片段二") || ($0.outcomeText?.contains("片段二") ?? false)
+        }, "history_exchange 任何一列都不得含被擋片段；實際：\(history.exchanges)")
+        #expect(skipEvents(history).last?.outcomeText == "secureUnknown：sessionApp:com.foo.app",
+                "分類與 detail 格式必須與 :341 那條逐字相同")
+        #expect(skipEvents(history).last?.utteranceRaw == "",
+                "只留 metadata，不留句子")
+        #expect(!c.ledger.isActive)
+        #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
+        #expect(env.text(in: "Q") == "")
+        #expect(!clipboard.texts.contains("片段二"))
+    }
+
+    /// **順序**：診斷必須記在 `abortForSecureField()` **之前**。
+    /// `abortForSecureField` 會 `archiveSession()`，而 archive 把 `historySessionID` 清成 nil，
+    /// `recordInsertEvent` 沒有 hid 就整筆靜默丟掉——兩行對調，診斷會安靜消失（測試必須死）。
+    /// 與 `FieldGateTests.secureUnknownDiagnosticIsRecordedBeforeTheSessionIsArchived` 同型，
+    /// 但釘的是**寫入前閘門**（coordinator `.secureField`）這條路徑。
+    @Test func theSecureFieldDiagnosticIsRecordedBeforeTheSessionIsArchived() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("P", text: "", isSecure: true)
+        let history = FakeHistory()
+        let (c, _, _) = makeStatefulController(env: env, clipboard: ClipboardSpy(), history: history)
+        c.hotkeyPressed(at: 10.0)
+        env.afterFieldGate = { [weak env] in
+            env?.afterFieldGate = nil
+            env?.focus("P")
+        }
+        c.handleTranscript(.finalized("這段不可上屏"), at: 10.5)
+
+        #expect(skipEvents(history).count == 1,
+                "診斷若排在 abort 之後，historySessionID 已是 nil，整筆會靜默丟掉")
+        #expect(skipEvents(history).first?.sessionID == history.sessions.first?.id,
+                "掛在被硬停的那個 session 底下")
+        #expect(history.finished.count == 1, "而且確實封存了——不是「沒 abort 所以診斷才記得成」")
+    }
+
+    // MARK: - 14. 遲到的 outcomeDropped 診斷也要有世代守衛
+
+    /// `outcomeDropped` 那列用的是**呼叫當下**的 `historySessionID`，而早退位在
+    /// `guard ledger.isActive, ledger.generation == generation` **之前**。時序：
+    /// session A 部分跳過、LLM 卡住 → Esc 封存 A → 開 session B 並說完一句（B 有自己的 hid）→
+    /// A 的舊 outcome 才回來 → 這筆診斷掛到 B 的 hid 下，A 的跳過在資料上變成 B 的。
+    @Test func aStaleSkippedOutcomeMustNotWriteItsDiagnosticIntoTheNextSession() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let polisher = GatedIntentService()
+        polisher.gatedRaws = ["片段一片段二"]                        // 只卡 session A 那句
+        polisher.outcomeByRaw = ["片段一片段二": .newContent("不該落地。"),
+                                 "新的一句": .newContent("新的一句。")]
+        let history = FakeHistory()
+        let (c, _, _) = makeStatefulController(env: env, polisher: polisher,
+                                               clipboard: ClipboardSpy(), history: history)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("片段一"), at: 10.5)
+        env.focus("B")
+        c.handleTranscript(.finalized("片段二"), at: 10.8)          // 部分跳過（.fieldChanged）
+        env.focus("A")
+        c.tick(at: 12.4)                                           // A 的話語閉合，LLM 卡在 gate
+        c.escapePressed()                                          // A 封存（outcome 仍在途）
+
+        c.hotkeyPressed(at: 20.0)                                  // 全新的 session B
+        c.handleTranscript(.finalized("新的一句"), at: 20.5)
+        c.tick(at: 22.1)
+        polisher.release()                                         // A 的 outcome 這時才回來
+        await c.lastIntentTask?.value
+
+        #expect(history.sessions.count == 2, "前提：確實開了兩個 session")
+        let sessionB = history.sessions.last?.id
+        #expect(!droppedEvents(history).contains { $0.sessionID == sessionB },
+                "A 遲到的 outcomeDropped 診斷不得掛到 B 的 hid；實際：\(droppedEvents(history))")
     }
 
     /// 緩衝句落地（`insertDetached`）路徑上焦點切進的是**密碼欄位**：分類同樣走 `secureField`，
     /// `utteranceRaw` 同樣留空。兩個呼叫點都得各自表態——只改 `insertFinalized` 那條，
     /// 這裡會安靜留在 `fieldChanged`，而且把 LLM 的定稿文字寫進可能是密碼欄的診斷列。
+    ///
+    /// **改寫理由**：分類與不留明文兩條逐字保留；剪貼簿救援與 `secureFieldSkipNotice` 依硬停裁定撤掉。
+    /// 這條路徑同樣證明不出「內容不可能含密碼欄時段說的話」——緩衝句的 raw 走的是同一個 segmenter，
+    /// 一樣可能含焦點在 P 期間說的片段，故照裁定的預設**不救剪貼簿**、當場封存。
     @Test func aBufferedUtteranceLandingIntoASecureFieldIsClassifiedAsSecureField() async {
         let intent = GatedIntentService()
         intent.gatedRaws = ["第二句"]
@@ -801,18 +1040,22 @@ import Testing
         await c.lastIntentTask?.value
 
         #expect(key.ops == opsBeforeLanding, "密碼欄位一個字都不能進")
-        #expect(clipboard.texts == ["補充內容。"], "內容仍要救——被救的是欄位 A 的話，不是密碼")
-        #expect(hud.states.contains(.notice(DictationController.secureFieldSkipNotice)))
+        #expect(clipboard.texts.isEmpty, "**不救剪貼簿**：與 finalized 那條逐字相同")
+        #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
         let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
         #expect(skipped.last?.outcomeText == "secureField")
         #expect(skipped.last?.utteranceRaw == "",
-                "可能是密碼欄：LLM 定稿文字不得落進 history_exchange")
+                "可能是密碼欄：**這一列**（insertSkipped）不得留明文。收斂成單列而不是整張表——dispatch 頂端那道無條件的 recordExchange 跑在 `.secureField` 偵測之前，`第二句`／`補充內容。` 照樣會另外入表；裁定明示接受該損失（內容已經過 LLM），硬停攔不到。")
         #expect(!history.exchanges.contains { $0.outcomeText?.hasPrefix("fieldChanged") ?? false },
                 "不得混進誤判率分母那一組")
+        #expect(!c.ledger.isActive, "硬停")
+        #expect(history.finished.count == 1,
+                "診斷排在 abort 之前才記得成——對調則 historySessionID 已 nil，上面那兩條會全垮")
     }
 
     /// 同一條 `insertDetached` 路徑的 **`subroleUnknown` 版**（#59 fail closed）：
-    /// 分類走 `secureUnknown`、detail 格式與 `:325` 那條逐字相同，`utteranceRaw` 同樣留空。
+    /// 分類走 `secureUnknown`、detail 格式與 `:341` 那條逐字相同，`utteranceRaw` 同樣留空，
+    /// 且同樣**當場硬停**。
     ///
     /// 骨架**必須**是 `StatefulFieldEnvironment`：`FakeFieldReader` 走 `FieldContextProviding`
     /// 的預設 `fieldGate`（`FieldAccess.swift:180-183`），那裡只剩布林的 `FieldContext.isSecure`、
@@ -846,11 +1089,13 @@ import Testing
 
         #expect(env.text(in: "A") == textAfterFirst, "session 欄位不得被補寫")
         #expect(env.text(in: "Q") == "", "可能是密碼欄：一個字都不能進")
-        #expect(clipboard.texts == ["補充內容。"], "內容仍要救——被救的是欄位 A 的話，不是密碼")
-        #expect(lastNotice(hud) == DictationController.secureFieldSkipNotice)
+        #expect(clipboard.texts.isEmpty, "**不救剪貼簿**：與 `.secure` 那條逐字相同")
+        #expect(lastNotice(hud) == "密碼欄位不聽寫")
         #expect(skipEvents(history).last?.outcomeText == "secureUnknown：sessionApp:com.foo.app",
-                "分類與 detail 格式必須與 :325 及 finalized 那條逐字相同")
+                "分類與 detail 格式必須與 :341 及 finalized 那條逐字相同")
         #expect(skipEvents(history).last?.utteranceRaw == "",
                 "『不知道是不是密碼欄』更不該留明文")
+        #expect(!c.ledger.isActive, "硬停")
+        #expect(history.finished.count == 1, "診斷排在 abort 之前才記得成")
     }
 }
