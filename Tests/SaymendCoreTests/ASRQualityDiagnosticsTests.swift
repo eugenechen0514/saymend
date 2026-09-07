@@ -108,11 +108,20 @@ import WhisperKit
         // 話語尚未閉合、潤飾尚未回來——此刻就必須已經有診斷列
         #expect(history.exchanges.isEmpty)
         #expect(history.diagnostics.count == 1)
-        #expect(history.diagnostics[0].finalizedText == "请不吝点赞 订阅 转发")
-        #expect(history.diagnostics[0].minAvgLogprob == -0.875)
-        #expect(history.diagnostics[0].maxCompressionRatio == 2.5)
-        #expect(history.diagnostics[0].segmentCount == 2)
-        #expect(history.diagnostics[0].sessionID == history.sessions[0].id)
+        // **不可以直接索引**（issue #66）：`#expect` 失敗不會中止函式，先前這裡在 count 斷言之後
+        // 照樣 `[0]`——count 一旦不是 1 就 `Fatal error: Index out of range`，
+        // swiftpm-testing-helper 以 signal 5 結束，**排在後面的測試全部沒跑**。
+        // 後果不只是這一條紅：整輪的「跑完幾條」會失真，用 mutation 量覆蓋率時會把
+        // 「崩在跑到它之前」誤讀成「這裡沒有 oracle」。守衛式改寫讓失敗只損失這一條。
+        guard let d = history.diagnostics.first, let session = history.sessions.first else {
+            Issue.record("預期恰好一列診斷與一個 session；實際 diagnostics=\(history.diagnostics.count)、sessions=\(history.sessions.count)")
+            return
+        }
+        #expect(d.finalizedText == "请不吝点赞 订阅 转发")
+        #expect(d.minAvgLogprob == -0.875)
+        #expect(d.maxCompressionRatio == 2.5)
+        #expect(d.segmentCount == 2)
+        #expect(d.sessionID == session.id)
     }
 
     /// 沒有品質資料就不寫列。系統內建引擎與遠端 Whisper 都給不出這兩個數字，

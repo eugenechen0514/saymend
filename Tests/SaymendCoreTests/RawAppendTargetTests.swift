@@ -826,6 +826,57 @@ import Testing
         #expect(skipEvents(history).first?.outcomeText == "frozen", "分類仍是 frozen")
     }
 
+    /// **`recordASRDiagnostic` 的第三個終點：`selectionPending` 期間的緩衝累積**（issue #66）。
+    ///
+    /// #64 把 `recordASRDiagnostic` 從閘門之前搬到各終點之後，五個終點裡只有三個當時有 oracle。
+    /// 把這個終點的呼叫刪掉，全套 851 條照樣全綠——不是「這裡不需要診斷」，是**沒人守著**。
+    /// 這條路徑上 `:341` 的閘門此刻已答過「不是密碼欄」，沒有更晚的偵測點可等，
+    /// 所以樣本該留就得留：選取替換是 M3 的主要用法，這格丟了等於誤轉寫統計缺一大塊。
+    ///
+    /// 刻意**不呼叫 `tick`**：不讓話語閉合就不會建 LLM task，目標一路停在 `.selectionPending`，
+    /// 兩句都走緩衝終點。省掉 gate／release 的非同步編排，也就沒有懸掛 continuation。
+    @Test func aBufferedUtteranceInASelectionSessionStillRecordsTheASRDiagnostic() {
+        let reader = FakeFieldReader()
+        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 4,
+                                      fieldIdentity: FieldIdentity(token: 1),
+                                      selectedRange: .init(location: 4, length: 3),
+                                      selectedText: "原文字")
+        let history = FakeHistory()
+        let (c, _, _, key, _, _) = makeController(fieldReader: reader, history: history)
+        let quality = TranscriptQuality(minAvgLogprob: -0.25, maxCompressionRatio: 1.125,
+                                        segmentCount: 1)
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("改正式一點", quality: quality), at: 11.0)
+        c.handleTranscript(.finalized("第二句", quality: quality), at: 13.0)
+
+        #expect(key.ops.isEmpty, "前提：selectionPending 期間只緩衝、一個字都不上屏")
+        #expect(history.diagnostics.map(\.finalizedText) == ["改正式一點", "第二句"],
+                "緩衝終點同樣要留診斷樣本，且順序與句序一致；診斷搬家不得順手把這格弄丟")
+    }
+
+    /// **`recordASRDiagnostic` 的第四個終點：插入失敗的 catch**（issue #66）。
+    ///
+    /// 與上一條同型的空白：刪掉這個終點的呼叫全套照樣全綠。
+    /// 這格特別可惜——插入失敗本身就是異常，正是事後查「當時到底聽到什麼」最需要樣本的時刻。
+    @Test func anInsertFailureStillRecordsTheASRDiagnostic() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "PREVIOUS", bundleID: "com.foo.app")
+        env.failInsertsRemaining = 2                    // keystroke 與 paste 都失敗 → 走 catch 終點
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, clipboard: clipboard, history: history)
+        let quality = TranscriptQuality(minAvgLogprob: -0.25, maxCompressionRatio: 1.125,
+                                        segmentCount: 1)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("整句話", quality: quality), at: 10.5)
+
+        #expect(env.text(in: "A") == "PREVIOUS", "前提：插入失敗＝一個字都沒進欄位（#38 原子契約）")
+        #expect(clipboard.texts == ["整句話"], "前提：走的是插入失敗終點（救剪貼簿）")
+        #expect(lastNotice(hud) == "插入失敗，內容已入剪貼簿")
+        #expect(history.diagnostics.map(\.finalizedText) == ["整句話"],
+                "插入失敗不是密碼欄：診斷樣本照留")
+    }
+
     /// 同一條資安不變式的**第三張表**：`asr_diagnostic`（`HistoryStore.swift:63-71`，
     /// SQLite 的明文 `finalizedText` 欄，設定頁歷史 UI 直接顯示）。
     ///
@@ -941,6 +992,10 @@ import Testing
         #expect(!c.ledger.isActive)
         #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
         #expect(env.text(in: "Q") == "")
+        // 與姊妹測試（`aSecureBlockedSegmentHardStopsSoTheRawNeverReachesTheLLM`）對稱的最後防線：
+        // 硬停之後 `historySessionID` 已是 nil，上面那條 `history.exchanges` 的斷言會退化成永遠成立；
+        // 欄位內容這一格是屆時唯一還看得見「潤飾全文偷渡回原欄位」的 oracle。
+        #expect(env.text(in: "A") == "片段一", "被擋片段不得經 outcome 繞回原欄位")
         #expect(!clipboard.texts.contains("片段二"))
     }
 
@@ -1043,6 +1098,10 @@ import Testing
         #expect(clipboard.texts.isEmpty, "**不救剪貼簿**：與 finalized 那條逐字相同")
         #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
         let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
+        // 用 `count == 1` 而不是只看 `.last`：`.last` 只守「有記對」，不守「沒有多記」——
+        // 多記一列（例如同時走了 fieldChanged 分支）在只看 `.last` 時是靜默通過的。
+        // 與 raw 路徑的對應測試對齊（issue #66）。
+        #expect(skipped.count == 1, "恰好一列；實際：\(skipped.map(\.outcomeText))")
         #expect(skipped.last?.outcomeText == "secureField")
         #expect(skipped.last?.utteranceRaw == "",
                 "可能是密碼欄：**這一列**（insertSkipped）不得留明文。收斂成單列而不是整張表——dispatch 頂端那道無條件的 recordExchange 跑在 `.secureField` 偵測之前，`第二句`／`補充內容。` 照樣會另外入表；裁定明示接受該損失（內容已經過 LLM），硬停攔不到。")
@@ -1091,6 +1150,9 @@ import Testing
         #expect(env.text(in: "Q") == "", "可能是密碼欄：一個字都不能進")
         #expect(clipboard.texts.isEmpty, "**不救剪貼簿**：與 `.secure` 那條逐字相同")
         #expect(lastNotice(hud) == "密碼欄位不聽寫")
+        // 用 `count == 1` 而不是只看 `.last`：`.last` 只守「有記對」，不守「沒有多記」（issue #66）。
+        #expect(skipEvents(history).count == 1,
+                "恰好一列；實際：\(skipEvents(history).map(\.outcomeText))")
         #expect(skipEvents(history).last?.outcomeText == "secureUnknown：sessionApp:com.foo.app",
                 "分類與 detail 格式必須與 :341 及 finalized 那條逐字相同")
         #expect(skipEvents(history).last?.utteranceRaw == "",
