@@ -357,7 +357,20 @@ public final class DictationController {
                     try coordinator.insertFinalized(text)
                     emitFeedback()                             // 底線延伸至新上屏文字
                 } catch {
-                    hud.present(.notice("插入失敗"))
+                    // 內容已產生卻落不了地：比照緩衝句插入失敗（:727）救進剪貼簿，別讓使用者白說話。
+                    // 這先前是全檔唯一漏掉 clipboardRescue 的同型路徑（另見 :352／:698／:724／:733／:745／:856／:893）。
+                    // 剪貼簿內容與欄位狀態一致：insertFinalized 是 try insertWithFallback(text) 成功才更新
+                    // currentUtteranceText／displayedText／insertCounter（InsertionCoordinator.swift:104-110），
+                    // 而 TextInserter 的原子契約（issue #38）保證拋錯＝一個字都沒進欄位——這一段完整落在剪貼簿。
+                    // 只保證「這一段」：同 session 內多個 .finalized 連續插入失敗時，rescue 會逐次覆寫剪貼簿
+                    // （ClipboardChannel.rescue → overwrite），最後只留最後一段。這與 :352 凍結那條同型，
+                    // 此處沒有 dispatch 的 lastRescueGeneration（:694-697）那種「只救一份」的節流。
+                    // 提示會被蓋掉：hold 模式下 asrStreamEnded（:463-465）會接著 present .lingering、
+                    // 非 active 時 archiveSession（:601）present .hidden，使用者實際看不到這行 notice。
+                    // 這是既有的 M8 LOW follow-up（notice 被 stream-end 蓋掉），不在本次修正範圍。
+                    // 不記 insertEvent：與 :727 那條緩衝句插入失敗保持一致（最小 diff、一致性優先）。
+                    clipboardRescue?(text)
+                    hud.present(.notice("插入失敗，內容已入剪貼簿"))
                 }
             }
         case .transcribing:
