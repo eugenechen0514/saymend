@@ -333,11 +333,15 @@ public final class InsertionCoordinator {
     /// 寫入前的閘門查詢（issue #37）：回非 nil＝這次不能寫。
     ///
     /// - `.different`：AX 明確指出焦點已換 → fail closed（裁定 Q1）。
-    /// - `.secure`／`.secureUnknown`：規格 §5.3「一個字都不能進密碼欄」——**不寫就滿足了**。
+    /// - `.secure`／`.secureUnknown`：這一層只回報「不能寫」，**session 的硬停由呼叫端負責**——
+    ///   兩個消費端（`DictationController` 的 `insertFinalized`:471 與 `insertDetached`:936 分支）
+    ///   都必須**先記診斷再 `abortForSecureField()`**（issue #63）。
     ///   兩者行為逐字相同，但分成 `subroleUnknown` 的兩種形態回報：後者是「AX 問不出來只好當作是」，
     ///   事後要靠這一格算 0.2s timeout 的誤殺率（issue #59）。
-    ///   session 的硬停留給 controller 既有的密碼守衛在下一句 finalized 處理，
-    ///   是刻意的最小改動：這一層只負責「不寫」，不負責 session 生命週期。
+    ///   「不寫就滿足 §5.3」是**被否決的舊判斷**：被擋片段在 `segmenter.onTranscript` 就已進 buffer
+    ///   （那一行跑在閘門查詢之前），session 不停就會經話語閉合把整句 raw 送雲端 provider，
+    ///   並讓 `dispatch` 頂端那道無條件的 `recordExchange` 把 LLM 潤飾全文寫進 `history_exchange`。
+    ///   日後新增 `.secureXxx` case 或改動本函式，硬停這一半不得省略。
     /// - `.same`／`.unknown`／沒接閘門：照常寫。`.unknown` 涵蓋「讀不到焦點」與
     ///   「無 AX 的 App（兩邊都沒有 identity）」——issue #21 的裁定，純追加永遠不得因缺 AX 而停。
     ///

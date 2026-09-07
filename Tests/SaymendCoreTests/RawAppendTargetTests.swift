@@ -687,7 +687,7 @@ import Testing
     }
 
     /// AX 連兩次問不出 subrole（#59 fail closed）走同一條寫入前閘門：行為與 `.secure` 逐字相同，
-    /// 但診斷分類是 `secureUnknown` 且帶 `sessionApp:` ——**格式與 `:325` 那條逐字相同**，
+    /// 但診斷分類是 `secureUnknown` 且帶 `sessionApp:` ——**格式與 `:341` 那條逐字相同**，
     /// 兩條路徑的誤殺樣本才合得起來算 0.2s timeout 的誤殺率。
     /// `utteranceRaw` 同樣留空：「不知道是不是密碼欄」正是最不該留明文的情形。
     ///
@@ -709,7 +709,7 @@ import Testing
 
         #expect(skipEvents(history).count == 1, "恰一列診斷")
         #expect(skipEvents(history).first?.outcomeText == "secureUnknown：sessionApp:com.foo.app",
-                "分類與 detail 格式必須與 :325 那條逐字相同")
+                "分類與 detail 格式必須與 :341 那條逐字相同")
         #expect(skipEvents(history).first?.utteranceRaw == "",
                 "『不知道是不是密碼欄』更不該留明文")
         #expect(lastNotice(hud) == "密碼欄位不聽寫")
@@ -787,8 +787,43 @@ import Testing
         #expect(history.finished.count == 1, "硬停即封存")
         #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
         #expect(env.text(in: "P") == "", "密碼欄位一個字都不能進")
+        // 硬停之後 `historySessionID` 已是 nil，上面那條 `history.exchanges` 的斷言會退化成
+        // 永遠成立；欄位內容這一格是屆時唯一還看得見「潤飾全文偷渡回欄位 A」的 oracle。
+        #expect(env.text(in: "A") == "片段一", "被擋片段不得經 outcome 繞回原欄位")
         #expect(!clipboard.texts.contains("片段二"),
                 "剪貼簿是另一個持久容器（clipboard manager 會留存），同樣不救")
+    }
+
+    /// `recordASRDiagnostic` 從閘門之前搬到各終點之後（issue #63）之後，**凍結終點**這一格
+    /// 先前沒有任何 oracle：把 `DictationController.swift:410` 那行刪掉全套照樣綠。而它正是
+    /// issue #10 id=116 幻覺樣本的實際路徑（`insertSkipped/frozen`）——`recordASRDiagnostic`
+    /// 的 doc（`:495-500`）拿那筆當存在理由（「診斷若掛在話語或 outcome 上，最需要的樣本恰好
+    /// 記不到」），最該被賭的一格反而沒人守。診斷改成「各終點各寫一次」的自陳失敗模式就是
+    /// 「日後新增終點忘了呼叫只損失樣本」，這條把該賭的那格釘起來。
+    ///
+    /// 斷言用**整份等於**（同 `aFieldChangedSkipStillRecordsTheASRDiagnostic`）：同時釘住
+    /// 「凍結那句有記」與「沒有多記」。界線是「**可能是密碼欄**才不記」，不是「被擋就不記」——
+    /// 凍結不是密碼欄，樣本照留。
+    @Test func aFrozenSkipStillRecordsTheASRDiagnostic() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, clipboard: clipboard, history: history)
+        let quality = TranscriptQuality(minAvgLogprob: -0.25, maxCompressionRatio: 1.125,
+                                        segmentCount: 1)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("第一句", quality: quality), at: 10.5)   // 照常落地
+        c.userActivityDetected(at: 10.8)                                      // 使用者手動編輯 → 凍結
+        #expect(c.ledger.frozen, "前提：確實凍結了")
+        c.handleTranscript(.finalized("第二句", quality: quality), at: 11.0)   // 走凍結終點
+
+        #expect(env.text(in: "A") == "第一句", "前提：凍結後那句不得上屏")
+        #expect(clipboard.texts == ["第二句"], "前提：走的是凍結終點（救剪貼簿）")
+        #expect(lastNotice(hud) == "已凍結，內容已入剪貼簿")
+        #expect(history.diagnostics.map(\.finalizedText) == ["第一句", "第二句"],
+                "凍結不是密碼欄，診斷樣本照留；診斷搬家不得順手把這格弄丟")
+        #expect(skipEvents(history).first?.outcomeText == "frozen", "分類仍是 frozen")
     }
 
     /// 同一條資安不變式的**第三張表**：`asr_diagnostic`（`HistoryStore.swift:63-71`，
