@@ -36,6 +36,25 @@ public final class InsertionCoordinator {
         case unsupported        // 無 AX 範圍能力／無 identity：呼叫端決定降級方式
     }
 
+    /// 純追加（insertFinalized／insertDetached）的結局（issue #37）。
+    /// 刻意**不加** `@discardableResult`：每個呼叫點都必須明白表態要怎麼處理「一個字都沒寫」，
+    /// 忘了處理就是安靜的資料遺失。
+    public enum AppendOutcome: Equatable, Sendable {
+        case inserted
+        /// AX 明確指出焦點已不在 session 欄位：**一個字都沒寫**，鏡像／counter 都沒動。
+        /// 帶現在的前景 App bundleID 供診斷判讀同 App 或跨 App。
+        case fieldChanged(currentAppBundleID: String?)
+        /// 焦點在密碼欄位，或 AX 連兩次問不出 subrole 而 fail closed（issue #59）：一個字都沒寫。
+        /// `subroleUnknown` 分辨「AX 明確說是密碼欄」與「問不出來只好當作是」——
+        /// 0.2s timeout 誤殺了多少，量測就靠這一格。
+        ///
+        /// 刻意與 `fieldChanged` 分成**兩個 case**，而不是給後者加一個 reason 參數：
+        /// `switch` 的窮盡性會逼每個呼叫點明白表態，忘了處理是編譯錯誤而不是安靜走錯分支。
+        /// 分家還有第二個理由：`fieldChanged` 那組診斷樣本正是之後評估 `CFEqual` 誤判率的**分母**，
+        /// 密碼欄位攔阻（永遠正確的攔阻）混進去就把分母弄髒了。
+        case secureField(subroleUnknown: Bool)
+    }
+
     /// 主 inserter 失敗、備援救回時的分類（issue #1 蒐證）。控制流上是「成功」，
     /// 但過去這條路徑什麼都不留，帳面與一次乾淨插入完全無法區分。
     public enum InserterFallback: String, Sendable {
@@ -51,6 +70,8 @@ public final class InsertionCoordinator {
     private let paste: any TextInserter
     private let rangeReplacer: (any SessionRangeReplacing)?
     private let pasteThreshold: Int
+    /// 寫入前的焦點閘門（issue #37）。nil＝沒有閘門＝維持舊行為（照常寫）。
+    private let fieldGate: ((FieldIdentity?) -> FieldGate)?
 
     public private(set) var currentUtteranceText = ""
     public var currentUtteranceLength: Int { currentUtteranceText.count }
@@ -68,11 +89,13 @@ public final class InsertionCoordinator {
     public init(keystroke: any TextInserter,
                 paste: any TextInserter,
                 rangeReplacer: (any SessionRangeReplacing)? = nil,
-                pasteThreshold: Int = 12) {
+                pasteThreshold: Int = 12,
+                fieldGate: ((FieldIdentity?) -> FieldGate)? = nil) {
         self.keystroke = keystroke
         self.paste = paste
         self.rangeReplacer = rangeReplacer
         self.pasteThreshold = pasteThreshold
+        self.fieldGate = fieldGate
     }
 
     /// 新 session：anchor／identity 來自 reader 同一次 snapshot（與 ledger 相同來源），
@@ -101,12 +124,16 @@ public final class InsertionCoordinator {
     // MARK: - 純追加（永遠照常）
 
     /// finalized 片段上屏。主 inserter 失敗時換另一個（規格 §5.2 逐層降級）。
-    public func insertFinalized(_ text: String) throws {
-        guard !text.isEmpty else { return }
-        try insertWithFallback(text)
+    /// 閘門判定焦點已換時回 `.fieldChanged`、判定是（或可能是）密碼欄時回 `.secureField`：
+    /// 兩者都是**一個字都沒寫，帳本／鏡像／counter 都不動**。
+    public func insertFinalized(_ text: String) throws -> AppendOutcome {
+        guard !text.isEmpty else { return .inserted }
+        let outcome = try insertWithFallback(text)
+        guard case .inserted = outcome else { return outcome }
         currentUtteranceText += text
         displayedText += text
         insertCounter += 1
+        return .inserted
     }
 
     /// 緩衝模式（選取即目標，M3 設計裁決 1）：finalized 只記帳不上屏。
@@ -122,11 +149,13 @@ public final class InsertionCoordinator {
 
     /// 不掛 utterance 帳本的直接插入：緩衝後續句落地用。
     /// 走 insertWithFallback（長度門檻選 paste／keystroke），成功即 counter 前進、鏡像追加。
-    public func insertDetached(_ text: String) throws {
-        guard !text.isEmpty else { return }
-        try insertWithFallback(text)
+    public func insertDetached(_ text: String) throws -> AppendOutcome {
+        guard !text.isEmpty else { return .inserted }
+        let outcome = try insertWithFallback(text)
+        guard case .inserted = outcome else { return outcome }
         displayedText += text
         insertCounter += 1
+        return .inserted
     }
 
     /// 零長度、現時 counter 的指令快照（零副作用，不動 currentUtteranceText）。
@@ -283,15 +312,48 @@ public final class InsertionCoordinator {
 
     /// 主 inserter 拋錯後**全量**重送給備援。成立的前提是 TextInserter 的原子契約（issue #38）：
     /// 主 inserter 拋錯＝一個字都沒進欄位，重送完整文字才不會留下「前綴＋完整文字」。
-    private func insertWithFallback(_ text: String) throws {
+    private func insertWithFallback(_ text: String) throws -> AppendOutcome {
+        // 閘門必須查兩次（issue #37）。fallback 重送是**獨立的窗口 W1′**：
+        // primary 拋錯到 secondary 送出之間，焦點一樣可能被搬走（primary 失敗本身就常伴隨
+        // App 狀態變動），只擋 primary 等於把最後一段沒設防的路留著。
+        if let blocked = focusGateBlock() { return blocked }
         let pasteFirst = text.count >= pasteThreshold
         let primary: any TextInserter = pasteFirst ? paste : keystroke
         let secondary: any TextInserter = pasteFirst ? keystroke : paste
         do {
             try primary.insert(text)
         } catch {
+            if let blocked = focusGateBlock() { return blocked }
             try secondary.insert(text)   // 這裡再拋＝真失敗，交給呼叫端的 insertFailed 路徑
             onInserterFallback?(pasteFirst ? .pasteToKeystroke : .keystrokeToPaste)
+        }
+        return .inserted
+    }
+
+    /// 寫入前的閘門查詢（issue #37）：回非 nil＝這次不能寫。
+    ///
+    /// - `.different`：AX 明確指出焦點已換 → fail closed（裁定 Q1）。
+    /// - `.secure`／`.secureUnknown`：規格 §5.3「一個字都不能進密碼欄」——**不寫就滿足了**。
+    ///   兩者行為逐字相同，但分成 `subroleUnknown` 的兩種形態回報：後者是「AX 問不出來只好當作是」，
+    ///   事後要靠這一格算 0.2s timeout 的誤殺率（issue #59）。
+    ///   session 的硬停留給 controller 既有的密碼守衛在下一句 finalized 處理，
+    ///   是刻意的最小改動：這一層只負責「不寫」，不負責 session 生命週期。
+    /// - `.same`／`.unknown`／沒接閘門：照常寫。`.unknown` 涵蓋「讀不到焦點」與
+    ///   「無 AX 的 App（兩邊都沒有 identity）」——issue #21 的裁定，純追加永遠不得因缺 AX 而停。
+    ///
+    /// **每個 case 都明白列出，不用 `default`**：`FieldGate` 之後再長出新 case 時（`.secureUnknown`
+    /// 就是這樣加進來的），編譯器必須在這裡叫，而不是讓新的未知狀態安靜掉進「照常寫」。
+    private func focusGateBlock() -> AppendOutcome? {
+        guard let fieldGate else { return nil }
+        switch fieldGate(sessionIdentity) {
+        case .different(let currentAppBundleID):
+            return .fieldChanged(currentAppBundleID: currentAppBundleID)
+        case .secure:
+            return .secureField(subroleUnknown: false)      // AX 明確說是密碼欄
+        case .secureUnknown:
+            return .secureField(subroleUnknown: true)       // 問不出 subrole，fail closed 當作是
+        case .same, .unknown:
+            return nil
         }
     }
 }

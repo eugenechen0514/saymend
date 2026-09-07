@@ -284,11 +284,15 @@ import Testing
     let (c, _, _, _, _, _) = makeController(fieldReader: reader)
     c.hotkeyPressed(at: 10.0)                               // snapshot #1：採用
     #expect(reader.released.isEmpty)
-    c.handleTranscript(.finalized("字"), at: 10.5)            // snapshot #2：密碼守衛用，當場歸還
-    #expect(reader.released == [FieldIdentity(token: 7)], "守衛用的 snapshot 不採用就要立即歸還")
+    // issue #37 起每句 finalized 有**兩道**閘門查詢：controller 的密碼守衛（snapshot #2）、
+    // coordinator 寫入前的那道（snapshot #3）。FakeFieldReader 走 protocol 預設實作＝各一次
+    // snapshot ＋ 各當場歸還，所以這裡是兩筆而非一筆。
+    c.handleTranscript(.finalized("字"), at: 10.5)
+    #expect(reader.released == [FieldIdentity(token: 7), FieldIdentity(token: 7)],
+            "兩道閘門的 snapshot 都不採用，都要立即歸還")
     #expect(c.ledger.fieldIdentity == FieldIdentity(token: 7), "ledger 那一份不受影響")
     c.escapePressed()                                       // → archiveSession：歸還採用的那一份
-    #expect(reader.released == [FieldIdentity(token: 7), FieldIdentity(token: 7)])
+    #expect(reader.released == [FieldIdentity(token: 7), FieldIdentity(token: 7), FieldIdentity(token: 7)])
     #expect(reader.released.count == reader.snapshots, "不變式：每個 snapshot 的 token 最終都歸還恰一次")
     #expect(c.ledger.fieldIdentity == nil)
 }

@@ -2,16 +2,28 @@ import Foundation
 import Testing
 @testable import SaymendCore
 
-/// issue #37 shadow 階段：每句 finalized 上屏前的「重」snapshot 換成輕量 `fieldGate`，
-/// 並把「焦點已換」記進診斷——**照常上屏、不攔、不凍、不發 notice**。
+/// issue #37 的焦點閘門本身：分類（same／different／secure／unknown）、診斷 detail 的格式、
+/// 以及它對 identity lease 的中性。
 ///
-/// 這個 suite 釘的是「零行為改變」：`insertWouldSkip` 只是觀測資料，任何一條斷言若變成
-/// 「文字沒進去」就代表 shadow 被誤實作成攔阻。閘門本身**不修 #37**，它只能關掉
-/// W0（session 開始 → 第 N 句抵達）這一段窗口。
-@Suite @MainActor struct FieldGateShadowTests {
+/// **這個 suite 原名 `FieldGateShadowTests`（PR-1a）**，釘的是「shadow 模式：只記
+/// `insertWouldSkip` 診斷、照常上屏、不發 notice」。PR-2 把閘門下沉到 `InsertionCoordinator`
+/// 的寫入路徑並真的開閘之後，那些斷言逐條翻轉：
+///
+/// - 原本「`.different` 記一列 `insertWouldSkip`，文字仍照常寫進 B」
+///   → 現在「記一列 `insertSkipped`／`fieldChanged`，B 一個字都沒進、內容進剪貼簿、發 notice」。
+///   `insertWouldSkip` 這個 kind 隨 shadow 一起退場（它存在的唯一理由是不位移既有的 history 斷言）。
+/// - 原本「shadow 不發任何 notice」→ 現在「恰好發一則 `fieldChangedNotice`」。
+/// - 未翻轉的三條（`.unknown` 照常上屏、焦點沒動零診斷、`.secure` 硬停）**逐字保留**：
+///   它們正是「閘門開了也不能碰」的那幾條界線。
+///
+/// 上屏契約與四個 TOCTOU 窗口的 oracle 在 `RawAppendTargetTests`；這裡只管閘門的分類與診斷。
+@Suite @MainActor struct FieldGateTests {
 
-    private func shadowEvents(_ history: FakeHistory) -> [HistoryExchangeRecord] {
-        history.exchanges.filter { $0.outcomeKind == "insertWouldSkip" }
+    /// 焦點已換而被攔下的診斷列。kind 沿用既有的 `insertSkipped`（守衛拒絕，非失敗），
+    /// 以 classification 前綴 `fieldChanged` 區辨。
+    private func skipEvents(_ history: FakeHistory) -> [HistoryExchangeRecord] {
+        history.exchanges.filter { $0.outcomeKind == "insertSkipped"
+            && ($0.outcomeText?.hasPrefix("fieldChanged") ?? false) }
     }
 
     /// 「AX 問不出 subrole，於是 fail closed 當密碼欄擋下」的診斷列（issue #37）。
@@ -22,38 +34,31 @@ import Testing
         }
     }
 
-    /// shadow 的賣點是「使用者看不出任何差別」，而 HUD notice 是唯一使用者會直接看到的行為改變
-    /// （`.notice` 會蓋掉聽寫中的 `.listening`，HUDWindowController 還會為它取消 hideTask）。
-    /// 因此斷言的對象必須是**整個 `.notice` case**，不是某一個字串——只比字串的話，
-    /// 之後有人在 `.different` 分支順手加一句新 notice、把 shadow 悄悄變成使用者可見的行為，
-    /// 這條測試不會叫。
-    private func emittedNoNotice(_ hud: FakeHUD) -> Bool {
-        !hud.states.contains { if case .notice = $0 { return true }; return false }
+    private func notices(_ hud: FakeHUD) -> [String] {
+        hud.states.compactMap { if case .notice(let s) = $0 { return s }; return nil }
     }
 
     /// 寬窗口（同 App 換欄位）：session 起在 A，兩句之間頁面 JS 把焦點跳到 B，第二句抵達。
-    /// shadow 模式：記一筆診斷，**文字仍照常寫進 B**。
-    @Test func focusMovedToAnotherFieldOfTheSameAppRecordsShadowEventAndStillAppends() {
+    /// detail 要能事後判讀成「同一個 App 內換了欄位」。
+    @Test func focusMovedToAnotherFieldOfTheSameAppIsSkippedAndRecordedAsSameApp() {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
         env.addField("B", text: "", bundleID: "com.foo.app")
         let history = FakeHistory()
-        let (c, _, hud) = makeStatefulController(env: env, history: history)
+        let (c, _, hud) = makeStatefulController(env: env, clipboard: ClipboardSpy(), history: history)
         c.hotkeyPressed(at: 10.0)
         c.handleTranscript(.finalized("第一句"), at: 10.5)
         #expect(env.text(in: "A") == "第一句")
         env.focus("B")                                   // 無 keyDown、無 mouseDown、非切 App
         c.handleTranscript(.finalized("第二句"), at: 11.0)
-        let shadow = shadowEvents(history)
-        #expect(shadow.count == 1)
-        #expect(shadow.first?.utteranceRaw == "第二句")
-        #expect(shadow.first?.outcomeText == "fieldChanged：sameApp:com.foo.app")
-        // shadow 模式的正確行為就是不改行為：文字照常進了現在聚焦的那個欄位
-        #expect(env.text(in: "B") == "第二句", "shadow 不攔阻：第二句仍照常上屏")
-        #expect(env.text(in: "A") == "第一句")
-        #expect(!c.ledger.frozen, "shadow 不凍結")
-        #expect(emittedNoNotice(hud), "shadow 不發任何 notice")
-        #expect(c.ledger.isActive, "shadow 不中止 session")
+        #expect(skipEvents(history).count == 1, "恰一列——閘門下沉後不得再有 shadow 那列重複計數")
+        #expect(skipEvents(history).first?.utteranceRaw == "第二句")
+        #expect(skipEvents(history).first?.outcomeText == "fieldChanged：sameApp:com.foo.app")
+        #expect(env.text(in: "B") == "", "別的欄位一個字都不能進")
+        #expect(env.text(in: "A") == "第一句", "也不會補寫回 A")
+        #expect(!c.ledger.frozen, "只跳過這一句，不凍結（裁定 Q2）")
+        #expect(c.ledger.isActive, "也不中止 session")
+        #expect(notices(hud) == [DictationController.fieldChangedNotice], "恰一則提示")
     }
 
     /// 跨 App：detail 要能事後判讀「從哪個 App 換到哪個 App」。
@@ -62,19 +67,21 @@ import Testing
         env.addField("A", text: "", bundleID: "com.foo.app")
         env.addField("B", text: "", bundleID: "com.tinyspeck.slackmacgap")
         let history = FakeHistory()
-        let (c, _, hud) = makeStatefulController(env: env, history: history)
+        let clipboard = ClipboardSpy()
+        let (c, _, hud) = makeStatefulController(env: env, clipboard: clipboard, history: history)
         c.hotkeyPressed(at: 10.0)
         c.handleTranscript(.finalized("第一句"), at: 10.5)
         env.focus("B")
         c.handleTranscript(.finalized("第二句"), at: 11.0)
-        #expect(shadowEvents(history).first?.outcomeText
+        #expect(skipEvents(history).first?.outcomeText
                 == "fieldChanged：crossApp:com.foo.app→com.tinyspeck.slackmacgap")
-        #expect(env.text(in: "B") == "第二句")
-        #expect(emittedNoNotice(hud), "跨 App 也一樣：shadow 不發任何 notice")
+        #expect(env.text(in: "B") == "", "跨 App 更不能寫")
+        #expect(clipboard.texts == ["第二句"], "內容不得遺失")
+        #expect(notices(hud) == [DictationController.fieldChangedNotice])
     }
 
     /// 焦點沒動：零診斷事件（誤判率的分母乾不乾淨全看這條）。
-    @Test func focusUnchangedRecordsNoShadowEvent() {
+    @Test func focusUnchangedRecordsNoSkipEvent() {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
         env.addField("B", text: "", bundleID: "com.foo.app")
@@ -83,13 +90,13 @@ import Testing
         c.hotkeyPressed(at: 10.0)
         c.handleTranscript(.finalized("第一句"), at: 10.5)
         c.handleTranscript(.finalized("第二句"), at: 11.0)
-        #expect(shadowEvents(history).isEmpty)
+        #expect(skipEvents(history).isEmpty)
         #expect(env.text(in: "A") == "第一句第二句")
         #expect(env.text(in: "B") == "")
     }
 
     /// **issue #21 的釘子**：沒有 AX 的 App（兩邊都沒有 identity）＝ `.unknown`，
-    /// 照常上屏、零診斷。閘門若把 `.unknown` 當成 `.different`，每一句都會被記一筆假陽性。
+    /// 照常上屏、零診斷。閘門若把 `.unknown` 當成 `.different`，這種 App 從此一個字也打不出來。
     @Test func withoutAnyIdentityAppendsAsUsualAndRecordsNothing() {
         let reader = FakeFieldReader()                 // 預設：有聚焦元素、無 anchor、無 identity
         let history = FakeHistory()
@@ -99,11 +106,13 @@ import Testing
         c.handleTranscript(.finalized("第二句"), at: 11.0)
         #expect(c.ledger.fieldIdentity == nil)
         #expect(key.ops == [.insert("第一句"), .insert("第二句")], "無 AX 的純追加照常上屏")
-        #expect(shadowEvents(history).isEmpty, "沒有 identity 可比就不得產生 shadow 診斷")
+        #expect(skipEvents(history).isEmpty, "沒有 identity 可比就不得產生跳過診斷")
         #expect(history.exchanges.filter { $0.outcomeKind == "insertSkipped" }.isEmpty)
     }
 
-    /// 聽寫途中焦點切進密碼欄位：閘門回 `.secure`，行為必須逐字不變（硬停整個 session）。
+    /// 聽寫途中焦點切進密碼欄位：controller 的閘門回 `.secure`，行為必須逐字不變（硬停整個 session）。
+    /// 這是**兩句之間**的切換，controller 那一道就攔得住；窄窗口版（切換發生在 controller
+    /// 閘門答完之後）由 `RawAppendTargetTests` 釘，那條走的是 coordinator 層的 `.secure`。
     @Test func secureFieldMidSessionStillAborts() {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
@@ -118,7 +127,7 @@ import Testing
         #expect(env.text(in: "A") == "正常內容")
         #expect(!c.ledger.isActive, "session 硬停")
         #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
-        #expect(shadowEvents(history).isEmpty, "密碼欄位走 secure 分支，不記 shadow 診斷")
+        #expect(skipEvents(history).isEmpty, "密碼欄位走 secure 分支，不記 fieldChanged 診斷")
         #expect(secureUnknownEvents(history).isEmpty,
                 "AX 明確回答了，不得被記成 secureUnknown——那會污染「AX 沒回應」這組樣本的分子")
     }
@@ -151,7 +160,7 @@ import Testing
                 "secureUnknown 有可能就是密碼欄（慢 App 的 AXSecureTextField 連兩次逾時），定稿文字一個字都不得落進 history_exchange")
         #expect(events.first?.outcomeText == "secureUnknown：sessionApp:com.foo.app",
                 "誤殺率要的是「哪個 App、發生幾次」，metadata 就夠；標 sessionApp 是因為這是 session 起始的前景 App，不保證就是逾時的那個")
-        #expect(shadowEvents(history).isEmpty, "secureUnknown 不是 fieldChanged")
+        #expect(skipEvents(history).isEmpty, "secureUnknown 不是 fieldChanged")
     }
 
     /// **順序**：`recordInsertEvent` 必須排在 `abortForSecureField()` **之前**。
@@ -180,20 +189,19 @@ import Testing
     /// `fieldChangeDetail` 的保守歸類（reviewer M7 存活的那條）：兩邊 bundleID 都讀不到時
     /// **必須歸入 crossApp**，不得因為「兩邊都是 nil、看起來相等」就寫成 sameApp——
     /// 那會把「其實已經換 App」的樣本混進 sameApp 那組、低估風險。
-    /// 這條分支近乎不可達（要 identity 登記成功、bundleID 卻兩次都讀不到），但保守規則
-    /// 原本只活在註解裡；這裡把它升級成斷言。
     @Test func unknownBundleIDsOnBothSidesAreClassifiedAsCrossApp() {
         let reader = FakeFieldReader.sessionField(token: 1)   // 有 identity、frontAppBundleID 為 nil
         let history = FakeHistory()
-        let (c, _, _, key, _, _) = makeController(fieldReader: reader, history: history)
+        let (c, _, _, key, _, _) = makeController(clipboard: ClipboardSpy(),
+                                                  fieldReader: reader, history: history)
         c.hotkeyPressed(at: 10.0)
         c.handleTranscript(.finalized("第一句"), at: 10.5)
         reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0,
                                       fieldIdentity: FieldIdentity(token: 2))   // 換了欄位、仍讀不到 bundleID
         c.handleTranscript(.finalized("第二句"), at: 11.0)
-        #expect(shadowEvents(history).first?.outcomeText == "fieldChanged：crossApp:?→?",
+        #expect(skipEvents(history).first?.outcomeText == "fieldChanged：crossApp:?→?",
                 "分不出同 App 或跨 App 時保守歸入 crossApp")
-        #expect(key.ops.contains(.insert("第二句")), "shadow 仍不攔阻")
+        #expect(key.ops == [.insert("第一句")], "第二句被攔下，一個字都沒送到 inserter")
     }
 
     /// 閘門對 lease 不變式必須中性：整段 session 跑完（含焦點切換）registry 不得有殘留持有者。
@@ -201,7 +209,7 @@ import Testing
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
         env.addField("B", text: "", bundleID: "com.foo.app")
-        let (c, _, _) = makeStatefulController(env: env)
+        let (c, _, _) = makeStatefulController(env: env, clipboard: ClipboardSpy())
         c.hotkeyPressed(at: 10.0)
         c.handleTranscript(.finalized("第一句"), at: 10.5)
         env.focus("B")
