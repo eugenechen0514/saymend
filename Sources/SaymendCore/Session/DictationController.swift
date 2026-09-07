@@ -186,14 +186,6 @@ public final class DictationController {
     /// 這裡說的是「字根本沒上屏」——對使用者的下一步動作完全不同（前者可以不理，後者要去貼上）。
     static let fieldChangedNotice = "欄位已切換，內容已入剪貼簿"
 
-    /// 寫入前的焦點閘門看到**密碼欄位**而擋下一句 raw 時的提示（issue #37）。
-    /// **與 `fieldChangedNotice` 分開**：使用者的下一步一樣是去貼上，但成因不同——
-    /// 前者是「從欄位 A 換到欄位 B」，這裡是「切進密碼欄」；講錯了會讓使用者往錯的方向找原因。
-    /// 分類分開還有第二個理由：`fieldChanged` 那組診斷樣本正是之後評估 `CFEqual` 誤判率的**分母**，
-    /// 密碼欄位攔阻混進去就把分母弄髒了。
-    /// 這句話與剪貼簿救援本身沒有規格 §5.3 的疑慮——被救的是使用者對**欄位 A** 說的話，不是密碼。
-    static let secureFieldSkipNotice = "焦點已切到密碼欄位，內容已入剪貼簿"
-
     public func escapePressed() {
         if isLingering {
             archiveSession()                // 延續窗中按 Esc＝提前定稿（吞掉 Esc 由熱鍵層處理）
@@ -383,11 +375,24 @@ public final class DictationController {
                 // 走 accumulateFinalized、本來就不上屏，也不再被記成假的跳過。
                 break
             }
-            // **必須在密碼欄位守衛之後**（issue #10）：診斷列會把定稿文字原樣落進資料庫，
-            // 寫在守衛之前等於在密碼欄位裡留下一份使用者說的話。
-            recordASRDiagnostic(text: text, quality: quality)
+            // **必須在所有密碼欄守衛之後**（issue #10）：診斷列會把定稿文字原樣落進
+            // `asr_diagnostic.finalizedText`——SQLite 的明文欄，唯二的閘是 `settings.historyEnabled`
+            // （預設 true）與 `quality != nil`（WhisperKit 每筆定稿都給非 nil），所以 WhisperKit
+            // 使用者在預設設定下每一句都會落地。寫在守衛之前等於在密碼欄位裡留下一份使用者說的話。
+            //
+            // 本分支把「守衛」的範圍擴大了：除了上面那道 `:341` 的閘門查詢，還多了一道**寫入前閘門**
+            // （`coordinator.insertFinalized` 回 `.secureField`），專門攔「`:341` 答完之後、物理寫入
+            // 之前」焦點才切進密碼欄的窄窗口。診斷若仍留在這裡，就會跑在那道新守衛**之前**——
+            // 在已判定是密碼欄的情況下照樣留下一份明文，§5.3「一個字都不能進」換個容器同樣是違反
+            // （硬停擋住了雲端 LLM 與 `history_exchange`，卻擋不到這張表）。
+            //
+            // 故改成**插入結局已知之後**才寫，各終點各記一次，唯獨 `.secureField` 那條不記。
+            // 各終點各寫一次而不是用 `defer` 統一補：這樣的預設是 fail closed——日後新增的終點
+            // 若忘了呼叫，只損失診斷樣本；`defer` 的預設則是「一律寫」，新增一條密碼欄終點就會多洩一份明文。
             if case .selectionPending = sessionTarget {
                 coordinator.accumulateFinalized(text)      // 緩衝：不上屏（M3 設計裁決 1）
+                // 緩衝句這條路徑上，`:341` 的閘門此刻已答過「不是密碼欄」，沒有更晚的偵測點可等。
+                recordASRDiagnostic(text: text, quality: quality)
             } else {
                 // 凍結守衛（合併阻擋級 finding）：raw 插入路徑先前缺這道守衛，其他每條落地路徑都有
                 // （applyNewContent:599／wasBuffered:545／applyCorrection 等）。freeze() 只設 frozen 旗標、
@@ -402,6 +407,7 @@ public final class DictationController {
                 guard !ledger.frozen else {
                     recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: text)
                     rescueToClipboard(text)
+                    recordASRDiagnostic(text: text, quality: quality)
                     hud.present(.notice("已凍結，內容已入剪貼簿"))
                     return
                 }
@@ -409,6 +415,7 @@ public final class DictationController {
                     switch try coordinator.insertFinalized(text) {
                     case .inserted:
                         emitFeedback()                         // 底線延伸至新上屏文字
+                        recordASRDiagnostic(text: text, quality: quality)
                     case .fieldChanged(let currentAppBundleID):
                         // 寫入前的閘門 fail closed（issue #37 裁定 Q1）：一個字都沒進任何欄位。
                         // 只跳過這一句，**不 freeze、不 archive**（裁定 Q2）——焦點跳回原欄位之後
@@ -417,23 +424,36 @@ public final class DictationController {
                                           utteranceText: text,
                                           detail: fieldChangeDetail(current: currentAppBundleID))
                         rescueToClipboard(text)
+                        recordASRDiagnostic(text: text, quality: quality)
                         hud.present(.notice(Self.fieldChangedNotice))
                         skippedRaw = true
                         return
                     case .secureField(let subroleUnknown):
-                        // 焦點已切進密碼欄，或 AX 問不出 subrole 而 fail closed（規格 §5.3／issue #59）。
-                        // 與 `.fieldChanged` 同樣**不 freeze、不 archive**——session 的硬停仍由
-                        // controller 既有的密碼守衛（:325 那道）在下一句 finalized 發動，是刻意的最小改動。
+                        // 焦點已切進密碼欄，或 AX 問不出 subrole 而 fail closed（規格 §5.3／issue #59）：
+                        // **硬停整個 session**，與上面那道 `:341` 的守衛逐字相同。
+                        //
+                        // 不能比照 `.fieldChanged` 只跳過這一句：片段在 `segmenter.onTranscript`
+                        // 就已經進了斷句器 buffer（那一行跑在閘門查詢**之前**），session 若繼續跑，
+                        // 話語閉合時 `processUtterance` 會把**含被擋片段**的整句 raw 送
+                        // `intentService.process`（雲端 provider）；而 `dispatch` 頂端那道無條件的
+                        // `recordExchange` 又跑在 `skippedRaw` 早退**之前**，LLM 潤飾全文
+                        // （含被擋片段）會明文落進 `history_exchange.outcomeText`，`historyEnabled`
+                        // 預設 true。失敗情境：對欄位 A 說「我的密碼是」→ 焦點被搬到密碼欄 P →
+                        // 說「1234」→ 整句上雲端 → 明文永久寫進本機 SQLite。
+                        // `abortForSecureField()` 的 `segmenter.hardReset()` 讓那句 raw 根本不會閉合。
                         //
                         // **`utteranceText` 一律留空**（issue #10／#58 的不變式）：`.secureField` 的定義
                         // 涵蓋「有可能就是密碼欄」，把定稿文字原樣寫進 `history_exchange` 等於在可能是
-                        // 密碼欄的地方留下一份明文，而 `historyEnabled` 預設為 true。誤判率要的是分子／
-                        // 分母與「哪些 App 常逾時」，句子內容對這個目的沒有任何貢獻。
+                        // 密碼欄的地方留下一份明文。誤判率要的是分子／分母與「哪些 App 常逾時」，
+                        // 句子內容對這個目的沒有任何貢獻。
                         //
                         // 分類分成兩條：`secureField`（AX 明確說是密碼欄，不帶 detail——沒有 bundleID，
-                        // 也不該有）與 `secureUnknown`（問不出來）。後者的 detail 格式**與 :325 那條逐字相同**，
+                        // 也不該有）與 `secureUnknown`（問不出來）。後者的 detail 格式**與 :341 那條逐字相同**，
                         // 兩條路徑的誤殺樣本才合得起來算。`sessionApp:` 標的是 session 起始的前景 App，
                         // 不保證就是逾時的那個。
+                        //
+                        // **順序不可對調**：`abortForSecureField()` 會 `archiveSession()`，而 archive
+                        // 把 `historySessionID` 清成 nil，`recordInsertEvent` 沒有 hid 就整筆靜默丟掉。
                         if subroleUnknown {
                             recordInsertEvent(kind: "insertSkipped", classification: "secureUnknown",
                                               utteranceText: "",
@@ -442,10 +462,13 @@ public final class DictationController {
                             recordInsertEvent(kind: "insertSkipped", classification: "secureField",
                                               utteranceText: "")
                         }
-                        rescueToClipboard(text)
-                        hud.present(.notice(Self.secureFieldSkipNotice))
-                        // 與 `.fieldChanged` 同：被閘門拒絕的 raw 不得從潤飾路徑偷渡回欄位。
-                        skippedRaw = true
+                        // **不 `rescueToClipboard`**：剪貼簿是另一個持久容器（clipboard manager 會留存），
+                        // 而這段 raw 同樣可能含焦點已在密碼欄期間說出的字；`:341` 那道守衛今天也不救。
+                        // **不 `recordASRDiagnostic`**：同一個理由換一張表——`asr_diagnostic.finalizedText`
+                        // 是明文欄，這裡已判定是密碼欄，一個字都不留。這也是診斷從閘門之前搬到各終點的原因。
+                        // **不另發 notice**：`abortForSecureField()` 自己會發「密碼欄位不聽寫」。
+                        // **不設 `skippedRaw`**：`hardReset` 之後這句根本不會閉合、不會 dispatch。
+                        abortForSecureField()
                         return
                     }
                 } catch {
@@ -463,6 +486,7 @@ public final class DictationController {
                     // 這是既有的 M8 LOW follow-up，已另立 issue #61（安全相關 notice 的最短顯示保證）。
                     // 不記 insertEvent：與緩衝句插入失敗那條保持一致（最小 diff、一致性優先）。
                     rescueToClipboard(text)
+                    recordASRDiagnostic(text: text, quality: quality)
                     hud.present(.notice("插入失敗，內容已入剪貼簿"))
                 }
             }
@@ -801,8 +825,14 @@ public final class DictationController {
         //
         // 只記診斷、**不發第二則提示、不再進剪貼簿**：使用者在跳過的當下已經被告知內容在剪貼簿了。
         if skippedRaw {
-            recordInsertEvent(kind: "outcomeDropped", classification: "skippedRaw",
-                              utteranceText: snapshot.text.isEmpty ? sessionBefore : snapshot.text)
+            // 世代守衛不可省：`recordInsertEvent` 用的是**呼叫當下**的 `historySessionID`，
+            // 而本早退位在下面那道 `guard ledger.generation == generation` 之前。時序
+            // 「session A 部分跳過、LLM 卡住 → Esc 封存 A → 開 session B 並說完一句（B 有自己的 hid）
+            // → A 的舊 outcome 才回來」會讓這筆診斷掛到 **B** 的 hid 底下，A 的跳過在資料上變成 B 的。
+            if ledger.generation == generation {
+                recordInsertEvent(kind: "outcomeDropped", classification: "skippedRaw",
+                                  utteranceText: snapshot.text.isEmpty ? sessionBefore : snapshot.text)
+            }
             // **部分片段被跳過時，落地的那段仍須入帳**。`snapshotAndBeginNext()` 已經把它從
             // `coordinator.currentUtteranceText` 移進 snapshot，早退若直接 return，那段字就只存在於
             // 欄位與 `coordinator.displayedText`（鏡像），`ledger.sessionText` 從頭到尾沒認過它。兩個後果：
@@ -886,11 +916,15 @@ public final class DictationController {
                         hud.present(.notice(Self.fieldChangedNotice))
                     case .secureField(let subroleUnknown):
                         // 焦點已切進密碼欄，或 AX 問不出 subrole 而 fail closed（規格 §5.3／issue #59）：
-                        // 比照上一條救進剪貼簿並提示，但分類與文案分開——密碼欄位攔阻不得混進
-                        // `fieldChanged` 那組誤判率分母。同樣不 freeze、不 archive。
-                        // `utteranceText` 一律留空：理由與 finalized 那條逐字相同（可能是密碼欄，
-                        // 不得在 `history_exchange` 留下明文）。
-                        // 同樣不設 skippedRaw——這裡處理的已經是 LLM outcome 本身。
+                        // 與 finalized 那條逐字相同——記診斷後**硬停整個 session**。
+                        // 分類與 `fieldChanged` 分開：密碼欄位攔阻不得混進那組誤判率分母。
+                        // `utteranceText` 一律留空（可能是密碼欄，不得在 `history_exchange` 留下明文）。
+                        //
+                        // **預設不救剪貼簿**：這句的內容雖然是使用者對欄位 A 說的、且已經過 LLM，
+                        // 但它的 raw 走的是同一個 segmenter，同樣可能含焦點已在密碼欄期間說出的片段——
+                        // 證明不出「不可能含密碼」，就照裁定的預設不救。損失與「下一句撞到 `:341`」相同。
+                        //
+                        // **順序不可對調**：archive 會把 `historySessionID` 清成 nil，診斷排在後面會整筆丟掉。
                         if subroleUnknown {
                             recordInsertEvent(kind: "insertSkipped", classification: "secureUnknown",
                                               utteranceText: "",
@@ -899,8 +933,7 @@ public final class DictationController {
                             recordInsertEvent(kind: "insertSkipped", classification: "secureField",
                                               utteranceText: "")
                         }
-                        rescueToClipboard(text)
-                        hud.present(.notice(Self.secureFieldSkipNotice))
+                        abortForSecureField()
                     }
                 } catch {
                     rescueToClipboard(text)
@@ -1163,7 +1196,8 @@ public final class DictationController {
     ///   守衛跑在上屏當下，該句稍後才產生自己的 outcome 列。
     /// - 在 dispatch／apply 記的（`tailAdvanced`／`unverified`／`fieldMismatch`／`outcomeDropped`）：
     ///   在該句的 outcome 列**之後**（dispatch 先記、apply 後跑），兩列相鄰。
-    /// - `secureUnknown`：**沒有** outcome 列可相鄰，session 當場 abort。
+    /// - `secureField`／`secureUnknown`（無論來自 `:341` 那道守衛或寫入前的閘門）：
+    ///   **沒有** outcome 列可相鄰，session 當場 abort。
     ///
     /// `utteranceText` 帶的是使用者說的話，會原樣落進 `history_exchange.utteranceRaw`。
     /// 可能是密碼欄位的路徑一律傳 `""`，改把判讀用的 metadata 放進 `detail`（issue #10 的不變式）。
