@@ -1196,8 +1196,11 @@ public final class DictationController {
     ///   守衛跑在上屏當下，該句稍後才產生自己的 outcome 列。
     /// - 在 dispatch／apply 記的（`tailAdvanced`／`unverified`／`fieldMismatch`／`outcomeDropped`）：
     ///   在該句的 outcome 列**之後**（dispatch 先記、apply 後跑），兩列相鄰。
-    /// - `secureField`／`secureUnknown`（無論來自 `:341` 那道守衛或寫入前的閘門）：
-    ///   **沒有** outcome 列可相鄰，session 當場 abort。
+    /// - `secureUnknown`（`:341` 那道守衛與寫入前的閘門**都會**記）與 `secureField`（**只有**
+    ///   寫入前的閘門會記——`:341` 的 `.secure` case 直接 `abortForSecureField()` 就 return，
+    ///   不留 `insertSkipped` 列）：兩者都**沒有** outcome 列可相鄰，session 當場 abort。
+    ///   統計「AX 明說是密碼欄」的次數時要記得這個不對稱：`secureField` 的分母只涵蓋
+    ///   「聽寫途中切進去」，不含「session 開始時就在密碼欄」（後者連列都沒有，issue #58 的 follow-up）。
     ///
     /// `utteranceText` 帶的是使用者說的話，會原樣落進 `history_exchange.utteranceRaw`。
     /// 可能是密碼欄位的路徑一律傳 `""`，改把判讀用的 metadata 放進 `detail`（issue #10 的不變式）。

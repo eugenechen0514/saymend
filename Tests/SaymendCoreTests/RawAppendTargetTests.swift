@@ -797,7 +797,7 @@ import Testing
     /// `recordASRDiagnostic` 從閘門之前搬到各終點之後（issue #63）之後，**凍結終點**這一格
     /// 先前沒有任何 oracle：把 `DictationController.swift:410` 那行刪掉全套照樣綠。而它正是
     /// issue #10 id=116 幻覺樣本的實際路徑（`insertSkipped/frozen`）——`recordASRDiagnostic`
-    /// 的 doc（`:495-500`）拿那筆當存在理由（「診斷若掛在話語或 outcome 上，最需要的樣本恰好
+    /// 的 doc（`:504-511`）拿那筆當存在理由（「診斷若掛在話語或 outcome 上，最需要的樣本恰好
     /// 記不到」），最該被賭的一格反而沒人守。診斷改成「各終點各寫一次」的自陳失敗模式就是
     /// 「日後新增終點忘了呼叫只損失樣本」，這條把該賭的那格釘起來。
     ///
