@@ -447,6 +447,12 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(pb.string(forType: .string) == "乙",
                 "跨輪必須覆寫，不得黏上一輪的殘留；實際 \(pb.string(forType: .string) ?? "nil")")
         #expect(channel.rescueStillInClipboard == "乙")
+        // 覆寫之後 `landedRescue` 記下的必須是**新**輪次。只驗文字看不出「沿用舊 round」這個錯誤——
+        // 它要等到同輪的下一段進來、被誤判成不同輪而又被覆寫掉時才發作，那時前一段已經沒了。
+        channel.rescue("丙", round: 2)
+        #expect(pb.string(forType: .string) == "乙丙",
+                "覆寫後必須記成新輪次，同輪的下一段才接得上；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "乙丙")
     }
 
     /// round 必須跨得過 paste 的暫時擠開／放回：收尾把救援放回時若沒把 round 一起還原，
