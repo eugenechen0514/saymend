@@ -193,14 +193,19 @@ final class AXFieldReader: FieldContextProviding {
     private let readSubrole: (AXUIElement) -> (AXError, String?)
     /// `focusedElement` 可注入只為了讓 `fieldGate` 這道閘門有單元測試（比照 AXInserter）；production 用預設值。
     private let focusedElement: () -> AXUIElement?
+    /// 前景 App bundleID 可注入只為了讓 `.different` 帶出去的那一格能用**具體值**斷言；production 用預設值。
+    /// 那一格是 shadow 診斷判讀「同 App 換欄位」還是「跨 App」的唯一依據，不給 seam 就只驗得到 case。
+    private let frontmostBundleID: () -> String?
 
     init(profiles: (any AppProfileStore)? = nil, registry: AXFieldRegistry,
          readSubrole: @escaping (AXUIElement) -> (AXError, String?) = AXFieldAccess.readSubrole,
-         focusedElement: @escaping () -> AXUIElement? = { AXFieldAccess.focusedElement() }) {
+         focusedElement: @escaping () -> AXUIElement? = { AXFieldAccess.focusedElement() },
+         frontmostBundleID: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }) {
         self.profiles = profiles
         self.registry = registry
         self.readSubrole = readSubrole
         self.focusedElement = focusedElement
+        self.frontmostBundleID = frontmostBundleID
     }
 
     func snapshot() -> FieldContext {
@@ -296,7 +301,7 @@ final class AXFieldReader: FieldContextProviding {
         guard let sessionIdentity else { return .unknown }
         return registry.matches(sessionIdentity, element: element)
             ? .same
-            : .different(currentAppBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+            : .different(currentAppBundleID: frontmostBundleID())
     }
 }
 

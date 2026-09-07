@@ -5,7 +5,8 @@ import SaymendCore
 
 /// issue #37 shadow 階段：`AXFieldReader.fieldGate` 的輕量閘門。
 /// 元素用 `AXUIElementCreateApplication(pid)` 建（不需要輔助使用權限）；不同 pid 即不同元素、CFEqual 判同。
-/// `focusedElement` 注入讓這道閘門不需要真的焦點就能驗（比照 AXInserterIdentityGateTests）。
+/// `focusedElement` 注入讓這道閘門不需要真的焦點就能驗（比照 AXInserterIdentityGateTests）；
+/// `frontmostBundleID` 注入讓 `.different` 帶出去的 bundleID 能用具體值斷言，不必依賴跑測試時誰在前景。
 ///
 /// 這裡驗不到的：真正的密碼欄位 subrole（測試行程建不出 `AXSecureTextField` 元素），
 /// 以及「每句 AX IPC 從 4–5 降到 2」這個成本面事實——只能靠實機驗證。
@@ -45,15 +46,27 @@ import SaymendCore
         #expect(reader.fieldGate(sessionIdentity: token) == .same)
     }
 
-    /// 焦點換到別的元素＝`.different`（bundleID 取自 NSWorkspace 前景 App，測試行程不保證有值，只斷言 case）。
-    @Test func anotherElementIsDifferent() {
+    /// 焦點換到別的元素＝`.different`，且**必須帶上現在的前景 App bundleID**。
+    /// 那一格是 shadow 診斷判讀「同 App 換欄位」還是「跨 App」的唯一依據；只 `guard case .different`
+    /// 等於那一格完全沒被驗證，實作填錯值或永遠填 nil 都不會被抓到。
+    @Test func anotherElementIsDifferentAndCarriesTheFrontmostBundleID() {
         let r = AXFieldRegistry()
         let token = r.identity(for: AXUIElementCreateApplication(me))
-        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead, focusedElement: { AXUIElementCreateApplication(1) })   // launchd
-        guard case .different = reader.fieldGate(sessionIdentity: token) else {
-            Issue.record("焦點已換到別的元素，閘門必須回 .different")
-            return
-        }
+        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead,
+                                   focusedElement: { AXUIElementCreateApplication(1) },   // launchd
+                                   frontmostBundleID: { "com.example.other" })
+        #expect(reader.fieldGate(sessionIdentity: token) == .different(currentAppBundleID: "com.example.other"))
+    }
+
+    /// 讀不到前景 App（NSWorkspace 在某些時機回 nil）：不得 crash，也不得亂填一個值——
+    /// nil 會被 `fieldChangeDetail` 保守歸入 crossApp，那是刻意的（issue #37 的既有裁決）。
+    @Test func unreadableFrontmostAppYieldsNilBundleIDInsteadOfCrashingOrGuessing() {
+        let r = AXFieldRegistry()
+        let token = r.identity(for: AXUIElementCreateApplication(me))
+        let reader = AXFieldReader(registry: r, readSubrole: notSecureRead,
+                                   focusedElement: { AXUIElementCreateApplication(1) },
+                                   frontmostBundleID: { nil })
+        #expect(reader.fieldGate(sessionIdentity: token) == .different(currentAppBundleID: nil))
     }
 
     /// session archive 後 token 已釋放：即使焦點還在同一元素，舊 token 也不得回 `.same`。
