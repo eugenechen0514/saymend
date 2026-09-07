@@ -246,6 +246,24 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(channel.rescueStillInClipboard == "救援 R")
     }
 
+    /// 上一條那條「被清空才放回」的分支也要保住 round：它今天正確是因為共用 `restore(lease.target)`，
+    /// 不是因為有測試守著。分支若自建一個不帶 round 的 RestoreTarget，同一輪的下一段就會覆寫掉累積中的內容。
+    @Test func theRoundSurvivesAPureClearThatForcedTheRescueBack() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("甲", round: 1)
+        try channel.withTransientWrite("A") {}
+        pb.clearContents()                              // 外部只清空：changeCount 前進，走「被清空才放回」分支
+        timer.now = 0.3
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "甲", "前提：清空放回分支把救援放回")
+        channel.rescue("乙", round: 1)
+        #expect(pb.string(forType: .string) == "甲乙",
+                "清空放回分支掉了 round 就會變成只剩「乙」；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
+    }
+
     /// 同樣的純清空若擠開的是使用者內容 U：維持不寫回——U 沒有救援那種「不落地就沒了」的分量，
     /// 而清空可能正是使用者（或其工具）的意圖。
     @Test func aPureClearDuringAPasteThatDisplacedUserContentStaysEmpty() throws {
@@ -536,5 +554,23 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(read == "S")
         #expect(pb.string(forType: .string) == "救援 R")
         #expect(channel.rescueStillInClipboard == "救援 R")
+    }
+
+    /// Cmd+C 備援收尾（`allowingForeignWrite`）放回救援時同樣要保住 round：
+    /// 否則選取備援讀取之後，同一輪的下一段救援會覆寫掉前面已經累積好的內容。
+    @Test func theRoundSurvivesATransientReadThatDisplacedTheRescue() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲", round: 1)
+        let read = channel.withTransientRead {
+            pb.clearContents()
+            pb.setString("S", forType: .string)
+        }
+        #expect(read == "S")
+        #expect(pb.string(forType: .string) == "甲", "前提：讀取收尾把救援放回")
+        channel.rescue("乙", round: 1)
+        #expect(pb.string(forType: .string) == "甲乙",
+                "allowingForeignWrite 收尾掉了 round 就會變成只剩「乙」；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
     }
 }
