@@ -43,7 +43,7 @@ import SaymendCore
 
     @MainActor @Test func pressingCopyWhileARescueIsInClipboardDoesNotOverwriteIt() throws {
         let (pb, channel) = makeChannel(seed: "U")
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         let button = HistoryCopyButton(text: "最終文字", clipboard: channel)
         let action = try #require(ViewTreeInspection.firstButtonAction(in: button.body))
         action()
@@ -55,7 +55,7 @@ import SaymendCore
     @MainActor @Test func pressingCopyWhileAPasteDisplacesTheRescueStillAsksFirst() throws {
         let timer = FakeClipboardTimer()
         let (pb, channel) = makeChannel(seed: "U", timer: timer)
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         try channel.withTransientWrite("A") {}
         timer.now = 0.1
         let button = HistoryCopyButton(text: "最終文字", clipboard: channel)

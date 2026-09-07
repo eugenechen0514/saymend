@@ -172,7 +172,7 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
         try channel.withTransientWrite("A") {}
         timer.now = 0.05
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         #expect(abs((timer.waits.first ?? 0) - 0.25) < 1e-9 && timer.waits.count == 1,
                 "先等在途 paste 的安全窗（剩 0.25s）；實際 \(timer.waits)")
         #expect(pb.string(forType: .string) == "救援 R", "救援必須立即落地")
@@ -187,7 +187,7 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         let pb = makePasteboard(seed: "U")
         let timer = FakeClipboardTimer()
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         try channel.withTransientWrite("A") { #expect(pb.string(forType: .string) == "A") }
         timer.now = 0.3
         timer.fireDue()
@@ -199,7 +199,7 @@ private func makePasteboard(seed: String) -> NSPasteboard {
     @Test func rescueStillInClipboardIsNilOnceAnyoneOverwritesIt() throws {
         let pb = makePasteboard(seed: "U")
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         #expect(channel.rescueStillInClipboard == "救援 R")
         pb.clearContents()
         pb.setString("X", forType: .string)
@@ -210,7 +210,7 @@ private func makePasteboard(seed: String) -> NSPasteboard {
     @Test func copyForUserOverwritesAndClearsTheRescueRecord() throws {
         let pb = makePasteboard(seed: "U")
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         channel.copyForUser("歷史文字 H")
         #expect(pb.string(forType: .string) == "歷史文字 H")
         #expect(channel.rescueStillInClipboard == nil)
@@ -221,7 +221,7 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         let pb = makePasteboard(seed: "U")
         let timer = FakeClipboardTimer()
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         try channel.withTransientWrite("A") {}
         pb.clearContents()
         pb.setString("X", forType: .string)
@@ -237,13 +237,31 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         let pb = makePasteboard(seed: "U")
         let timer = FakeClipboardTimer()
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         try channel.withTransientWrite("A") {}
         pb.clearContents()
         timer.now = 0.3
         timer.fireDue()
         #expect(pb.string(forType: .string) == "救援 R")
         #expect(channel.rescueStillInClipboard == "救援 R")
+    }
+
+    /// 上一條那條「被清空才放回」的分支也要保住 round：它今天正確是因為共用 `restore(lease.target)`，
+    /// 不是因為有測試守著。分支若自建一個不帶 round 的 RestoreTarget，同一輪的下一段就會覆寫掉累積中的內容。
+    @Test func theRoundSurvivesAPureClearThatForcedTheRescueBack() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("甲", round: 1)
+        try channel.withTransientWrite("A") {}
+        pb.clearContents()                              // 外部只清空：changeCount 前進，走「被清空才放回」分支
+        timer.now = 0.3
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "甲", "前提：清空放回分支把救援放回")
+        channel.rescue("乙", round: 1)
+        #expect(pb.string(forType: .string) == "甲乙",
+                "清空放回分支掉了 round 就會變成只剩「乙」；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
     }
 
     /// 同樣的純清空若擠開的是使用者內容 U：維持不寫回——U 沒有救援那種「不落地就沒了」的分量，
@@ -264,7 +282,7 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         let backing = makePasteboard(seed: "U")
         let pb = SetStringFailingPasteboard(backing: backing)
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         #expect(channel.rescueStillInClipboard == nil)
         #expect(backing.string(forType: .string) == "U", "clear 之後寫不進去必須同步還原；實際 \(backing.string(forType: .string) ?? "nil")")
     }
@@ -276,7 +294,7 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         let pb = SetStringFailingPasteboard(backing: backing, failingAttempts: [3])   // 第 3 次＝收尾放回 R
         let timer = FakeClipboardTimer()
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
-        channel.rescue("救援 R")                              // 第 1 次
+        channel.rescue("救援 R", round: 1)                              // 第 1 次
         try channel.withTransientWrite("A") {}                // 第 2 次
         timer.now = 0.3
         timer.fireDue()                                       // 第 3 次：失敗
@@ -300,13 +318,170 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         let pb = makePasteboard(seed: "U")
         let timer = FakeClipboardTimer()
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         try channel.withTransientWrite("A") {}
         timer.now = 0.1
         #expect(channel.rescueStillInClipboard == nil, "前提：此刻剪貼簿是 A，直接看會漏判")
         #expect(channel.rescueInClipboardBeforeWriting() == "救援 R")
         #expect(timer.waits.count == 1 && abs((timer.waits.first ?? 0) - 0.2) < 1e-9, "實際 \(timer.waits)")
         #expect(pb.string(forType: .string) == "救援 R", "settle 收尾已把 R 放回")
+    }
+
+    // MARK: rescue 累積——同一輪救援串接（issue #42 取捨 4 修訂）；round 邊界見下一節
+
+    /// 連續兩次救援、中間沒人動剪貼簿：第二段接在第一段後面（無分隔符），不是取代它。
+    /// 舊規則是單一 slot、後者取代前者——#37 之後救援會常態化，一段話講三句就只剩最後一句。
+    @Test func aSecondRescueAppendsToTheFirstWhenTheClipboardIsStillOurs() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲", round: 1)
+        channel.rescue("乙", round: 1)
+        #expect(pb.string(forType: .string) == "甲乙", "同一輪救援必須串接；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
+    }
+
+    /// 使用者中途複製了別的東西：changeCount 前進、那一輪結束，下一次救援重新開始，
+    /// 不得把使用者那份或更早的救援黏上去。
+    @Test func aRescueAfterTheUserCopiedSomethingStartsAFreshRound() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲", round: 1)
+        pb.clearContents()
+        pb.setString("使用者複製的 X", forType: .string)
+        channel.rescue("乙", round: 1)
+        #expect(pb.string(forType: .string) == "乙", "新的一輪只有新片段；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "乙")
+    }
+
+    /// 累積要跨得過 paste 的暫時擠開／放回：收尾把救援放回後，下一次救援仍接在它後面而不是重新開始。
+    @Test func accumulationSurvivesAPasteThatDisplacedAndRestoredTheRescue() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("甲", round: 1)
+        try channel.withTransientWrite("A") {}
+        timer.now = 0.3
+        timer.fireDue()
+        #expect(pb.string(forType: .string) == "甲", "前提：收尾把救援放回")
+        channel.rescue("乙", round: 1)
+        #expect(pb.string(forType: .string) == "甲乙", "實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
+    }
+
+    /// 累積寫不進去：不得兩頭皆空——剪貼簿要維持累積前的舊救援，且仍認得它，
+    /// 而且這一輪還沒結束：再下一段仍接得在舊救援後面（失敗那段本身靜默遺失，見 PR 揭露）。
+    @Test func aFailedAccumulationKeepsThePreviousRescueInTheClipboard() {
+        let backing = makePasteboard(seed: "U")
+        let pb = SetStringFailingPasteboard(backing: backing, failingAttempts: [2])   // 第 2 次＝寫入「甲乙」
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲", round: 1)
+        channel.rescue("乙", round: 1)
+        #expect(pb.setStringAttempts == 3, "第 3 次是失敗後放回舊救援；實際 \(pb.setStringAttempts)")
+        #expect(backing.string(forType: .string) == "甲", "實際 \(backing.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲")
+        channel.rescue("丙", round: 1)
+        #expect(backing.string(forType: .string) == "甲丙",
+                "失敗後這一輪要接得下去，不能退回單一 slot；實際 \(backing.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲丙")
+    }
+
+    /// `rescue` 必須先 `settle()` 再讀 `rescueStillInClipboard`：paste 仍在途時剪貼簿是 paste 寫的內容、
+    /// changeCount 與 `landedRescue` 不符，先讀就會判成「不是我方的」而把前一段整個丟掉。
+    /// 救援落在上一個 paste 的 300ms 安全窗內不是邊角情況——既有的
+    /// `rescueInsideTheWindowSettlesThenLandsAndSurvivesTheScheduledRestore` 就是為這個時序寫的。
+    /// 與 `accumulationSurvivesAPasteThatDisplacedAndRestoredTheRescue` 的差別：那條先 `fireDue()`
+    /// 把 lease 收乾淨了，`settle()` 是 no-op，踏不進這條分支。
+    @Test func accumulationWorksWhileAPasteIsStillInFlight() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("甲", round: 1)
+        try channel.withTransientWrite("A") {}
+        timer.now = 0.1
+        #expect(pb.string(forType: .string) == "A", "前提：paste 仍在途，救援被暫時擠開")
+        channel.rescue("乙", round: 1)
+        #expect(pb.string(forType: .string) == "甲乙",
+                "settle 要先把救援放回才讀得到它；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
+    }
+
+    /// 已知取捨（本次修訂帶進來的行為退步）：Cmd+V 是讀取、不推進 changeCount，我們看不見使用者貼過，
+    /// 所以下一段照樣接上去。逐句貼上的使用者會在欄位裡拿到重複的前段——
+    /// 舊的「後者取代前者」在這個流程反而是對的。釘成已知行為，免得下次被當 bug 亂改。
+    /// 要真的分辨得出來，得在救援落地時另記「已提示過使用者」的 session 訊號，不在本次修訂範圍。
+    @Test func pastingBetweenRescuesStillAccumulatesSoTheUserSeesTheEarlierPartTwice() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        var pastedIntoTheField = ""
+        channel.rescue("句一", round: 1)
+        let afterFirstRescue = pb.changeCount
+        pastedIntoTheField += pb.string(forType: .string) ?? ""      // 使用者第一次 Cmd+V＝讀取
+        #expect(pb.changeCount == afterFirstRescue, "讀取不推進 changeCount，我們無從得知使用者貼過")
+        channel.rescue("句二", round: 1)
+        pastedIntoTheField += pb.string(forType: .string) ?? ""      // 使用者第二次 Cmd+V
+        #expect(pastedIntoTheField == "句一句一句二",
+                "逐句貼上會拿到重複的前段；實際 \(pastedIntoTheField)")
+    }
+
+    /// 三段累積：`landedRescue` 必須記成累積後的全文，只記最後一段的話第三次會接錯。
+    @Test func threeRescuesInARowAccumulateInOrder() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲", round: 1)
+        channel.rescue("乙", round: 1)
+        channel.rescue("丙", round: 1)
+        #expect(pb.string(forType: .string) == "甲乙丙", "實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙丙")
+    }
+
+    // MARK: rescue 的 session 邊界——round token（PR #56 review 修訂）
+
+    /// 不同輪不串接：changeCount 單獨不足以界定「同一輪」——Cmd+V 是讀取、不推進 changeCount，
+    /// 所以「使用者在 session A 收到救援→貼上→開始 session B→B 又救援」在剪貼簿眼中毫無變化，
+    /// 只看 changeCount 會把 B 黏在 A 後面（issue #45 的場景每次都踩）。round 不同就覆寫。
+    @Test func aRescueFromADifferentRoundOverwritesInsteadOfAppending() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲", round: 1)
+        channel.rescue("乙", round: 2)                  // 中間沒人動剪貼簿，只有輪次換了
+        #expect(pb.string(forType: .string) == "乙",
+                "跨輪必須覆寫，不得黏上一輪的殘留；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "乙")
+        // 覆寫之後 `landedRescue` 記下的必須是**新**輪次。只驗文字看不出「沿用舊 round」這個錯誤——
+        // 它要等到同輪的下一段進來、被誤判成不同輪而又被覆寫掉時才發作，那時前一段已經沒了。
+        channel.rescue("丙", round: 2)
+        #expect(pb.string(forType: .string) == "乙丙",
+                "覆寫後必須記成新輪次，同輪的下一段才接得上；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "乙丙")
+    }
+
+    /// round 必須跨得過 paste 的暫時擠開／放回：收尾把救援放回時若沒把 round 一起還原，
+    /// 同一輪的下一段會被誤判成「不同輪」而覆寫掉正在累積的內容。
+    @Test func theRoundSurvivesAPasteThatDisplacedAndRestoredTheRescue() throws {
+        let pb = makePasteboard(seed: "U")
+        let timer = FakeClipboardTimer()
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: timer)
+        channel.rescue("甲", round: 1)
+        try channel.withTransientWrite("A") {}          // 救援被暫時擠開
+        timer.now = 0.3
+        timer.fireDue()                                 // 收尾放回救援
+        #expect(pb.string(forType: .string) == "甲", "前提：收尾把救援放回")
+        channel.rescue("乙", round: 1)
+        #expect(pb.string(forType: .string) == "甲乙",
+                "round 在 restore 途中掉了就會變成只剩「乙」；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
+    }
+
+    /// 累積寫入失敗後，剪貼簿裡的舊救援連同它的 round 都要保住：這一輪還接得下去。
+    @Test func aFailedAccumulationKeepsThePreviousRescueRound() {
+        let backing = makePasteboard(seed: "U")
+        let pb = SetStringFailingPasteboard(backing: backing, failingAttempts: [2])   // 第 2 次＝寫入「甲乙」
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲", round: 7)
+        channel.rescue("乙", round: 7)                  // 失敗：放回「甲」（round 7）
+        channel.rescue("丙", round: 7)
+        #expect(backing.string(forType: .string) == "甲丙",
+                "失敗放回時 round 沒保住就會退化成只剩「丙」；實際 \(backing.string(forType: .string) ?? "nil")")
     }
 
     // MARK: body 拋錯與 Cmd+C 備援讀取
@@ -377,7 +552,7 @@ private func makePasteboard(seed: String) -> NSPasteboard {
     @Test func transientReadWhileARescueIsInClipboardPutsTheRescueBack() {
         let pb = makePasteboard(seed: "U")
         let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
-        channel.rescue("救援 R")
+        channel.rescue("救援 R", round: 1)
         let read = channel.withTransientRead {
             pb.clearContents()
             pb.setString("S", forType: .string)
@@ -385,5 +560,23 @@ private func makePasteboard(seed: String) -> NSPasteboard {
         #expect(read == "S")
         #expect(pb.string(forType: .string) == "救援 R")
         #expect(channel.rescueStillInClipboard == "救援 R")
+    }
+
+    /// Cmd+C 備援收尾（`allowingForeignWrite`）放回救援時同樣要保住 round：
+    /// 否則選取備援讀取之後，同一輪的下一段救援會覆寫掉前面已經累積好的內容。
+    @Test func theRoundSurvivesATransientReadThatDisplacedTheRescue() {
+        let pb = makePasteboard(seed: "U")
+        let channel = ClipboardChannel(pasteboard: pb, settleDelay: 0.3, timer: FakeClipboardTimer())
+        channel.rescue("甲", round: 1)
+        let read = channel.withTransientRead {
+            pb.clearContents()
+            pb.setString("S", forType: .string)
+        }
+        #expect(read == "S")
+        #expect(pb.string(forType: .string) == "甲", "前提：讀取收尾把救援放回")
+        channel.rescue("乙", round: 1)
+        #expect(pb.string(forType: .string) == "甲乙",
+                "allowingForeignWrite 收尾掉了 round 就會變成只剩「乙」；實際 \(pb.string(forType: .string) ?? "nil")")
+        #expect(channel.rescueStillInClipboard == "甲乙")
     }
 }

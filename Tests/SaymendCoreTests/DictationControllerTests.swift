@@ -2302,3 +2302,77 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(spy.texts == ["使用者說了一整句話"], "不讓使用者白說話：整句救進剪貼簿")
     #expect(hud.states.last == .notice("插入失敗，內容已入剪貼簿"), "文案須與緩衝句插入失敗那條逐字一致")
 }
+
+// MARK: - 剪貼簿救援的 round token（issue #42／PR #56 review 修訂）
+//
+// Core 給 App 端的每筆救援都帶一個 round：ClipboardChannel 只把同一輪的救援串接成一份可貼上的文字，
+// 跨輪一律覆寫。一輪＝一次聽寫 session（`ledger.generation`），因為 Cmd+V 不推進 changeCount，
+// 剪貼簿自己分不出「使用者已經把上一段取走、這是新的一段話」。
+
+/// 同一 session 的多段救援必須同輪——不同輪會在剪貼簿端變成互相覆寫，
+/// 一段話拆成三句就只剩最後一句（正是 #42 要修的那個退步）。
+@MainActor
+@Test func rescuesWithinOneSessionCarryTheSameRound() {
+    let spy = ClipboardSpy()
+    let (c, _, _, key, _, _) = makeController(clipboard: spy)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.5)                      // 非 tap → .finishing（批次上傳窗）
+    c.userActivityDetected(at: 11.0)                // 上傳中切 App → freeze
+    c.handleTranscript(.finalized("第一句"), at: 11.5)
+    c.handleTranscript(.finalized("第二句"), at: 12.0)
+    #expect(key.ops.isEmpty)                        // 凍結後不得上屏
+    #expect(spy.texts == ["第一句", "第二句"])
+    #expect(spy.rounds.count == 2 && spy.rounds.first == spy.rounds.last,
+            "同一 session 的救援必須同輪；實際 \(spy.rounds)")
+    #expect(spy.rounds.first == c.ledger.generation)
+}
+
+/// 跨 session 必須換輪：使用者已經把上一段取走（Cmd+V 看不見），新 session 的救援不得黏在它後面。
+@MainActor
+@Test func rescuesFromDifferentSessionsCarryDifferentRounds() {
+    let spy = ClipboardSpy()
+    let (c, _, _, _, _, _) = makeController(clipboard: spy)
+    c.hotkeyPressed(at: 10.0)
+    c.hotkeyReleased(at: 10.5)
+    c.userActivityDetected(at: 11.0)                // freeze
+    c.handleTranscript(.finalized("第一段"), at: 11.5)
+    c.asrStreamEnded(at: 11.6)                      // frozen → 封存
+    #expect(!c.ledger.isActive)
+    c.hotkeyPressed(at: 20.0)                       // 新 session：generation 跳號
+    c.hotkeyReleased(at: 20.5)
+    c.userActivityDetected(at: 21.0)                // 再次 freeze
+    c.handleTranscript(.finalized("第二段"), at: 21.5)
+    #expect(spy.texts == ["第一段", "第二段"])
+    #expect(spy.rounds.count == 2 && spy.rounds.first != spy.rounds.last,
+            "跨 session 必須換輪，否則新段落會黏在上一段後面；實際 \(spy.rounds)")
+}
+
+/// `dispatch` 的世代過期分支救的是**舊 session** 的緩衝句：round 必須是那個舊世代，
+/// 不是「當下」的 `ledger.generation`——使用者此刻可能已經開了新 session。
+/// 時序：選取即目標→說指令→放開→延續窗→點別處（立即封存）→**再按熱鍵開新 session**→舊 LLM 此刻才回來。
+@MainActor
+@Test func expiredGenerationBufferedRescueCarriesTheOldSessionRound() async {
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["改正式一點"]
+    intent.outcomeByRaw = ["改正式一點": .editedSession("正式版")]
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 4)
+    let spy = ClipboardSpy()
+    let (c, _, asr, key, _, _) = makeController(polisher: intent, rangeReplacer: FakeRangeReplacer(),
+                                                clipboard: spy, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0)
+    c.handleTranscript(.finalized("改正式一點"), at: 10.5)
+    c.hotkeyReleased(at: 11.0)                      // 長按放開 → 排空
+    asr.continuation?.finish()
+    c.asrStreamEnded(at: 11.1)                      // 排空結束 → 延續窗（LLM 在途）
+    let oldGeneration = c.ledger.generation
+    c.userActivityDetected(at: 11.5)                // 延續窗點別處 ＝ 立即封存
+    c.hotkeyPressed(at: 20.0)                       // 使用者已開新 session
+    #expect(c.ledger.generation != oldGeneration, "前提：新 session 已把世代推進")
+    intent.release()                                // 舊 session 的 LLM 結果此刻才回來
+    await c.lastIntentTask?.value
+    #expect(spy.texts == ["正式版"])
+    #expect(key.ops.isEmpty)
+    #expect(spy.rounds == [oldGeneration],
+            "舊 session 的內容不得算進新 session 那一輪；實際 \(spy.rounds)，舊世代 \(oldGeneration)")
+}

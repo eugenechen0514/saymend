@@ -96,8 +96,13 @@ final class GatedIntentService: IntentServing, @unchecked Sendable {
 
 /// 剪貼簿急救 spy（欄位寫不進去、或 session 已無法承接 outcome 時的最後手段）
 final class ClipboardSpy {
-    private(set) var texts: [String] = []
-    func rescue(_ text: String) { texts.append(text) }
+    /// 每次救援的文字與它所屬的 round（issue #42：只有同一輪才會在剪貼簿裡串接）。
+    private(set) var entries: [(text: String, round: Int)] = []
+    /// 多數斷言只在意文字，保留成 computed（既有 `spy.texts == [...]` 不必改）。
+    var texts: [String] { entries.map(\.text) }
+    /// 要斷言 round 邊界的測試用（同 session 相同、跨 session 不同）。
+    var rounds: [Int] { entries.map(\.round) }
+    func rescue(_ text: String, round: Int) { entries.append((text, round)) }
 }
 
 final class FakeHUD: HUDPresenting {
@@ -289,7 +294,7 @@ func makeController(
     let controller = DictationController(
         audio: audio, asr: asr, coordinator: coordinator,
         intent: polisher, hud: hud, settings: settings,
-        clipboardRescue: clipboard.map { spy in { spy.rescue($0) } },
+        clipboardRescue: clipboard.map { spy in { spy.rescue($0, round: $1) } },
         fieldReader: fieldReader ?? FakeFieldReader.sessionField(),   // 預設有 anchor＋identity（issue #44）
         feedback: feedback,
         history: history,
@@ -315,7 +320,7 @@ func makeStatefulController(
     let controller = DictationController(
         audio: audio, asr: asr, coordinator: coordinator,
         intent: polisher, hud: hud, settings: settings,
-        clipboardRescue: clipboard.map { spy in { spy.rescue($0) } },
+        clipboardRescue: clipboard.map { spy in { spy.rescue($0, round: $1) } },
         fieldReader: env, feedback: nil, history: history, contextOCR: nil)
     return (controller, asr, hud)
 }
