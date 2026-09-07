@@ -694,6 +694,14 @@ public final class DictationController {
         internalPhase = .idle
         hud.present(.hidden)
         sessionTarget = .tail               // 封存即重置目標模式
+        // issue #37：閘門跳過旗標必須隨 session 結束一起歸零。
+        // 它平常在 processUtterance(raw:) 捕捉後立即重設，但 Esc 聽寫中（:201）／
+        // abortForSecureField／handleASRFailure 三條路徑都會 segmenter.hardReset()，把待閉合的
+        // raw 直接丟掉——那句話永遠走不到 processUtterance，旗標就一路留 true 洩漏到下一個
+        // session，害新 session 的第一句（焦點完全正常、字也確實上屏）在 dispatch 被誤判早退：
+        // 潤飾被無聲丟棄（無 notice、無剪貼簿救援），還多記一列假的 outcomeDropped 污染遙測。
+        // 三條路徑最終都會走到這裡，補這一個點就夠；正常結束路徑是先捕捉再 archive，不會誤殺。
+        skippedRaw = false
         settings.sessionLanguageOverride = nil   // per-session 臨時覆蓋隨封存失效（規格 §4.5）
         settings.sessionCoreModeID = nil     // per-session 核心模式覆蓋隨封存失效（規格 §3.2）
     }

@@ -106,13 +106,20 @@ import Testing
         env.failInsertsRemaining = 1                               // 主 inserter 拋錯一次 → 走備援
         // 第 1 次查詢＝controller 的密碼守衛；第 2 次＝coordinator 在 primary 之前。
         // 在第 2 次之後搬焦點，讓 primary 失敗後的那一次查詢（第 3 次）看到 .different。
+        // 註：這個序號是硬編碼的——日後路徑上若多／少一次閘門查詢，hook 就不會在正確時機開火。
+        // 好消息是它會**大聲紅**（焦點沒搬 → 備援寫進 A → 下面 `text(in:"A") == ""` 失敗），
+        // 不會安靜變綠；屆時照著新的呼叫序調整這個數字即可。
         env.afterFieldGate = { [weak env] in
             guard env?.fieldGateCalls == 2 else { return }
             env?.focus("B")
         }
         c.handleTranscript(.finalized("備援也不許亂寫"), at: 10.5)
 
+        // 承重的是下面三條（B 沒被寫、內容有救、有提示）——M2 實測拿掉第二次閘門查詢時，
+        // 恰好只有它們會紅。
         #expect(env.text(in: "B") == "", "備援重送必須先過閘門：一個字都不能進 B")
+        // 這條不是在驗閘門：`failInsertsRemaining = 1` 讓 primary 必定拋錯，依 #38 的原子契約
+        // A 本來就會是空的，閘門查不查第二次都一樣。留著只是排除「字被寫回 A」這種其他失序。
         #expect(env.text(in: "A") == "", "primary 已拋錯（原子契約：一個字都沒進），A 也是空的")
         #expect(clipboard.texts == ["備援也不許亂寫"])
         #expect(lastNotice(hud) == DictationController.fieldChangedNotice)
@@ -359,6 +366,45 @@ import Testing
         #expect(c.ledger.sessionText == "正式版", "沒落地就不得進帳本")
         #expect(history.exchanges.contains { $0.outcomeKind == "insertSkipped"
                 && $0.outcomeText == "fieldChanged：crossApp:?→com.other.app" })
+    }
+
+    // MARK: - 12. skippedRaw 不得洩漏到下一個 session
+
+    /// 跳過旗標平常在 `processUtterance(raw:)` 捕捉後即重設，但 Esc 聽寫中／密碼欄硬停／
+    /// ASR 失敗三條路徑都會 `segmenter.hardReset()`，把待閉合的 raw 直接丟掉——那句話
+    /// **永遠走不到 `processUtterance`**，旗標就會留 true 洩漏出去。
+    ///
+    /// 觸發情境非常自然：使用者看到「欄位已切換，內容已入剪貼簿」之後，最直覺的反應就是
+    /// 按 Esc、把焦點喬回去、重講一次；而重講的那一句正是被吃掉潤飾的那一句——
+    /// 它焦點完全正常、字也確實上屏了，卻在 `dispatch` 被誤判早退：潤飾無聲丟棄
+    /// （Q4 規定跳過時不再發第二則提示，所以連個說法都沒有），還多記一列假的
+    /// `outcomeDropped/skippedRaw` 污染 #37 賴以決策的遙測。修法是隨 `archiveSession()` 歸零。
+    @Test func aSkippedFlagDoesNotLeakIntoTheNextSession() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("B", text: "", bundleID: "com.foo.app")
+        let polisher = GatedIntentService()
+        polisher.outcome = .newContent("潤飾後。")
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, polisher: polisher,
+                                                 clipboard: ClipboardSpy(), history: history)
+        c.hotkeyPressed(at: 10.0)
+        env.focus("B")
+        c.handleTranscript(.finalized("被跳過"), at: 10.5)          // 旗標被設起來
+        c.escapePressed()                                          // hardReset：這句永遠到不了 processUtterance
+        #expect(!c.ledger.isActive, "前提：Esc 已封存 session")
+
+        env.focus("A")                                             // 使用者把焦點喬回原欄位
+        c.hotkeyPressed(at: 20.0)                                  // 全新的 session
+        c.handleTranscript(.finalized("新的一句"), at: 20.5)
+        #expect(env.text(in: "A") == "新的一句", "前提：新 session 的字確實上屏了")
+        c.tick(at: 22.1)
+        await c.lastIntentTask?.value
+
+        #expect(env.text(in: "A") == "潤飾後。", "新 session 第一句的潤飾不得被上一段的旗標吃掉")
+        #expect(droppedEvents(history).isEmpty, "不得多記與閘門無關的假 outcomeDropped")
+        #expect(notices(hud).filter { $0 == DictationController.fieldChangedNotice }.count == 1,
+                "跳過那次提示過一則就好，新 session 不該再有")
     }
 
     /// `.unknown` 與 `.same` 一律照常寫（#21 釘子的 coordinator 單元版）。
