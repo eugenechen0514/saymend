@@ -317,6 +317,50 @@ import Testing
         #expect(c.displayedText == "")
     }
 
+    // MARK: - 11. 緩衝句落地（insertDetached）也走同一道閘門
+
+    /// 選取即目標模式下，第二句被緩衝、等首句替換完選取才以 `insertDetached` 落地。
+    /// 這條路徑上焦點一樣可能已經換掉——它與 finalized 路徑共用 `insertWithFallback`，
+    /// 所以閘門也蓋得到，比照該處既有的失敗路徑救進剪貼簿並提示。
+    /// 這句話的內容**就是** LLM outcome 本身，救完就結束，不需要（也不會）再丟棄一次 outcome。
+    @Test func aBufferedUtteranceLandingIntoAChangedFieldIsRescuedInstead() async {
+        let intent = GatedIntentService()
+        intent.gatedRaws = ["第二句"]                     // 只卡第二句：首句立即回、先把選取替換掉
+        intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
+                               "第二句": .newContent("補充內容。")]
+        let reader = FakeFieldReader()
+        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 4,
+                                      fieldIdentity: FieldIdentity(token: 1),
+                                      selectedRange: .init(location: 4, length: 3),
+                                      selectedText: "原文字")
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, _, key, _, hud) = makeController(polisher: intent, clipboard: clipboard,
+                                                    fieldReader: reader, history: history)
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+        c.tick(at: 12.6)                                  // 首句：緩衝＋建 task
+        let first = c.lastIntentTask
+        c.handleTranscript(.finalized("第二句"), at: 13.0)
+        c.tick(at: 14.6)                                  // 第二句：仍 selectionPending → 緩衝
+        await first?.value                                // 首句替換選取成功 → 轉 .tail
+        #expect(c.ledger.sessionText == "正式版")
+        let opsBeforeLanding = key.ops
+        // 第二句落地之前焦點被搬走（不是凍結——凍結那條由 DictationControllerTests 釘）
+        reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0,
+                                      fieldIdentity: FieldIdentity(token: 2),
+                                      frontAppBundleID: "com.other.app")
+        intent.release()
+        await c.lastIntentTask?.value
+
+        #expect(key.ops == opsBeforeLanding, "緩衝句不得合成鍵入到別的欄位")
+        #expect(clipboard.texts == ["補充內容。"], "改走剪貼簿急救")
+        #expect(hud.states.contains(.notice(DictationController.fieldChangedNotice)))
+        #expect(c.ledger.sessionText == "正式版", "沒落地就不得進帳本")
+        #expect(history.exchanges.contains { $0.outcomeKind == "insertSkipped"
+                && $0.outcomeText == "fieldChanged：crossApp:?→com.other.app" })
+    }
+
     /// `.unknown` 與 `.same` 一律照常寫（#21 釘子的 coordinator 單元版）。
     @Test func unknownAndSameGatesBothAppend() throws {
         for gate in [FieldGate.unknown, .same] {
@@ -488,5 +532,48 @@ import Testing
                 "可能是密碼欄：LLM 定稿文字不得落進 history_exchange")
         #expect(!history.exchanges.contains { $0.outcomeText?.hasPrefix("fieldChanged") ?? false },
                 "不得混進誤判率分母那一組")
+    }
+
+    /// 同一條 `insertDetached` 路徑的 **`subroleUnknown` 版**（#59 fail closed）：
+    /// 分類走 `secureUnknown`、detail 格式與 `:325` 那條逐字相同，`utteranceRaw` 同樣留空。
+    ///
+    /// 骨架**必須**是 `StatefulFieldEnvironment`：`FakeFieldReader` 走 `FieldContextProviding`
+    /// 的預設 `fieldGate`（`FieldAccess.swift:180-183`），那裡只剩布林的 `FieldContext.isSecure`、
+    /// verdict 已經丟失，**原理上給不出 `.secureUnknown`**——沿用上一條測試的骨架永遠到不了
+    /// 這個分支（實測：把這裡的 `utteranceText: ""` 改回 `text`、或把 classification 改成別的字串，
+    /// 全量測試都照樣全綠）。兩個呼叫點 × 兩種形態，四格都要有自己的釘子。
+    @Test func aBufferedUtteranceLandingIntoASubroleUnknownFieldIsClassifiedAsSecureUnknown() async {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "前舊字後", bundleID: "com.foo.app")
+        env.select(in: "A", location: 1, length: 2)
+        env.addField("Q", text: "", subroleUnknown: true)
+        let intent = GatedIntentService()
+        intent.gatedRaws = ["第二句"]
+        intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
+                               "第二句": .newContent("補充內容。")]
+        let clipboard = ClipboardSpy()
+        let history = FakeHistory()
+        let (c, _, hud) = makeStatefulController(env: env, polisher: intent,
+                                                 clipboard: clipboard, history: history)
+        c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+        c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+        c.tick(at: 12.6)
+        let first = c.lastIntentTask
+        c.handleTranscript(.finalized("第二句"), at: 13.0)          // selectionPending 期間＝緩衝
+        c.tick(at: 14.6)
+        await first?.value                                          // 首句替換選取，目標轉回 .tail
+        let textAfterFirst = env.text(in: "A")
+        env.focus("Q")                                              // 落地前切到「問不出 subrole」的欄位
+        intent.release()
+        await c.lastIntentTask?.value
+
+        #expect(env.text(in: "A") == textAfterFirst, "session 欄位不得被補寫")
+        #expect(env.text(in: "Q") == "", "可能是密碼欄：一個字都不能進")
+        #expect(clipboard.texts == ["補充內容。"], "內容仍要救——被救的是欄位 A 的話，不是密碼")
+        #expect(lastNotice(hud) == DictationController.secureFieldSkipNotice)
+        #expect(skipEvents(history).last?.outcomeText == "secureUnknown：sessionApp:com.foo.app",
+                "分類與 detail 格式必須與 :325 及 finalized 那條逐字相同")
+        #expect(skipEvents(history).last?.utteranceRaw == "",
+                "『不知道是不是密碼欄』更不該留明文")
     }
 }
