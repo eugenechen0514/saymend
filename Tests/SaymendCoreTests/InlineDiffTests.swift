@@ -5,8 +5,12 @@ import Testing
     @Test func singleReplacementProducesOneWindow() {
         let w = InlineDiff.windows(old: "我們星期二開會討論", new: "我們星期三開會討論")
         #expect(w.count == 1)
-        #expect(w[0].ops.contains(.deleted("二")))
-        #expect(w[0].ops.contains(.added("三")))
+        // 不可直接 `[0]`：`#expect` 失敗**不會中止函式**，count 一旦不對，下一行的索引就是
+        // `Fatal error: Index out of range`——整個測試行程以 signal 5 結束、排在後面的測試
+        // 全部沒跑（issue #68）。守衛式改寫讓斷言失敗只損失這一條。
+        guard let window = w.first else { Issue.record("預期一個窗口；實際 \(w.count)"); return }
+        #expect(window.ops.contains(.deleted("二")))
+        #expect(window.ops.contains(.added("三")))
     }
 
     @Test func keptContextTrimsToWindowWithEllipsis() {
@@ -14,8 +18,11 @@ import Testing
         let new = String(repeating: "甲", count: 40) + "新" + String(repeating: "乙", count: 40)
         let w = InlineDiff.windows(old: old, new: new, context: 15)
         #expect(w.count == 1)
-        guard case .kept(let lead) = w[0].ops.first else { Issue.record("首段應為 kept"); return }
-        guard case .kept(let tail) = w[0].ops.last else { Issue.record("尾段應為 kept"); return }
+        // 原本這兩行的 guard 守的是 pattern match，`w[0]` 本身仍是裸索引——
+        // `#expect(w.count == 1)` 失敗時照樣崩掉整輪（issue #68）。先把 window 取出來。
+        guard let window = w.first else { Issue.record("預期一個窗口；實際 \(w.count)"); return }
+        guard case .kept(let lead) = window.ops.first else { Issue.record("首段應為 kept"); return }
+        guard case .kept(let tail) = window.ops.last else { Issue.record("尾段應為 kept"); return }
         #expect(lead == "…" + String(repeating: "甲", count: 15))
         #expect(tail == String(repeating: "乙", count: 15) + "…")
     }
@@ -66,7 +73,8 @@ import Testing
         let new = String(repeating: "新", count: 700)
         let w = InlineDiff.windows(old: old, new: new)
         #expect(w.count == 1)                        // 超限不做 LCS：單一「整段刪＋整段加」窗口
-        #expect(w[0].ops.contains(.deleted(old)))
-        #expect(w[0].ops.contains(.added(new)))
+        guard let window = w.first else { Issue.record("預期一個窗口；實際 \(w.count)"); return }
+        #expect(window.ops.contains(.deleted(old)))
+        #expect(window.ops.contains(.added(new)))
     }
 }

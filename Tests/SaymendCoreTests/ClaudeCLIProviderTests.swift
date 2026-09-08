@@ -52,7 +52,9 @@ private func makeProvider(_ runner: FakeRunner,
 @Test func hermeticArgumentsCompleteAndStdinCarriesUser() async throws {
     let r = FakeRunner()
     _ = try await makeProvider(r, model: "sonnet").complete(system: "SYS", user: "USER-PAYLOAD", timeout: 10)
-    let call = await r.calls[0]
+    // 這裡連 count 斷言都沒有：runner 沒被呼叫時 `[0]` 會 `Fatal error: Index out of range`，
+    // 整個測試行程以 signal 5 結束、排在後面的測試全部沒跑（issue #68）。
+    guard let call = await r.calls.first else { Issue.record("runner 應被呼叫恰一次；實際 0 次"); return }
     #expect(call.executable == "/x/claude")
     #expect(call.stdin == "USER-PAYLOAD")                          // user 走 stdin、不經 argv
     let a = call.arguments
@@ -72,7 +74,7 @@ private func makeProvider(_ runner: FakeRunner,
 @Test func systemPromptFileLifecycle() async throws {
     let r = FakeRunner()
     _ = try await makeProvider(r).complete(system: "秘密規則", user: "u", timeout: 10)
-    let call = await r.calls[0]
+    guard let call = await r.calls.first else { Issue.record("runner 應被呼叫恰一次；實際 0 次"); return }
     #expect(call.sysFileContent == "秘密規則")                      // run 期間存在且內容正確
     #expect(call.sysFilePerms == 0o600)
     let path = FakeRunner.value(after: "--system-prompt-file", in: call.arguments)!
@@ -86,7 +88,7 @@ private func makeProvider(_ runner: FakeRunner,
     await #expect(throws: ClaudeCLIError.processFailed(code: 1)) {
         _ = try await makeProvider(r).complete(system: "s", user: "u", timeout: 10)
     }
-    let call = await r.calls[0]
+    guard let call = await r.calls.first else { Issue.record("runner 應被呼叫恰一次；實際 0 次"); return }
     let sysPath = FakeRunner.value(after: "--system-prompt-file", in: call.arguments)!
     #expect(!FileManager.default.fileExists(atPath: sysPath))       // 失敗路徑也刪
     #expect(!FileManager.default.fileExists(atPath: call.workingDirectory.path))
@@ -97,7 +99,9 @@ private func makeProvider(_ runner: FakeRunner,
     let p = makeProvider(r)
     _ = try await p.complete(system: "s", user: "u", timeout: 10)
     _ = try await p.complete(system: "s", user: "u", timeout: 10)
-    let c0 = await r.calls[0], c1 = await r.calls[1]
+    let calls = await r.calls
+    guard calls.count >= 2 else { Issue.record("預期兩次呼叫；實際 \(calls.count) 次"); return }
+    let c0 = calls[0], c1 = calls[1]
     #expect(c0.workDirExistsEmpty && c1.workDirExistsEmpty)         // run 期間存在且為空
     #expect(c0.workDirPerms == 0o700)
     #expect(c0.workingDirectory != c1.workingDirectory)             // 每次呼叫唯一
@@ -159,7 +163,8 @@ private func makeProvider(_ runner: FakeRunner,
 @Test func runnerReceivesRemainingBudgetNotConfiguredValue() async throws {
     let r = FakeRunner()
     _ = try await makeProvider(r).complete(system: "s", user: "u", timeout: 10)
-    let got = await r.calls[0].timeout
+    guard let firstCall = await r.calls.first else { Issue.record("runner 應被呼叫恰一次；實際 0 次"); return }
+    let got = firstCall.timeout
     #expect(got > 9 && got <= 10)                                    // 無排隊：剩餘 ≈ 全額（不是 [1,120] clamp 後的值）
 }
 

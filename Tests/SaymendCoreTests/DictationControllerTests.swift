@@ -1319,7 +1319,13 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     #expect(key.ops.isEmpty)                       // 緩衝模式：全程零鍵盤事件
     #expect(ax.calls.count == 1)
-    #expect(ax.calls[0].location == 3 && ax.calls[0].expected == "嗨大家好喔" && ax.calls[0].new == "正式問候語")
+    // 不可直接 `[0]`：`#expect` 失敗不會中止函式，count 不對時索引會讓整個測試行程以 signal 5
+    // 結束、排在後面的測試全部沒跑（issue #68）。
+    guard let axCall = ax.calls.first else {
+        Issue.record("預期恰一次 AX 範圍替換；實際 \(ax.calls.count) 次")
+        return
+    }
+    #expect(axCall.location == 3 && axCall.expected == "嗨大家好喔" && axCall.new == "正式問候語")
     #expect(c.ledger.sessionText == "正式問候語")
     #expect(c.ledger.canUndo)                      // 復原可回到原選取文字
     #expect(hud.states.contains(.notice("已替換選取")))
@@ -1785,15 +1791,24 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     c.escapePressed()                                // 延續窗 Esc＝封存＝定稿入史
     #expect(history.sessions.count == 1)
-    #expect(history.sessions[0].appBundleID == "com.apple.TextEdit")
-    #expect(history.sessions[0].appName == "TextEdit")
-    #expect(history.sessions[0].targetKind == "tail")
     #expect(history.exchanges.count == 1)
-    #expect(history.exchanges[0].utteranceRaw == "呃你好")
-    #expect(history.exchanges[0].outcomeKind == "newContent")
-    #expect(history.exchanges[0].outcomeText == "你好。")
     #expect(history.finished.count == 1)
-    #expect(history.finished[0].finalText == "你好。")
+    // 三個 count 先各斷一次（失敗訊息仍分得出是哪一個集合不對），再一次取三筆。
+    // 不可直接 `[0]`：`#expect` 失敗不會中止函式，任一 count 不對時索引會讓整個測試行程
+    // 以 signal 5 結束、排在後面的測試全部沒跑（issue #68）。
+    guard let session = history.sessions.first,
+          let exchange = history.exchanges.first,
+          let finished = history.finished.first else {
+        Issue.record("預期 session／exchange／finished 各恰一筆；實際 \(history.sessions.count)／\(history.exchanges.count)／\(history.finished.count)")
+        return
+    }
+    #expect(session.appBundleID == "com.apple.TextEdit")
+    #expect(session.appName == "TextEdit")
+    #expect(session.targetKind == "tail")
+    #expect(exchange.utteranceRaw == "呃你好")
+    #expect(exchange.outcomeKind == "newContent")
+    #expect(exchange.outcomeText == "你好。")
+    #expect(finished.finalText == "你好。")
 }
 
 @MainActor
@@ -1895,8 +1910,12 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     let events = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
     #expect(events.count == 1)
-    #expect(events[0].outcomeText == "counterMismatch")
-    #expect(events[0].utteranceRaw == "第一段")
+    guard let event = events.first else {
+        Issue.record("預期恰一列 insertSkipped；實際 \(events.count) 列")   // 直接索引會崩掉整輪（issue #68）
+        return
+    }
+    #expect(event.outcomeText == "counterMismatch")
+    #expect(event.utteranceRaw == "第一段")
 }
 
 
