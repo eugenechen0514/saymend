@@ -72,6 +72,10 @@ public final class InsertionCoordinator {
     private let pasteThreshold: Int
     /// 寫入前的焦點閘門（issue #37）。nil＝沒有閘門＝維持舊行為（照常寫）。
     private let fieldGate: ((FieldIdentity?) -> FieldGate)?
+    /// 閘門的保險絲（issue #37）。nil＝永遠啟用（既有呼叫端不受影響）。
+    /// 只節制 `.different`；`.secure` 永遠擋——政策寫在 `focusGateBlock()`，不在接線的 closure，
+    /// 這樣才有單元測試可釘。
+    private let gateEnabled: (() -> Bool)?
 
     public private(set) var currentUtteranceText = ""
     public var currentUtteranceLength: Int { currentUtteranceText.count }
@@ -90,12 +94,14 @@ public final class InsertionCoordinator {
                 paste: any TextInserter,
                 rangeReplacer: (any SessionRangeReplacing)? = nil,
                 pasteThreshold: Int = 12,
-                fieldGate: ((FieldIdentity?) -> FieldGate)? = nil) {
+                fieldGate: ((FieldIdentity?) -> FieldGate)? = nil,
+                gateEnabled: (() -> Bool)? = nil) {
         self.keystroke = keystroke
         self.paste = paste
         self.rangeReplacer = rangeReplacer
         self.pasteThreshold = pasteThreshold
         self.fieldGate = fieldGate
+        self.gateEnabled = gateEnabled
     }
 
     /// 新 session：anchor／identity 來自 reader 同一次 snapshot（與 ledger 相同來源），
@@ -332,12 +338,16 @@ public final class InsertionCoordinator {
 
     /// 寫入前的閘門查詢（issue #37）：回非 nil＝這次不能寫。
     ///
-    /// - `.different`：AX 明確指出焦點已換 → fail closed（裁定 Q1）。
+    /// - `.different`：AX 明確指出焦點已換 → fail closed（裁定 Q1）。**受保險絲節制**：
+    ///   `rawAppendGateEnabled` 關閉時視同 `.unknown`（照常寫）——`CFEqual` 的誤判率沒有實測數據，
+    ///   誤判偏高時使用者總得有辦法把它關掉。
     /// - `.secure`／`.secureUnknown`：這一層只回報「不能寫」，**session 的硬停由呼叫端負責**——
     ///   兩個消費端（`DictationController` 的 `insertFinalized`:471 與 `insertDetached`:936 分支）
     ///   都必須**先記診斷再 `abortForSecureField()`**（issue #63）。
     ///   兩者行為逐字相同，但分成 `subroleUnknown` 的兩種形態回報：後者是「AX 問不出來只好當作是」，
     ///   事後要靠這一格算 0.2s timeout 的誤殺率（issue #59）。
+    ///   **兩種形態都刻意不受保險絲節制**：§5.3 是硬規則，保險絲是給 `CFEqual` 誤判用的出口，
+    ///   不能順手把密碼欄位的保護一起燒掉。
     ///   「不寫就滿足 §5.3」是**被否決的舊判斷**：被擋片段在 `segmenter.onTranscript` 就已進 buffer
     ///   （那一行跑在閘門查詢之前），session 不停就會經話語閉合把整句 raw 送雲端 provider，
     ///   並讓 `dispatch` 頂端那道無條件的 `recordExchange` 把 LLM 潤飾全文寫進 `history_exchange`。
@@ -347,10 +357,15 @@ public final class InsertionCoordinator {
     ///
     /// **每個 case 都明白列出，不用 `default`**：`FieldGate` 之後再長出新 case 時（`.secureUnknown`
     /// 就是這樣加進來的），編譯器必須在這裡叫，而不是讓新的未知狀態安靜掉進「照常寫」。
+    ///
+    /// 保險絲的政策寫在這裡、不放進接線用的 closure：放在 coordinator 才有單元測試釘得住
+    /// 「關掉之後 `.secureField` 兩種形態仍然擋」這條邊界。沒接開關（nil）＝永遠啟用，
+    /// 既有呼叫端不受影響。
     private func focusGateBlock() -> AppendOutcome? {
         guard let fieldGate else { return nil }
         switch fieldGate(sessionIdentity) {
         case .different(let currentAppBundleID):
+            guard gateEnabled?() ?? true else { return nil }   // 保險絲關閉：`.different` 視同 `.unknown`
             return .fieldChanged(currentAppBundleID: currentAppBundleID)
         case .secure:
             return .secureField(subroleUnknown: false)      // AX 明確說是密碼欄

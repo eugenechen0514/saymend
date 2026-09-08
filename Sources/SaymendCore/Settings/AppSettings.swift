@@ -58,6 +58,8 @@ public final class AppSettings: @unchecked Sendable {
         // Esc 退字的兩個邊界（issue #46）。key 字面值是 persistence 契約，測試以字面值釘住。
         static let escapeRetractsPolishedText = "escapeRetractsPolishedText"
         static let escapeRetractsFrozenSession = "escapeRetractsFrozenSession"
+        // raw 上屏焦點閘門的保險絲（issue #37）。key 字面值同樣是 persistence 契約，測試以字面值釘住。
+        static let rawAppendGateEnabled = "rawAppendGateEnabled"
         static let defaultCoreModeID = "defaultCoreModeID"
         static let providerKind = "providerKind"
         static let cliPathOverride = "claudeCLIPathOverride"
@@ -352,6 +354,18 @@ public final class AppSettings: @unchecked Sendable {
     public var escapeRetractsFrozenSession: Bool {
         get { readBool(K.escapeRetractsFrozenSession, default: false) }
         set { defaults.set(newValue, forKey: K.escapeRetractsFrozenSession) }
+    }
+
+    /// raw 上屏的寫入前焦點閘門總開關（issue #37）。**這是保險絲，不是功能**：
+    /// `CFEqual` 在真實 App 上把同一欄位判成兩個 element 的機率沒有實測數據，若誤判率偏高，
+    /// 使用者會看到不該出現的跳過，而目前沒有任何辦法關掉。預設開——閘門本身是 #37 的修復。
+    /// 關閉只讓 `.different` 退回「照常寫」（等同 `.unknown`）；**密碼欄位的保護不受影響**：
+    /// `.secureField` 兩種形態（AX 明說的、與 AX 問不出 subrole 而 fail closed 的）照樣硬停整段聽寫。
+    /// 規格 §5.3 是硬規則，保險絲不能把它一起燒掉（政策在 `InsertionCoordinator.focusGateBlock()`）。
+    /// 刻意不做 UI（defaults-only）：這是給誤判時的緊急出口，不是要邀請使用者關掉安全機制。
+    public var rawAppendGateEnabled: Bool {
+        get { readBool(K.rawAppendGateEnabled, default: true) }
+        set { defaults.set(newValue, forKey: K.rawAppendGateEnabled) }
     }
 
     /// UserDefaults 會把 `Int` bridge 成 `NSNumber`，直接 `as? Bool` 會把 1 誤收為 true。

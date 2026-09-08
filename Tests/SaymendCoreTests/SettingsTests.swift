@@ -116,6 +116,34 @@ func keychainStoreRoundTrip() throws {
     #expect(!s.escapeRetractsFrozenSession)
 }
 
+/// issue #37 的保險絲。key 字面值是 persistence 契約（使用者是用 `defaults write` 操作它的，
+/// 改名等同把使用者關掉的閘門偷偷打開），測試釘死字面值。
+@Test func rawAppendGateSwitchDefaultsToEnabledAndPersists() {
+    let (s, d) = freshSettings()
+    #expect(s.rawAppendGateEnabled, "預設開：閘門本身是 #37 的修復，保險絲只是出口")
+
+    s.rawAppendGateEnabled = false
+    #expect(d.object(forKey: "rawAppendGateEnabled") as? Bool == false)
+    let reloaded = AppSettings(defaults: d, secrets: InMemorySecretStore())
+    #expect(!reloaded.rawAppendGateEnabled)
+}
+
+/// 型別錯誤回落預設（開）：`defaults write ... -int 0` 之類的誤操作不得被當成「使用者明確關掉閘門」。
+/// 這條釘的是 `readBool`（核對 `CFBooleanGetTypeID`）而不是 `object(forKey:) as? Bool`——
+/// 後者會讓 NSNumber 0 橋接成 false，等於一個打錯的指令就把 #37 的閘門關掉。
+///
+/// **測試點刻意用 Int 0 而不是 Int 1**：本設定預設為 true，`as? Bool` 對 NSNumber 1 也回 true，
+/// 兩條實作在那個輸入上結果相同、分辨不出來。0 才是會咬人的那一格。
+@Test func rawAppendGateSwitchFallsBackToDefaultOnWrongType() {
+    let (s, d) = freshSettings()
+    d.set(0, forKey: "rawAppendGateEnabled")
+    #expect(s.rawAppendGateEnabled, "Int 0 不是 Bool：回落預設 true，不得被當成關閉")
+    d.set(1, forKey: "rawAppendGateEnabled")
+    #expect(s.rawAppendGateEnabled, "Int 1 同樣不是 Bool（此處與預設同值，僅記錄意圖）")
+    d.set("false", forKey: "rawAppendGateEnabled")
+    #expect(s.rawAppendGateEnabled, "字串也不是 Bool：回落預設 true")
+}
+
 @Test func sessionLanguageOverrideIsTransient() {
     let suite = "test-\(UUID().uuidString)"
     let s = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())

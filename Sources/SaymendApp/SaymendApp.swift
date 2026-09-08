@@ -137,7 +137,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                                                rangeReplacer: axInserter,
                                                fieldGate: { [weak axReader] identity in
                                                    axReader?.fieldGate(sessionIdentity: identity) ?? .unknown
-                                               })
+                                               },
+                                               // 保險絲（issue #37）：CFEqual 誤判率未知，關掉才有出口。
+                                               // 只影響 `.different`；密碼欄位的保護由 coordinator 硬寫死。
+                                               gateEnabled: { [settings] in settings.rawAppendGateEnabled })
         let provider = OpenAICompatProvider(configProvider: { [settings] in settings.openAIConfig() })
         // ClaudeCLI（spec §4）：偵測器 UI 與 provider 共用（快取共享）；config 每次呼叫讀取即時生效
         let cliProvider = ClaudeCLIProvider(

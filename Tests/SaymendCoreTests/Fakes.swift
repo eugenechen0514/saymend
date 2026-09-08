@@ -327,14 +327,20 @@ func makeController(
     // 所以每次閘門查詢都多一次 snapshot ＋ 一次 token 歸還——`released.count == snapshots`
     // 這條 lease 不變式仍然成立（成對增加），但逐項比對 released 陣列的測試要跟著校準。
     let reader = fieldReader ?? FakeFieldReader.sessionField()   // 預設有 anchor＋identity（issue #44）
+    let hud = FakeHUD()
+    let suite = "test-\(UUID().uuidString)"
+    // settings 刻意先於 coordinator 建立：保險絲（issue #37）要與 controller 共用同一個實例，
+    // 測試才能在建構後翻 `c.settings.rawAppendGateEnabled` 並被閘門即時讀到。
+    // 誠實揭露：**目前沒有任何測試從這個 helper 走保險絲**（保險絲的端到端測試都用
+    // `makeStatefulController`）。這裡照接是為了兩個 helper 語意一致——否則之後有人在這裡寫
+    // 保險絲測試會拿到「開關翻了卻沒作用」的假綠。
+    let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
     let coordinator = InsertionCoordinator(keystroke: key, paste: pasteInserter,
                                            rangeReplacer: rangeReplacer, pasteThreshold: pasteThreshold,
                                            fieldGate: { [weak reader] identity in
                                                reader?.fieldGate(sessionIdentity: identity) ?? .unknown
-                                           })
-    let hud = FakeHUD()
-    let suite = "test-\(UUID().uuidString)"
-    let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+                                           },
+                                           gateEnabled: { settings.rawAppendGateEnabled })
     let controller = DictationController(
         audio: audio, asr: asr, coordinator: coordinator,
         intent: polisher, hud: hud, settings: settings,
@@ -358,13 +364,15 @@ func makeStatefulController(
 ) -> (DictationController, FakeASR, FakeHUD) {
     let audio = FakeAudio()
     let asr = FakeASR()
+    let hud = FakeHUD()
+    let suite = "test-\(UUID().uuidString)"
+    // 同 makeController：settings 先建，保險絲與 controller 共用同一個實例。
+    let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
     let coordinator = InsertionCoordinator(keystroke: env, paste: env, rangeReplacer: env, pasteThreshold: 100,
                                            fieldGate: { [weak env] identity in
                                                env?.fieldGate(sessionIdentity: identity) ?? .unknown
-                                           })
-    let hud = FakeHUD()
-    let suite = "test-\(UUID().uuidString)"
-    let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
+                                           },
+                                           gateEnabled: { settings.rawAppendGateEnabled })
     let controller = DictationController(
         audio: audio, asr: asr, coordinator: coordinator,
         intent: polisher, hud: hud, settings: settings,
