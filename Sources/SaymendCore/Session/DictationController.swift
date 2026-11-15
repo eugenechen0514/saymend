@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// 聽寫狀態機（規格 §3.1–§3.4）。
 /// 所有系統能力由 protocol 注入；時間一律由呼叫端傳入（可測試）。
@@ -125,6 +126,12 @@ public final class DictationController {
         case show(String)
         case abortSecure
     }
+    /// issue #65 Step 0 量測（裁定 Q7）：本段暫時文字的頻率與閘門耗時。型別上只有數字與旗標。
+    /// 在 `endListening`／`archiveSession` 以 debug log 輸出後歸零（@testable 可讀）。
+    private(set) var volatileGateStats = VolatileGateStats()
+    /// 最近一次輸出到 log 的那份量測（測試觀察用：os.Logger 本身沒有可觀察的 seam）
+    private(set) var lastFlushedVolatileGateStats: VolatileGateStats?
+    private static let hudLog = Logger(subsystem: "io.saymend.app", category: "hud")
 
     public init(audio: any AudioCaptureService,
                 asr: any ASREngine,
@@ -337,12 +344,15 @@ public final class DictationController {
         case .volatile(let text):
             // `.finishing`（排空窗）本來就不呈現暫時文字，所以也不查閘門（白付 AX IPC）。
             if case .listening(let mode) = internalPhase {
+                volatileGateStats.recordEvent(at: t)
                 // issue #65：轉錄文字進 HUD 只有這一條路，密碼欄守衛必須跑在 present **之前**，
                 // 且查詢與 present 之間沒有 `await`（同一個 MainActor turn）。
                 switch volatilePreview(text) {
                 case .show(let shown):
+                    if volatileMasked { volatileGateStats.noteMasked() }
                     presentListening(mode: mode, volatile: shown)
                 case .abortSecure:
+                    volatileGateStats.noteAborted()        // 必須在 abort 之前：archiveSession 會輸出並歸零
                     // `segmenter.hardReset()` 讓焦點在密碼欄期間說的話不閉合、不送 LLM、不落地（V12）
                     abortForSecureField()
                 }
@@ -571,7 +581,10 @@ public final class DictationController {
     /// 正是焦點在密碼欄期間說出的字，「不知道是不是密碼欄」的分支同樣一個字都不留。
     private func volatilePreview(_ text: String) -> VolatilePreview {
         guard !text.isEmpty, !volatileMasked else { return .show("") }
-        switch fieldReader?.fieldGate(sessionIdentity: ledger.fieldIdentity) {
+        let started = ContinuousClock.now
+        let gate = fieldReader?.fieldGate(sessionIdentity: ledger.fieldIdentity)
+        if gate != nil { volatileGateStats.recordGateCall(ContinuousClock.now - started) }
+        switch gate {
         case .secure?:
             return .abortSecure
         case .secureUnknown?:
@@ -733,7 +746,26 @@ public final class DictationController {
     private func endListening(at t: TimeInterval) {
         audio.stop()                 // audio finish → ASR 排空 → asrStreamEnded 收尾
         internalPhase = .finishing
+        flushVolatileGateStats()     // 排空窗不呈現暫時文字，本段量測到此為止
         hud.present(.hidden)
+    }
+
+    /// issue #65 量測輸出（裁定 Q7）：**只有數字與旗標**，以 debug 等級輸出（Release 預設不落地）。
+    /// 事件數為 0 不輸出。輸出後歸零，下一段從頭算。
+    /// 判讀：多段 log 彙整出「事件/秒 p95 × 閘門耗時 p95」，超過 20ms/s 再開節流 follow-up。
+    private func flushVolatileGateStats() {
+        let s = volatileGateStats
+        volatileGateStats = VolatileGateStats()
+        guard s.events > 0 else { return }
+        lastFlushedVolatileGateStats = s
+        let span = (s.lastAt ?? 0) - (s.firstAt ?? 0)
+        Self.hudLog.debug("""
+            volatile gate: events=\(s.events, privacy: .public) gateCalls=\(s.gateCalls, privacy: .public) \
+            maxPerSecond=\(s.maxPerSecond, privacy: .public) \
+            maxGateMs=\(s.maxGateSeconds * 1000, format: .fixed(precision: 3), privacy: .public) \
+            spanSeconds=\(span, format: .fixed(precision: 2), privacy: .public) \
+            masked=\(s.masked, privacy: .public) aborted=\(s.aborted, privacy: .public)
+            """)
     }
 
     private func endSession(at t: TimeInterval) {
@@ -758,6 +790,7 @@ public final class DictationController {
         ocrTask?.cancel()
         ocrTask = nil
         capturedOCRText = nil
+        flushVolatileGateStats()            // issue #65 量測：Esc／暫時文字硬停／定稿硬停等直達封存的路徑
         // 歸還 begin 時登記的 element token（issue #43）：必須在 ledger.archive() 清掉它之前。
         // registry 有引用計數，FeedbackCoordinator 若也 pin 了同一 element，這裡只減 ledger 那一份。
         releaseFieldLease(ledger.fieldIdentity)
