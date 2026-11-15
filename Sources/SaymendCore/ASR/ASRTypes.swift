@@ -72,12 +72,12 @@ public enum TranscriptEvent: Equatable, Sendable {
     /// 定稿文字。`quality` 是**選配診斷資料**（issue #10）：只有本機 Whisper 串流引擎
     /// 給得出來，其他引擎一律 nil。它不影響任何上屏決策，純粹寫進歷史供回查。
     case finalized(String, quality: TranscriptQuality?)
-    /// M8：批次引擎已收完音訊、等待辨識結果（僅 WhisperRemoteEngine 會吐）
+    /// M8：批次引擎已收完音訊、等待辨識結果（WhisperRemoteEngine 與本機的 WhisperKitEngine 會吐）
     case transcribing
     /// M9：本機引擎正在載入模型（首次含 ANE 編譯，實測 large-v3-turbo 可達數分鐘）。
     /// 不折進 .transcribing——折了會讓使用者以為「辨識中…」卡死。
     case loadingModel
-    /// M8：辨識失敗，不上屏、不入帳本（僅 WhisperRemoteEngine 會吐）
+    /// M8：辨識失敗，不上屏、不入帳本（WhisperRemoteEngine 與本機的 WhisperKitEngine 會吐）
     case failed(reason: String)
     /// issue #18：整段音訊都沒有任何一格超過靜音門檻——使用者可能講了話但麥克風太遠。
     ///

@@ -513,9 +513,9 @@ public final class DictationController {
                     // 的預設 round（ledger.generation），ClipboardChannel 把同一輪的救援串接成一份
                     // （issue #42 取捨 4 的修訂）。此處仍沒有 dispatch 的 lastRescueGeneration（:694-697）
                     // 那種「只救一份」的節流——那是刻意的：每一段都是使用者真的說過的話，都該留下。
-                    // 提示會被蓋掉：hold 模式下 asrStreamEnded（:463-465）會接著 present .lingering、
-                    // 非 active 時 archiveSession（:601）present .hidden，使用者實際看不到這行 notice。
-                    // 這是既有的 M8 LOW follow-up，已另立 issue #61（安全相關 notice 的最短顯示保證）。
+                    // 提示以救援提示呈現（issue #61）：hold 模式下 `asrStreamEnded` 緊接著會 present `.lingering`、
+                    // session 已不 active 時 `archiveSession` 會 present `.hidden`——沒有仲裁的話這行提示當場就被蓋掉。
+                    // App 端包的 `HUDArbiter` 保證它至少停留 `HUDArbiter.minimumHold`，期間的狀態延後重播。
                     // 不記 insertEvent：與緩衝句插入失敗那條保持一致（最小 diff、一致性優先）。
                     rescueToClipboard(text)
                     recordASRDiagnostic(text: text, quality: quality)

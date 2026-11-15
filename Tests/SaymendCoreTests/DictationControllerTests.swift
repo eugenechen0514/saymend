@@ -2379,9 +2379,10 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 /// （`InsertionCoordinator.swift:104-110`），拋錯＝帳面乾淨、一個字都沒進欄位。
 ///
 /// 注意本測試停在 `handleTranscript` 之後，**沒有**呼叫 `asrStreamEnded`，所以才看得到
-/// `hud.states.last`。真實 hold 流程走完 stream-end 後，這行 notice 會被 `.lingering`
-/// （`DictationController.swift:463-465`）或 `.hidden`（`:601`）蓋掉，使用者實際看不到——
-/// 那是既有的 M8 LOW follow-up。本測試釘的是「有發出正確文案」，不是「使用者最終看得到」。
+/// `hud.states.last`；而且**不包 `HUDArbiter`**，FakeHUD 看的是 controller 的原始輸出。
+/// 真實 hold 流程走完 stream-end 後，controller 會緊接著送 `.lingering`（`asrStreamEnded`）或
+/// `.hidden`（`archiveSession`）。本測試釘的是「有以救援提示發出正確文案」；「使用者最終看得到」
+/// 由 arbiter 的最短顯示保證負責，端到端時序見 `RescueNoticeDwellTests`（issue #61）。
 @MainActor
 @Test func rawFinalizedInsertFailureRescuesWholeUtteranceToClipboard() {
     let env = StatefulFieldEnvironment()
