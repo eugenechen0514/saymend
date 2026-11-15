@@ -685,6 +685,7 @@ import Testing
 
     #expect(clip.texts == ["改正式一點"])          // 指令話語進剪貼簿
     #expect(hud.states.contains(where: { if case .notice(let s) = $0 { return s.contains("轉錄已入剪貼簿") }; return false }))
+    #expect(hud.rescueNotices == ["未替換（測試降級），轉錄已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
 }
 
 @MainActor
@@ -865,6 +866,7 @@ import Testing
     c.userActivityDetected(at: 10.8)      // 使用者手動打字（設計裁決 2）
     #expect(c.ledger.frozen)
     #expect(hud.states.contains(.notice("偵測到手動輸入，本段不再修正")))
+    #expect(hud.rescueNotices.isEmpty, "#61 反向守衛：凍結通知不是救援提示（內容沒進剪貼簿）")
     c.hotkeyReleased(at: 11.5)
     asr.continuation?.finish()
     c.asrStreamEnded(at: 11.6)
@@ -931,6 +933,7 @@ import Testing
     #expect(ax.calls.last?.expected == "星期二開會。欸改成星期三" && ax.calls.last?.new == "星期三開會。")
     #expect(c.ledger.sessionText == "星期三開會。")
     #expect(hud.states.contains(.notice("已修正")))
+    #expect(hud.rescueNotices.isEmpty, "#61 反向守衛：已修正不是救援提示")
 }
 
 @MainActor
@@ -1242,6 +1245,7 @@ import Testing
     #expect(!key.ops.contains(.insert("被竄改的全文。")))
     #expect(!ax.calls.contains { $0.new == "被竄改的全文。" })
     #expect(hud.states.contains(.notice("未修正（內容已變動，請再說一次）")))
+    #expect(hud.rescueNotices.isEmpty, "#61 反向守衛：未修正提示不是救援提示")
     #expect(intent.calls.last?.context.targetText == "")   // 佐證：第二句呼叫時基準確實是過期的空全文
 }
 
@@ -1384,6 +1388,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(key.ops.isEmpty)                       // 欄位分毫未動
     #expect(!c.ledger.isActive)                    // session 結束
     #expect(hud.states.contains(.notice("選取已變動，結果已入剪貼簿")))
+    #expect(hud.rescueNotices == ["選取已變動，結果已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
 }
 
 /// #21 裁定 2／#45：選取即目標在替換當下無法用 AX 確認選取（熱鍵按下時讀得到、替換時讀不到＝焦點已跑）——
@@ -1408,6 +1413,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(clip.texts == ["替換文。"])
     #expect(!c.ledger.isActive, "什麼都沒寫進欄位，session 沒有存在的理由")
     #expect(hud.states.contains(.notice("無法替換選取，內容已入剪貼簿")))
+    #expect(hud.rescueNotices == ["無法替換選取，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
     let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
     #expect(skipped.contains { $0.outcomeText == "unsupported" })
 }
@@ -1431,6 +1437,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(env.axWrites.isEmpty)
     #expect(clip.texts == ["新字"])
     #expect(hud.states.contains(.notice("無法替換選取，內容已入剪貼簿")))
+    #expect(hud.rescueNotices == ["無法替換選取，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
 }
 
 /// 同世代第二句的緩衝 outcome：第一句已把內容救進剪貼簿並封存，第二句回來時不得再救一次——
@@ -1597,7 +1604,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     let reader = FakeFieldReader()
     reader.context = selectionField("原文字", location: 0)
     let spy = ClipboardSpy()
-    let (c, _, _, key, _, _) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
     c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("改正式一點"), at: 11.0)
     c.tick(at: 12.6)                                // 在途
@@ -1606,6 +1613,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     #expect(ax.calls.isEmpty && key.ops.isEmpty)    // 凍結後不得替換（選取完整性不明）
     #expect(spy.texts == ["正式版"])
+    #expect(hud.rescueNotices == ["選取已變動，結果已入剪貼簿"], "#61：凍結時放棄替換同樣走救援提示")
 }
 
 @MainActor
@@ -1639,6 +1647,67 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(spy.texts == ["補充內容。"])            // 改走剪貼簿急救
     #expect(c.ledger.sessionText == "正式版")       // dispatch 未改動已定稿文字
     #expect(hud.states.contains(.notice("已凍結，內容已入剪貼簿")))
+    #expect(hud.rescueNotices == ["已凍結，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+}
+
+/// 緩衝句 `insertDetached` 拋錯（緩衝句的 catch 出口）：內容救進剪貼簿、以救援提示呈現（issue #61）。
+/// 時序骨架比照上一條：首句替換選取、第二句緩衝，首句落地後才放行第二句——這時讓主 inserter 與備援都失敗。
+@MainActor
+@Test func bufferedNewContentInsertFailureRescuesWithRescueNotice() async {
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["第二句"]
+    intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
+                           "第二句": .newContent("補充內容。")]
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 4)
+    let paste = RecordingInserter()
+    let spy = ClipboardSpy()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, pasteInserter: paste, rangeReplacer: ax,
+                                                clipboard: spy, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)                                // 首句：緩衝＋建 task
+    let first = c.lastIntentTask
+    c.handleTranscript(.finalized("第二句"), at: 13.0)
+    c.tick(at: 14.6)                                // 第二句：仍 .selectionPending → 緩衝
+    await first?.value
+    #expect(c.ledger.sessionText == "正式版", "前提：首句已替換選取、轉回 .tail")
+    key.failInsertsRemaining = 1                    // 主 inserter 與備援都失敗 → 走 catch 出口
+    paste.failInsertsRemaining = 1
+    intent.release()
+    await c.lastIntentTask?.value
+    #expect(key.ops.isEmpty && paste.ops.isEmpty, "前提：一個字都沒進欄位")
+    #expect(spy.texts == ["補充內容。"], "內容救進剪貼簿")
+    #expect(hud.rescueNotices == ["插入失敗，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(c.ledger.sessionText == "正式版", "沒落地就不得進帳本")
+}
+
+/// 緩衝句 `.degraded`：緩衝句從未上屏，降級＝轉錄原文救進剪貼簿、以救援提示呈現（issue #61）。
+@MainActor
+@Test func bufferedDegradedRescuesTheTranscriptWithRescueNotice() async {
+    let intent = GatedIntentService()
+    intent.gatedRaws = ["第二句"]
+    intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
+                           "第二句": .degraded(reason: "逾時 5 秒")]
+    let ax = FakeRangeReplacer()
+    let reader = FakeFieldReader()
+    reader.context = selectionField("原文字", location: 4)
+    let spy = ClipboardSpy()
+    let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
+    c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
+    c.handleTranscript(.finalized("改正式一點"), at: 11.0)
+    c.tick(at: 12.6)
+    let first = c.lastIntentTask
+    c.handleTranscript(.finalized("第二句"), at: 13.0)
+    c.tick(at: 14.6)
+    await first?.value
+    #expect(c.ledger.sessionText == "正式版", "前提：首句已替換選取、轉回 .tail")
+    intent.release()
+    await c.lastIntentTask?.value
+    #expect(spy.texts == ["第二句"], "降級：轉錄原文救進剪貼簿")
+    #expect(hud.rescueNotices == ["未處理（逾時 5 秒），轉錄已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(key.ops.isEmpty, "緩衝句從未上屏，降級也不得補打")
 }
 
 @MainActor
@@ -1687,6 +1756,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(spy.texts == ["正式版"])                 // 結果救進剪貼簿（規格 §3.6）
     #expect(key.ops.isEmpty)                        // 欄位分毫未動
     #expect(hud.states.contains(.notice("選取已變動，結果已入剪貼簿")))
+    #expect(hud.rescueNotices == ["選取已變動，結果已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
     #expect(ax.calls.isEmpty)                       // 封存後不得再碰選取
 }
 
@@ -2197,6 +2267,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(key.ops.isEmpty)                            // 核心：不得合成鍵入／貼上到聚焦的別 App
     #expect(spy.texts == ["整段遠端辨識結果"])           // 不讓使用者白說話：改走剪貼簿急救
     #expect(hud.states.last == .notice("已凍結，內容已入剪貼簿"))
+    #expect(hud.rescueNotices == ["已凍結，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
 
     // 不特別 hardReset：segmenter 殘留交由下游守衛統一處理——隨後的 asrStreamEnded 先 flush 出這句
     // 進 LLM，但 frozen 使 asrStreamEnded 立即封存（isActive→false），dispatch 被相位守衛丟棄。
@@ -2324,6 +2395,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(env.text(in: "A") == "PREVIOUS", "插入失敗＝一個字都沒進欄位")
     #expect(spy.texts == ["使用者說了一整句話"], "不讓使用者白說話：整句救進剪貼簿")
     #expect(hud.states.last == .notice("插入失敗，內容已入剪貼簿"), "文案須與緩衝句插入失敗那條逐字一致")
+    #expect(hud.rescueNotices == ["插入失敗，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
 }
 
 // MARK: - 剪貼簿救援的 round token（issue #42／PR #56 review 修訂）

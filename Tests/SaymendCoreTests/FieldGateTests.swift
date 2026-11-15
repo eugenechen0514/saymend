@@ -59,6 +59,7 @@ import Testing
         #expect(!c.ledger.frozen, "只跳過這一句，不凍結（裁定 Q2）")
         #expect(c.ledger.isActive, "也不中止 session")
         #expect(notices(hud) == [DictationController.fieldChangedNotice], "恰一則提示")
+        #expect(hud.rescueNotices == [DictationController.fieldChangedNotice], "#61：救援出口走 presentRescueNotice")
     }
 
     /// 跨 App：detail 要能事後判讀「從哪個 App 換到哪個 App」。
@@ -78,6 +79,7 @@ import Testing
         #expect(env.text(in: "B") == "", "跨 App 更不能寫")
         #expect(clipboard.texts == ["第二句"], "內容不得遺失")
         #expect(notices(hud) == [DictationController.fieldChangedNotice])
+        #expect(hud.rescueNotices == [DictationController.fieldChangedNotice], "#61：救援出口走 presentRescueNotice")
     }
 
     /// 焦點沒動：零診斷事件（誤判率的分母乾不乾淨全看這條）。
@@ -127,6 +129,7 @@ import Testing
         #expect(env.text(in: "A") == "正常內容")
         #expect(!c.ledger.isActive, "session 硬停")
         #expect(hud.states.contains(.notice("密碼欄位不聽寫")))
+        #expect(hud.rescueNotices.isEmpty, "#61 反向守衛：密碼欄位不聽寫不是救援提示（內容沒進剪貼簿）")
         #expect(skipEvents(history).isEmpty, "密碼欄位走 secure 分支，不記 fieldChanged 診斷")
         #expect(secureUnknownEvents(history).isEmpty,
                 "AX 明確回答了，不得被記成 secureUnknown——那會污染「AX 沒回應」這組樣本的分子")

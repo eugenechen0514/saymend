@@ -392,13 +392,18 @@ func makeController(
 }
 
 /// 以 StatefulFieldEnvironment 同時擔任 keystroke／paste／AX／reader 的 controller
+///
+/// `wrapHUD`（issue #61）：把 FakeHUD 包一層再交給 controller（端到端測試用來包 `HUDArbiter`）。
+/// 回傳的**仍是內層 FakeHUD**——也就是 arbiter 的輸出端、window 實際收到的序列。預設不包，
+/// FakeHUD 直接觀察 controller 的原始輸出（`makeController` 一律不包）。
 @MainActor
 func makeStatefulController(
     env: StatefulFieldEnvironment,
     polisher: GatedIntentService = GatedIntentService(),
     clipboard: ClipboardSpy? = nil,
     history: FakeHistory? = nil,
-    feedback: FakeFeedback? = nil
+    feedback: FakeFeedback? = nil,
+    wrapHUD: (FakeHUD) -> any HUDPresenting = { $0 }
 ) -> (DictationController, FakeASR, FakeHUD) {
     let audio = FakeAudio()
     let asr = FakeASR()
@@ -413,7 +418,7 @@ func makeStatefulController(
                                            gateEnabled: { settings.rawAppendGateEnabled })
     let controller = DictationController(
         audio: audio, asr: asr, coordinator: coordinator,
-        intent: polisher, hud: hud, settings: settings,
+        intent: polisher, hud: wrapHUD(hud), settings: settings,
         clipboardRescue: clipboard.map { spy in { spy.rescue($0, round: $1) } },
         fieldReader: env, feedback: feedback, history: history, contextOCR: nil)
     return (controller, asr, hud)

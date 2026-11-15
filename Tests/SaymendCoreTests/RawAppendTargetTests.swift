@@ -63,6 +63,7 @@ import Testing
         #expect(env.text(in: "B") == "", "別的欄位一個字都不能進")
         #expect(clipboard.texts == ["機密內容"], "內容不得遺失：進剪貼簿")
         #expect(lastNotice(hud) == DictationController.fieldChangedNotice)
+        #expect(hud.rescueNotices == [DictationController.fieldChangedNotice], "#61：救援出口走 presentRescueNotice")
         #expect(skipEvents(history).count == 1, "恰一列診斷——閘門下沉後不得再有 shadow 那列重複計數")
         #expect(skipEvents(history).first?.outcomeText == "fieldChanged：sameApp:com.foo.app")
     }
@@ -363,6 +364,7 @@ import Testing
         #expect(key.ops == opsBeforeLanding, "緩衝句不得合成鍵入到別的欄位")
         #expect(clipboard.texts == ["補充內容。"], "改走剪貼簿急救")
         #expect(hud.states.contains(.notice(DictationController.fieldChangedNotice)))
+        #expect(hud.rescueNotices == [DictationController.fieldChangedNotice], "#61：救援出口走 presentRescueNotice")
         #expect(c.ledger.sessionText == "正式版", "沒落地就不得進帳本")
         #expect(history.exchanges.contains { $0.outcomeKind == "insertSkipped"
                 && $0.outcomeText == "fieldChanged：crossApp:?→com.other.app" })
@@ -821,6 +823,7 @@ import Testing
         #expect(env.text(in: "A") == "第一句", "前提：凍結後那句不得上屏")
         #expect(clipboard.texts == ["第二句"], "前提：走的是凍結終點（救剪貼簿）")
         #expect(lastNotice(hud) == "已凍結，內容已入剪貼簿")
+        #expect(hud.rescueNotices == ["已凍結，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
         #expect(history.diagnostics.map(\.finalizedText) == ["第一句", "第二句"],
                 "凍結不是密碼欄，診斷樣本照留；診斷搬家不得順手把這格弄丟")
         #expect(skipEvents(history).first?.outcomeText == "frozen", "分類仍是 frozen")
@@ -873,6 +876,7 @@ import Testing
         #expect(env.text(in: "A") == "PREVIOUS", "前提：插入失敗＝一個字都沒進欄位（#38 原子契約）")
         #expect(clipboard.texts == ["整句話"], "前提：走的是插入失敗終點（救剪貼簿）")
         #expect(lastNotice(hud) == "插入失敗，內容已入剪貼簿")
+        #expect(hud.rescueNotices == ["插入失敗，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
         #expect(history.diagnostics.map(\.finalizedText) == ["整句話"],
                 "插入失敗不是密碼欄：診斷樣本照留")
     }
