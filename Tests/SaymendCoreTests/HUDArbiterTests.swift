@@ -112,6 +112,30 @@ import Testing
         #expect(inner.states == [.notice("R1"), .notice("R2")])
     }
 
+    // MARK: - A15：取代時保留延後的持久狀態
+
+    /// 保護期內 session 被封存（`.hidden`）之後又來一則救援提示——例如緩衝句的救援之後，
+    /// `abandonSelectionReplacement` 先 archive 再發提示。取代只作廢延後的**暫態**；延後的 `.hidden`
+    /// 若跟著被丟掉，window 的 persistentState 會停在封存前的 `.lingering`，2.5 秒後叫回已封存
+    /// session 的「可修正／復原」（與 A4 同一個幽靈延續窗，從取代這條路回來）。
+    @Test func aReplacingRescueNoticeKeepsTheDeferredPersistentState() {
+        let (a, inner, scheduler) = make()
+        a.present(.lingering)
+        a.presentRescueNotice("R1")
+        scheduler.advance(to: 0.5)
+        a.present(.hidden)
+        scheduler.advance(to: 1.0)
+        a.presentRescueNotice("R2")
+        #expect(inner.states == [.lingering, .notice("R1"), .notice("R2")], "前提：.hidden 被延後、R2 立即下送")
+        scheduler.advance(to: 2.0)
+        #expect(inner.states == [.lingering, .notice("R1"), .notice("R2")], "R1 的過期回呼不得提前補送")
+        scheduler.advance(to: 2.9)
+        #expect(inner.states == [.lingering, .notice("R1"), .notice("R2")], "R2 享有完整的 2 秒")
+        scheduler.advance(to: 3.0)
+        #expect(inner.states == [.lingering, .notice("R1"), .notice("R2"), .hidden],
+                "R2 的保護期結束時，被延後的 .hidden 必須補送")
+    }
+
     // MARK: - A8：到期不捏造任何狀態
 
     @Test func anExpiredHoldWithNothingDeferredSendsNothing() {
