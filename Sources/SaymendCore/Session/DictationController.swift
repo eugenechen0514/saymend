@@ -116,6 +116,15 @@ public final class DictationController {
     private var capturedOCRText: String?
     /// internal 供測試 await（OCR 非同步落地，趕上哪句算哪句——M4 設計裁決 5）
     private(set) var ocrTask: Task<Void, Never>?
+    /// issue #65：本段（自上次 `startListening` 起）的暫時文字已遮罩。fail closed，同時是 AX 成本的熔斷：
+    /// 一旦遮罩，本段之後的暫時文字一律顯示 `""`、不再查閘門。只在 `startListening` 重置——
+    /// 它是進入 `.listening` 的唯一入口（新段、延續窗續聽都走它），多一個重置點只會是殺不到的 mutation。
+    private var volatileMasked = false
+    /// 暫時文字的呈現決定（issue #65）：照常顯示（可能是遮罩後的 `""`），或立即硬停。
+    private enum VolatilePreview: Equatable {
+        case show(String)
+        case abortSecure
+    }
 
     public init(audio: any AudioCaptureService,
                 asr: any ASREngine,
@@ -326,12 +335,23 @@ public final class DictationController {
         segmenter.onTranscript(event, at: t)
         switch event {
         case .volatile(let text):
+            // `.finishing`（排空窗）本來就不呈現暫時文字，所以也不查閘門（白付 AX IPC）。
             if case .listening(let mode) = internalPhase {
-                presentListening(mode: mode, volatile: text)
+                // issue #65：轉錄文字進 HUD 只有這一條路，密碼欄守衛必須跑在 present **之前**，
+                // 且查詢與 present 之間沒有 `await`（同一個 MainActor turn）。
+                switch volatilePreview(text) {
+                case .show(let shown):
+                    presentListening(mode: mode, volatile: shown)
+                case .abortSecure:
+                    // `segmenter.hardReset()` 讓焦點在密碼欄期間說的話不閉合、不送 LLM、不落地（V12）
+                    abortForSecureField()
+                }
             }
         case .finalized(let text, let quality):
             // M2 遺留債：聽寫中焦點切進密碼欄位（Tab、程式切換焦點——滑鼠/鍵盤活動已由凍結涵蓋，
             // 但焦點可以不經這兩者移動）。規格 §5.3：密碼欄位一個字都不能進。硬停整個 session。
+            // 暫時文字那條路（上面的 `.volatile` 分支，issue #65）另有自己的閘門，查到 `.secure` 同樣硬停；
+            // 它的遮罩**不得**讓這裡的閘門被省略——遮罩只管畫面，內容層的 fail closed 仍由這一道負責。
             //
             // issue #37：這裡原本每句都做一次完整 snapshot，只為讀一個 isSecure bool
             // （4–5 次 AX IPC，且在有選取＋白名單 App 時會對目前焦點發合成 Cmd+C），現在是輕量閘門。
@@ -539,6 +559,33 @@ public final class DictationController {
         presentListening(mode: mode, volatile: "")
     }
 
+    /// 暫時文字上 HUD 前的密碼欄閘門（issue #65）。判定表見計畫 §4.1：
+    /// - 空字串、本段已遮罩：顯示 `""`，不查
+    /// - `fieldReader == nil`、`.same`、`.different`、起點就沒有 identity 的 `.unknown`（#21）：照常顯示
+    /// - session 有 identity 卻讀不到焦點的 `.unknown`、`.secureUnknown`：遮罩並熔斷
+    /// - `.secure`：硬停（與定稿路徑的 `.secure` 一致，不記 insertEvent）
+    ///
+    /// **只呼叫 `fieldGate`（實作只用 `registry.matches`），絕不呼叫 `snapshot()`**：snapshot 會登記
+    /// identity 持有者，這裡不歸還就破壞 #43 的 lease 不變式。
+    /// **不寫任何持久容器**（#10）：不呼叫 `recordInsertEvent`／`recordASRDiagnostic`——暫時文字可能
+    /// 正是焦點在密碼欄期間說出的字，「不知道是不是密碼欄」的分支同樣一個字都不留。
+    private func volatilePreview(_ text: String) -> VolatilePreview {
+        guard !text.isEmpty, !volatileMasked else { return .show("") }
+        switch fieldReader?.fieldGate(sessionIdentity: ledger.fieldIdentity) {
+        case .secure?:
+            return .abortSecure
+        case .secureUnknown?:
+            volatileMasked = true
+            return .show("")
+        case .unknown? where ledger.fieldIdentity != nil:
+            // session 起點有 AX 焦點，現在卻問不出來（含逾時）＝不知道焦點在哪：fail closed。
+            volatileMasked = true
+            return .show("")
+        case .unknown?, .same?, .different?, .none:
+            return .show(text)
+        }
+    }
+
     /// 聽寫中的 HUD 狀態依 sessionTarget 分流：選取目標模式顯示 selectionListening
     /// （緩衝不上屏，volatile 是使用者唯一的「聽到了」回饋），一般模式維持 listening。
     private func presentListening(mode: ListeningMode, volatile: String) {
@@ -619,6 +666,8 @@ public final class DictationController {
             archiveAfterDrain = false
             sawNoSpeechWarning = false
             sawTextThisSession = false
+            // issue #65：遮罩是「本段」的。走到這裡代表上面的密碼欄拒絕沒觸發——人還在密碼欄時不會重置。
+            volatileMasked = false
             capturedContextBefore = field.contextBefore
             capturedContextAfter = field.contextAfter
             if !resuming {

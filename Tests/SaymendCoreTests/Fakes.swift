@@ -161,6 +161,9 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
         if focusedID == nil { focusedID = id }
     }
     func focus(_ id: String) { precondition(fields[id] != nil); focusedID = id }
+    /// 讀不到焦點（AX 逾時、焦點落在非文字元素上）：閘門回 `.unknown`、snapshot 回空的 `FieldContext()`。
+    /// issue #65 用它模擬「session 有 identity，卻問不出現在的焦點」。
+    func blur() { focusedID = nil }
     func text(in id: String) -> String { fields[id]!.text }
     func select(in id: String, location: Int, length: Int) {
         fields[id]!.selectedRange = .init(location: location, length: length)
