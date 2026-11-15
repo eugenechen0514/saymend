@@ -107,7 +107,42 @@ final class ClipboardSpy {
 
 final class FakeHUD: HUDPresenting {
     private(set) var states: [HUDState] = []
+    /// issue #61：經 `presentRescueNotice` 送來的救援提示文案（依序）。
+    private(set) var rescueNotices: [String] = []
     func present(_ state: HUDState) { states.append(state) }
+    /// 照舊 append `.notice(message)` 到 `states`：既有的 `.notice` 斷言零遷移，
+    /// `rescueNotices` 另外記下「這則走的是救援通道」。
+    func presentRescueNotice(_ message: String) {
+        rescueNotices.append(message)
+        states.append(.notice(message))
+    }
+}
+
+/// `HUDScheduling` 的虛擬時鐘（issue #61）。`advance(to:)` 依（到期時間、排程序）執行所有到期的區塊，
+/// 包括執行途中新排、且同樣已到期的。測試一律用絕對時間（`advance(to: 1.9)` 再 `advance(to: 2.0)`），
+/// 避免 1.999 + 0.001 這類浮點累加誤差。
+final class FakeHUDScheduler: HUDScheduling {
+    private(set) var now: TimeInterval = 0
+    private var pending: [(due: TimeInterval, seq: Int, block: () -> Void)] = []
+    private var nextSeq = 0
+    /// 尚未執行的區塊數（含 arbiter 會以 epoch 忽略的過期回呼）
+    var pendingCount: Int { pending.count }
+
+    func schedule(after seconds: TimeInterval, _ block: @escaping () -> Void) {
+        pending.append((now + seconds, nextSeq, block))
+        nextSeq += 1
+    }
+
+    func advance(to t: TimeInterval) {
+        precondition(t >= now, "虛擬時鐘不能倒退")
+        while let i = pending.indices.filter({ pending[$0].due <= t })
+                .min(by: { (pending[$0].due, pending[$0].seq) < (pending[$1].due, pending[$1].seq) }) {
+            let item = pending.remove(at: i)
+            now = item.due
+            item.block()
+        }
+        now = t
+    }
 }
 
 final class FakeFieldReader: FieldContextProviding {

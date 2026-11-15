@@ -3,7 +3,9 @@ import SwiftUI
 import SaymendCore
 
 /// HUD 浮條視窗（規格 §3.1 鐵律：絕不搶鍵盤焦點 → .nonactivatingPanel）。
-/// notice 顯示 2.5 秒後自動隱藏。
+/// notice 顯示 `HUDTiming.noticeLifetime`（2.5 秒）、diff 顯示 `HUDTiming.diffLifetime`（4 秒）後自動隱藏。
+/// 救援提示（issue #61）走 protocol 預設的 `presentRescueNotice`＝一般 notice；最短顯示保證由包在外面的
+/// `HUDArbiter` 負責，這裡不需要知道。
 final class HUDWindowController: HUDPresenting {
     private let model = HUDModel()
     private var panel: NSPanel?
@@ -46,8 +48,9 @@ final class HUDWindowController: HUDPresenting {
             show()
         case .notice, .diff:
             show()
-            let duration: Duration = { if case .diff = state { return .milliseconds(4000) }
-                                       return .milliseconds(2500) }()
+            // 時長放在 Core（`HUDTiming`）：`HUDArbiter.minimumHold` 必須短於它，測試才釘得住
+            let duration: Duration = { if case .diff = state { return .seconds(HUDTiming.diffLifetime) }
+                                       return .seconds(HUDTiming.noticeLifetime) }()
             hideTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: duration)
                 guard !Task.isCancelled, let self else { return }
