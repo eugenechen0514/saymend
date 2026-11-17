@@ -308,12 +308,29 @@ private final class MutableClock: @unchecked Sendable {
         return outcome == .completed
     }
 
+    /// Settings 選 `url` 並確認它已快取——之後的「選回」才是 cache hit。前提不成立就立即中止：
+    /// 否則選回的那次會排在被閘門卡住的 B 後面，測試直接掛死而不是紅（mutation 下實測）。
+    private func selectCached(_ co: ModelLoadCoordinator<String>, _ url: URL) async throws {
+        await co.preloadSelection(url)
+        try #require(await co.state(for: url) == .loaded, "前提：選定後已快取")
+    }
+
+    /// 有上限地讓出執行權，直到條件成立。不用 `awaitBounded`：它逾時後不會取消 work，
+    /// 無上限的輪詢會一直空轉到行程結束、拖慢其他有時限的測試。
+    private func eventually(_ cond: () async -> Bool) async -> Bool {
+        for _ in 0..<100_000 {
+            if await cond() { return true }
+            await Task.yield()
+        }
+        return false
+    }
+
     /// issue #35 的 app-shape 重現：A → B → A（A 已 cached）。`SaymendApp.preloadWhisperLocal` 換選前會先
     /// cancel 舊 wrapper，但 B flight 已建立，外層 cancellation 傳不進 unstructured task。
-    @Test func appStyleSelectionBackToCachedModelKeepsItCurrent() async {
+    @Test func appStyleSelectionBackToCachedModelKeepsItCurrent() async throws {
         let (co, loads, bEntered, releaseB, _) = selectionFixture()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
-        await co.preloadSelection(a)                             // Settings 選 A：current = A
+        try await selectCached(co, a)                            // Settings 選 A：current = A
         let obsoleteB = Task { await co.preloadSelection(b) }    // 換選 B（App 的 preload wrapper）
         guard await opened(bEntered, "B loader 進入") else { await releaseB.open(); return }
         obsoleteB.cancel()                                       // flight 已建立後才 cancel wrapper
@@ -330,10 +347,10 @@ private final class MutableClock: @unchecked Sendable {
 
     /// 同一個 A → B → A，但 B 的 wrapper **沒有**被取消：這時唯一的 supersede 訊號就是「選回 A」這次
     /// cache hit 本身（上一條有 cancel 撤銷兜底，單靠它釘不住 cache hit 也要更新 intent）。
-    @Test func selectingBackToACachedModelSupersedesALiveSelectionFlight() async {
+    @Test func selectingBackToACachedModelSupersedesALiveSelectionFlight() async throws {
         let (co, loads, bEntered, releaseB, _) = selectionFixture()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
-        await co.preloadSelection(a)
+        try await selectCached(co, a)
         let selectB = Task { await co.preloadSelection(b) }
         guard await opened(bEntered, "B loader 進入") else { await releaseB.open(); return }
         await co.preloadSelection(a)
@@ -346,17 +363,17 @@ private final class MutableClock: @unchecked Sendable {
     }
 
     /// 驗收條件 3：flight 建立之後才 cancel 外層 wrapper（沒有新的選擇），也要撤銷它的 adoption。
-    @Test func cancellingASelectionAfterItsFlightStartedWithdrawsItsAdoption() async {
+    @Test func cancellingASelectionAfterItsFlightStartedWithdrawsItsAdoption() async throws {
         let (co, loads, bEntered, releaseB, _) = selectionFixture()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
-        await co.preloadSelection(a)
+        try await selectCached(co, a)
         let obsoleteB = Task { await co.preloadSelection(b) }
         guard await opened(bEntered, "B loader 進入") else { await releaseB.open(); return }
         obsoleteB.cancel()
         await releaseB.open()
         await obsoleteB.value
 
-        #expect(await loads.v == 2, "前提：B 確實載完了（loader 跑過、沒被中途取消）")
+        #expect(await loads.v == 2, "前提：B 的 loader 確實進入過（計數在進入時加一）")
         #expect(await co.state(for: a) == .loaded)
         #expect(await co.state(for: b) == .idle)
     }
@@ -365,7 +382,7 @@ private final class MutableClock: @unchecked Sendable {
     @Test func aForegroundCacheReadDoesNotSupersedeALiveSelection() async throws {
         let (co, loads, bEntered, releaseB, _) = selectionFixture()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
-        await co.preloadSelection(a)
+        try await selectCached(co, a)
         let selectB = Task { await co.preloadSelection(b) }
         guard await opened(bEntered, "B loader 進入") else { await releaseB.open(); return }
         #expect(try await co.model(for: a) == "a", "前提：前景讀到的是 cache 裡的 A")
@@ -377,12 +394,14 @@ private final class MutableClock: @unchecked Sendable {
         #expect(await loads.v == 2)
     }
 
-    /// 前景（聽寫中）join 了一趟已被換掉的 selection flight：呼叫端照樣拿到模型，但 cache 留給選回的 A。
-    /// 前景 join 不取得 ownership——否則聽寫恰好在用 B 的那一刻，使用者選回 A 就會失效。
+    /// 前景 join 了一趟已被換掉的 selection flight：coordinator 把模型交給這個呼叫端，但 cache 留給選回的 A。
+    /// 前景 join 不取得 ownership——否則前景恰好在等 B 的那一刻，使用者選回 A 就會失效。
+    /// 注意 App 裡唯一的前景呼叫端（`WhisperKitEngine` 等模型）不用回傳值、而是回頭查狀態，
+    /// 所以那次聽寫會放棄並報「已換選模型」（見 `WhisperKitEngineTests`），不是用 B 辨識。
     @Test func aForegroundJoinerOfAnObsoleteSelectionGetsTheModelWithoutAdoptingIt() async throws {
         let (co, loads, bEntered, releaseB, joinedB) = selectionFixture()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
-        await co.preloadSelection(a)
+        try await selectCached(co, a)
         let selectB = Task { await co.preloadSelection(b) }
         guard await opened(bEntered, "B loader 進入") else { await releaseB.open(); return }
         let foregroundB = Task { try await co.model(for: b) }
@@ -401,7 +420,7 @@ private final class MutableClock: @unchecked Sendable {
     @Test func aSelectionJoiningAForegroundFlightTakesOwnership() async throws {
         let (co, loads, bEntered, releaseB, joinedB) = selectionFixture()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
-        await co.preloadSelection(a)
+        try await selectCached(co, a)
         let foregroundB = Task { try await co.model(for: b) }  // 前景先建立 B flight
         guard await opened(bEntered, "B loader 進入") else { await releaseB.open(); return }
         let selectB = Task { await co.preloadSelection(b) }    // 選 B：join 這趟 flight
@@ -432,7 +451,7 @@ private final class MutableClock: @unchecked Sendable {
             if key == b { await bEntered.open(); await releaseB.wait() }
             return key.lastPathComponent
         }
-        await co.preloadSelection(a)
+        try await selectCached(co, a)
         let foregroundB = Task { try await co.model(for: b) }  // 前景先建立 B flight
         guard await opened(bEntered, "B loader 進入") else {
             await releaseB.open(); await releaseForeground.open(); return
@@ -454,19 +473,16 @@ private final class MutableClock: @unchecked Sendable {
 
     /// 連續換選 A → B → C：App 換選前先 cancel 舊 B wrapper，B flight 完成時它帶著取消狀態回來。
     /// 它已被 C 取代，**不得**撤銷——否則最新的 C 載完會被丟掉，下一次聽寫又得重載一次。
-    @Test func aSupersededCancelledSelectionDoesNotWithdrawTheNewerOne() async {
+    @Test func aSupersededCancelledSelectionDoesNotWithdrawTheNewerOne() async throws {
         let (co, loads, bEntered, releaseB, _) = selectionFixture()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b"), c = URL(filePath: "/m/c")
-        await co.preloadSelection(a)
+        try await selectCached(co, a)
         let obsoleteB = Task { await co.preloadSelection(b) }
         guard await opened(bEntered, "B loader 進入") else { await releaseB.open(); return }
         obsoleteB.cancel()
         let selectC = Task { await co.preloadSelection(c) }    // 排在 B 之後
-        let registered = await awaitBounded(limit: .seconds(1)) {
-            while await co.state(for: c) == .idle { await Task.yield() }
-        }
-        guard registered == .completed else {
-            Issue.record("C 的選擇未在 1 秒內登記"); await releaseB.open(); return
+        guard await eventually({ await co.state(for: c) != .idle }) else {
+            Issue.record("C 的選擇遲遲沒有登記"); await releaseB.open(); return
         }
         await releaseB.open()
         await obsoleteB.value
@@ -478,12 +494,38 @@ private final class MutableClock: @unchecked Sendable {
         #expect(await loads.v == 3)
     }
 
+    /// 長時間載入期間來回換選 A → B → C → B：再選 B 時 join 的是「較舊選擇擁有」的在途 B flight，
+    /// 必須把 ownership 更新成最新的選擇——只在 owner 為空時才寫入的話，B 停在舊選擇、C 也已過期，
+    /// 兩趟都不採用，快取停在 A，下一次聽寫又要重載。
+    @Test func reselectingAModelWhoseFlightIsStillRunningTakesOwnershipFromTheOlderSelection() async throws {
+        let (co, loads, bEntered, releaseB, joinedB) = selectionFixture()
+        let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b"), c = URL(filePath: "/m/c")
+        try await selectCached(co, a)
+        let selectB = Task { await co.preloadSelection(b) }     // 第一次選 B：建立 B flight
+        guard await opened(bEntered, "B loader 進入") else { await releaseB.open(); return }
+        let selectC = Task { await co.preloadSelection(c) }     // 換選 C：排在 B 之後
+        guard await eventually({ await co.state(for: c) != .idle }) else {
+            Issue.record("C 的選擇遲遲沒有登記"); await releaseB.open(); return
+        }
+        let reselectB = Task { await co.preloadSelection(b) }   // 再選 B：join 仍在跑的 B flight
+        guard await opened(joinedB, "再選 B join 在途 flight") else { await releaseB.open(); return }
+        await releaseB.open()
+        await selectB.value
+        await reselectB.value
+        await selectC.value
+
+        #expect(await co.state(for: b) == .loaded, "最新的選擇是 B")
+        #expect(await co.state(for: c) == .idle, "C 已被再選的 B 取代")
+        #expect(await co.state(for: a) == .idle)
+        #expect(await loads.v == 3, "前提：A、B、C 各載一次（再選 B 是 join，不是另開 flight）")
+    }
+
     /// 迴歸：正常換選（沒有選回）時，selection flight 照常採用並淘汰舊模型。
-    @Test func aLiveSelectionFlightIsAdopted() async {
+    @Test func aLiveSelectionFlightIsAdopted() async throws {
         let (co, loads, _, releaseB, _) = selectionFixture()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
         await releaseB.open()
-        await co.preloadSelection(a)
+        try await selectCached(co, a)
         await co.preloadSelection(b)
         #expect(await co.state(for: b) == .loaded)
         #expect(await co.state(for: a) == .idle, "有界快取：只留最近選定的一顆")
@@ -491,11 +533,11 @@ private final class MutableClock: @unchecked Sendable {
     }
 
     /// 進 actor 前就已取消的舊 wrapper 不算一次選擇：不得把正在載入的 B 變成過期的選擇。
-    @Test func aSelectionCancelledBeforeEnteringDoesNotChangeTheIntent() async {
+    @Test func aSelectionCancelledBeforeEnteringDoesNotChangeTheIntent() async throws {
         let (co, loads, bEntered, releaseB, _) = selectionFixture()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b"), c = URL(filePath: "/m/c")
         let invokeCancelled = Gate()
-        await co.preloadSelection(a)
+        try await selectCached(co, a)
         let selectB = Task { await co.preloadSelection(b) }
         guard await opened(bEntered, "B loader 進入") else { await releaseB.open(); return }
         let stale = Task { await invokeCancelled.wait(); await co.preloadSelection(c) }
@@ -517,7 +559,7 @@ private final class MutableClock: @unchecked Sendable {
         let (co, loads, _, releaseB, _) = selectionFixture()
         let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
         await releaseB.open()
-        await co.preloadSelection(a)
+        try await selectCached(co, a)
         #expect(try await co.model(for: b) == "b")
         #expect(await co.state(for: b) == .loaded)
         #expect(await loads.v == 2)
