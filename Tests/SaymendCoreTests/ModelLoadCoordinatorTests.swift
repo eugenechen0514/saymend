@@ -416,6 +416,68 @@ private final class MutableClock: @unchecked Sendable {
         #expect(await loads.v == 2)
     }
 
+    /// 撤銷也適用於「加入」在途 flight 的選擇：前景先建立 B flight、Settings 選 B（join）後 wrapper 被取消。
+    /// `beforeCacheWrite` 讓沒被取消的前景建立者等著，固定「被取消的 joiner 先回到 actor」這個順序——
+    /// 反過來的順序是 `withdrawIfCancelled` 文件寫明的已知邊界，不在本測試範圍。
+    @Test func aCancelledSelectionThatJoinedAFlightWithdrawsToo() async throws {
+        let loads = Counter(), bEntered = Gate(), releaseB = Gate(), joinedB = Gate()
+        let releaseForeground = Gate()
+        let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b")
+        let co = ModelLoadCoordinator<String>(testHooks: .init(
+            didJoinFlight: { key in if key == b { await joinedB.open() } },
+            beforeCacheWrite: { key in
+                if key == b, !Task.isCancelled { await releaseForeground.wait() }
+            })) { key in
+            await loads.inc()
+            if key == b { await bEntered.open(); await releaseB.wait() }
+            return key.lastPathComponent
+        }
+        await co.preloadSelection(a)
+        let foregroundB = Task { try await co.model(for: b) }  // 前景先建立 B flight
+        guard await opened(bEntered, "B loader 進入") else {
+            await releaseB.open(); await releaseForeground.open(); return
+        }
+        let selectB = Task { await co.preloadSelection(b) }    // 選 B：join
+        guard await opened(joinedB, "selection join B flight") else {
+            await releaseB.open(); await releaseForeground.open(); return
+        }
+        selectB.cancel()                                        // 沒有新的選擇，只是取消
+        await releaseB.open()
+        await selectB.value                                     // 被取消的 joiner 先收尾
+        await releaseForeground.open()
+
+        #expect(try await foregroundB.value == "b", "前景呼叫端照樣拿到模型")
+        #expect(await co.state(for: a) == .loaded)
+        #expect(await co.state(for: b) == .idle)
+        #expect(await loads.v == 2)
+    }
+
+    /// 連續換選 A → B → C：App 換選前先 cancel 舊 B wrapper，B flight 完成時它帶著取消狀態回來。
+    /// 它已被 C 取代，**不得**撤銷——否則最新的 C 載完會被丟掉，下一次聽寫又得重載一次。
+    @Test func aSupersededCancelledSelectionDoesNotWithdrawTheNewerOne() async {
+        let (co, loads, bEntered, releaseB, _) = selectionFixture()
+        let a = URL(filePath: "/m/a"), b = URL(filePath: "/m/b"), c = URL(filePath: "/m/c")
+        await co.preloadSelection(a)
+        let obsoleteB = Task { await co.preloadSelection(b) }
+        guard await opened(bEntered, "B loader 進入") else { await releaseB.open(); return }
+        obsoleteB.cancel()
+        let selectC = Task { await co.preloadSelection(c) }    // 排在 B 之後
+        let registered = await awaitBounded(limit: .seconds(1)) {
+            while await co.state(for: c) == .idle { await Task.yield() }
+        }
+        guard registered == .completed else {
+            Issue.record("C 的選擇未在 1 秒內登記"); await releaseB.open(); return
+        }
+        await releaseB.open()
+        await obsoleteB.value
+        await selectC.value
+
+        #expect(await co.state(for: c) == .loaded, "最新的選擇是 C")
+        #expect(await co.state(for: b) == .idle)
+        #expect(await co.state(for: a) == .idle)
+        #expect(await loads.v == 3)
+    }
+
     /// 迴歸：正常換選（沒有選回）時，selection flight 照常採用並淘汰舊模型。
     @Test func aLiveSelectionFlightIsAdopted() async {
         let (co, loads, _, releaseB, _) = selectionFixture()
