@@ -87,9 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var whisperLocalPreloadTask: Task<Void, Never>?
 
     /// 背景預載目前選定的本機模型（切到本機引擎／換模型時呼叫），讓第一句不必等 3GB 載入。
+    /// 走 selection 入口（issue #35）：選回已載入的模型時，先前換選留下的在途載入完成後不會把它淘汰。
     func preloadWhisperLocal() {
         whisperLocalPreloadTask?.cancel()
-        whisperLocalPreloadTask = Task { [whisperLocalEngine] in await whisperLocalEngine.preload() }
+        whisperLocalPreloadTask = Task { [whisperLocalEngine] in await whisperLocalEngine.preloadSelection() }
     }
 
     /// 卸載本機模型，釋放記憶體（設定頁「卸載」）。先停掉在途預載，免得剛卸載又被載回來。

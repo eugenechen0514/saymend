@@ -18,6 +18,8 @@ private final class FakeStreamTranscriber: WhisperTranscribing, @unchecked Senda
     private(set) var seenLanguage: String?
     private(set) var seenOptions: WhisperStreamingOptions?
     private(set) var preloadCount = 0
+    /// Settings 選擇的預載次數（issue #35）：與前景 `preload` 分開計，才驗得出引擎走的是哪個入口。
+    private(set) var preloadSelectionCount = 0
     private(set) var transcribeCount = 0
     private(set) var unloadCount = 0
     var stateToReport: ModelLoadState = .idle
@@ -37,6 +39,9 @@ private final class FakeStreamTranscriber: WhisperTranscribing, @unchecked Senda
         let gate = sync { preloadCount += 1; return preloadGate }
         await gate?()
         sync { if preloadSucceeds { stateToReport = .loaded } }
+    }
+    func preloadSelection(modelPath: URL) async {
+        sync { preloadSelectionCount += 1; if preloadSucceeds { stateToReport = .loaded } }
     }
     func state(modelPath: URL) async -> ModelLoadState { sync { stateToReport } }
     func unload() async { sync { unloadCount += 1; stateToReport = .idle } }
@@ -72,6 +77,7 @@ private final class GatedStreamFake: WhisperTranscribing, @unchecked Sendable {
     var yieldOnRelease = true
 
     func preload(modelPath: URL) async {}
+    func preloadSelection(modelPath: URL) async {}
     func state(modelPath: URL) async -> ModelLoadState { .loaded }
     func unload() async {}
 
@@ -506,6 +512,7 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         }
         #expect(i < j)
         #expect(f.preloadCount == 1)
+        #expect(f.preloadSelectionCount == 0, "聽寫時等模型是前景存取，不得冒充 Settings 的選擇（issue #35）")
         #expect(finalizedTexts(evs) == ["整段本機辨識結果"])
     }
 
@@ -622,10 +629,12 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         #expect(f.unloadCount == 1)
     }
 
-    @Test func preloadForwards() async {
+    /// Settings 換模型的預載走 selection 入口（issue #35）：選回已載入的模型也要讓舊的在途載入過期。
+    @Test func preloadSelectionForwardsAsASelection() async {
         let f = FakeStreamTranscriber()
-        await engine(f).preload()
-        #expect(f.preloadCount == 1)
+        await engine(f).preloadSelection()
+        #expect(f.preloadSelectionCount == 1)
+        #expect(f.preloadCount == 0, "不得退回前景 preload：那條路不會更新選擇")
     }
 
     // MARK: - 取消

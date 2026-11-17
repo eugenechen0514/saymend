@@ -11,8 +11,11 @@ public struct WhisperLoadError: Error, Equatable {
 /// 本機辨識薄協定（spec §3.1）：把 WhisperKit 具體型別擋在外面，引擎單測不必載真 3GB 模型。
 /// **「載入＋辨識」是單一原子呼叫**——引擎不分開呼叫 load/transcribe，消 TOCTOU。
 public protocol WhisperTranscribing: Sendable {
-    /// 背景預載指定模型（best-effort，錯誤吞掉）。
+    /// 前景預載指定模型（best-effort，錯誤吞掉）：聽寫時等模型載入用，**不是** Settings 的選擇。
     func preload(modelPath: URL) async
+    /// Settings 選定模型並在背景預載（issue #35，best-effort）。與 `preload` 分開，
+    /// 是因為只有使用者的選擇能讓舊的在途載入過期——前景存取不得撤銷選擇。
+    func preloadSelection(modelPath: URL) async
     /// 指定模型目前的載入狀態（供 UI 顯示與引擎決定要不要先報「載入模型中…」）。
     func state(modelPath: URL) async -> ModelLoadState
     /// 卸載目前模型，釋放記憶體。
@@ -83,10 +86,11 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
         self.optionsProvider = optionsProvider
     }
 
-    /// 背景預載目前選定的模型（spec §6）。未選模型＝no-op，不視為錯誤。
-    public func preload() async {
+    /// Settings 選定模型時背景預載它（spec §6、issue #35）。未選模型＝no-op，不視為錯誤。
+    /// 走 `preloadSelection`：選回已載入的模型也算一次新的選擇，先前換選留下的在途載入因此過期。
+    public func preloadSelection() async {
         guard let path = configProvider().selectedModelPath else { return }
-        await transcriber.preload(modelPath: path)
+        await transcriber.preloadSelection(modelPath: path)
     }
 
     /// 目前選定模型的載入狀態；未選模型＝`.idle`。
