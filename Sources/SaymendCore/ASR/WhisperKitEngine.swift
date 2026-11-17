@@ -78,6 +78,10 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
     /// 沒有誤報空間；門檻低一些才涵蓋得到短嘗試。低於此值視為誤觸熱鍵，不唸使用者。
     static let endOfStreamWarnAfter: Double = 1.5
 
+    /// 等模型期間使用者換選（或清除）了模型，這次聽寫放棄時的失敗原因（issue #35）。
+    /// HUD 呈現為「辨識失敗（…）」——要讓人知道是換了模型、得再說一次，而不是模型壞了。
+    static let reselectedWhileWaiting = "等模型期間已換選模型，請再說一次"
+
     public init(transcriber: any WhisperTranscribing,
                 configProvider: @escaping () -> WhisperLocalConfig,
                 optionsProvider: @escaping () -> WhisperStreamingOptions = { WhisperStreamingOptions() }) {
@@ -185,8 +189,15 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
             // preload 是 best-effort（coordinator 內以 try? 吞掉錯誤），得回頭確認模型真的載起來了。
             // 少了這一關，載入失敗會被帶進 transcribe 觸發第二次載入＝再等一輪 ANE 編譯
             // （large 數分鐘），期間還誤顯「辨識中…」，最後才吐失敗。
+            //
+            // 也擋住另一種「沒載起來」（issue #35）：等模型期間使用者在 Settings 換選了別的模型或清除選擇，
+            // 這趟載入成了過期的選擇，載完也不寫回快取。照樣放棄這次聽寫——硬用過期的模型辨識，
+            // transcribe 會 cache miss 再開一趟載入、反過來淘汰使用者剛選的模型——但失敗原因要講實話：
+            // 不是模型壞了，是換了模型。
             guard await transcriber.state(modelPath: modelPath) == .loaded else {
-                continuation.yield(.failed(reason: "模型載入失敗"))
+                let stillSelected = configProvider().selectedModelPath.map(ModelPathKey.string)
+                    == ModelPathKey.string(modelPath)
+                continuation.yield(.failed(reason: stillSelected ? "模型載入失敗" : Self.reselectedWhileWaiting))
                 continuation.finish()
                 return
             }

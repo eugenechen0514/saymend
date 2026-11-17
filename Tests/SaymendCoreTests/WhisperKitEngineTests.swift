@@ -106,6 +106,15 @@ private func chunk16k(_ f: Int = 1600) -> AudioChunk {
     return AudioChunk(buffer: b)
 }
 
+/// 可在等模型期間被改掉的「Settings 目前選定的模型」（issue #35）
+private final class SelectedPathBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var path: URL?
+    init(_ path: URL?) { self.path = path }
+    func get() -> URL? { lock.lock(); defer { lock.unlock() }; return path }
+    func set(_ p: URL?) { lock.lock(); path = p; lock.unlock() }
+}
+
 /// 餵一段音訊、結束串流，收集引擎吐出的所有事件
 private func drive(_ e: WhisperKitEngine) async -> [TranscriptEvent] {
     let (st, c) = AsyncStream.makeStream(of: AudioChunk.self)
@@ -535,6 +544,43 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         #expect(!evs.contains(.transcribing))
         #expect(evs.last == .failed(reason: "模型載入失敗"))
         #expect(f.transcribeCount == 0)
+    }
+
+    /// issue #35：等模型期間使用者在 Settings 選回別的模型——這趟載入成了過期的選擇，載完不寫回快取
+    /// （state 仍非 .loaded）。照樣放棄、不得用過期的模型辨識，但失敗原因不得說成「模型載入失敗」。
+    @Test func aReselectionWhileWaitingForTheModelIsNotReportedAsALoadFailure() async {
+        let f = FakeStreamTranscriber()
+        f.preloadSucceeds = false                          // 過期選擇：載完但沒寫回快取
+        let selected = SelectedPathBox(URL(filePath: "/tmp/b"))
+        f.preloadGate = { selected.set(URL(filePath: "/tmp/a")) }   // 等模型的當下，使用者選回 A
+        let e = WhisperKitEngine(transcriber: f,
+                                 configProvider: {
+                                     WhisperLocalConfig(selectedModelPath: selected.get(), extraScanRoots: [],
+                                                        modelWaitTimeout: 30)
+                                 },
+                                 optionsProvider: { WhisperStreamingOptions() })
+        let evs = await drive(e)
+        #expect(f.preloadCount == 1, "前提：走的是等模型的前景預載")
+        #expect(!evs.contains(.transcribing))
+        #expect(f.transcribeCount == 0, "不得用過期的模型辨識")
+        #expect(evs.last == .failed(reason: WhisperKitEngine.reselectedWhileWaiting))
+    }
+
+    /// 同上，但使用者是按「清除選擇」：沒有任何選定模型，同樣不是載入失敗。
+    @Test func clearingTheSelectionWhileWaitingIsNotReportedAsALoadFailure() async {
+        let f = FakeStreamTranscriber()
+        f.preloadSucceeds = false
+        let selected = SelectedPathBox(URL(filePath: "/tmp/b"))
+        f.preloadGate = { selected.set(nil) }
+        let e = WhisperKitEngine(transcriber: f,
+                                 configProvider: {
+                                     WhisperLocalConfig(selectedModelPath: selected.get(), extraScanRoots: [],
+                                                        modelWaitTimeout: 30)
+                                 },
+                                 optionsProvider: { WhisperStreamingOptions() })
+        let evs = await drive(e)
+        #expect(f.preloadCount == 1, "前提：走的是等模型的前景預載")
+        #expect(evs.last == .failed(reason: WhisperKitEngine.reselectedWhileWaiting))
     }
 
     // MARK: - 等模型載入要有上限（issue #17）
