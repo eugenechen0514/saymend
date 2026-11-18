@@ -67,6 +67,8 @@ public final class DictationController {
     private let contextOCR: (() async -> String?)?
     /// 時間來源（歷史記錄時戳）；測試可注入固定時鐘。
     private let now: () -> Date
+    /// 錄音期間的焦點變更監看（issue #70）：nil＝不監看，只剩事件驅動的兩道閘門（暫時文字、定稿）。
+    private let focusWatcher: (any FocusChangeWatching)?
 
     /// session 帳本（測試經 @testable 檢視）
     private(set) var ledger = SessionLedger()
@@ -131,6 +133,11 @@ public final class DictationController {
     private(set) var volatileGateStats = VolatileGateStats()
     /// 最近一次輸出到 log 的那份量測（測試觀察用：os.Logger 本身沒有可觀察的 seam）
     private(set) var lastFlushedVolatileGateStats: VolatileGateStats?
+    /// issue #70：本段錄音的焦點監看 handle。只在 `.listening` 期間非 nil；`stopFocusWatch()` 是唯一的歸還點。
+    private var focusWatch: (any FocusWatch)?
+    /// 監看世代：每次開始、停止都遞增。callback 帶著開始當下的世代，對不上就是舊 watch 的遲到通知——
+    /// controller 自己認得，不依賴 App 端「observer 移除後就不會再送」。
+    private var focusWatchEpoch = 0
     private static let hudLog = Logger(subsystem: "io.saymend.app", category: "hud")
 
     public init(audio: any AudioCaptureService,
@@ -145,6 +152,7 @@ public final class DictationController {
                 feedback: (any SessionFeedbackPresenting)? = nil,
                 history: (any HistoryRecording)? = nil,
                 contextOCR: (() async -> String?)? = nil,
+                focusWatcher: (any FocusChangeWatching)? = nil,
                 now: @escaping () -> Date = Date.init) {
         self.audio = audio
         self.asr = asr
@@ -158,6 +166,7 @@ public final class DictationController {
         self.feedback = feedback
         self.history = history
         self.contextOCR = contextOCR
+        self.focusWatcher = focusWatcher
         self.now = now
     }
 
@@ -726,6 +735,9 @@ public final class DictationController {
             let audioStream = try audio.start()
             let events = asr.start(audio: audioStream, localeIdentifier: settings.asrLocaleIdentifier)
             internalPhase = .listening(mode)
+            // issue #70：錄音從這裡開始，焦點監看也從這裡開始。上面的 snapshot 已確認起點不是密碼欄，
+            // 兩者之間沒有 `await`、run loop 不會轉，AX 通知不會在這段空檔裡被吞掉。
+            startFocusWatch()
             presentListening(mode: mode, volatile: "")
             readerTask = Task { [weak self] in
                 for await event in events {
@@ -748,6 +760,7 @@ public final class DictationController {
     private func endListening(at t: TimeInterval) {
         audio.stop()                 // audio finish → ASR 排空 → asrStreamEnded 收尾
         internalPhase = .finishing
+        stopFocusWatch()             // issue #70：不再收音，監看到此為止（排空中的定稿全是錄音期間說的）
         flushVolatileGateStats()     // 排空窗不呈現暫時文字，本段量測到此為止
         hud.present(.hidden)
     }
@@ -775,6 +788,55 @@ public final class DictationController {
         endListening(at: t)
     }
 
+    /// issue #70：開始本段錄音的焦點監看。只從 `startListening` 進入 `.listening` 的那一點呼叫。
+    /// 理論上進來時不會有殘留的 watch（每條離開錄音的路徑都會停）；萬一有，先停掉舊的再開，
+    /// 寧可多停一次也不讓兩個 observer 並存。
+    private func startFocusWatch() {
+        stopFocusWatch()
+        guard let focusWatcher else { return }
+        let epoch = focusWatchEpoch
+        focusWatch = focusWatcher.startWatching { [weak self] security in
+            self?.focusChanged(to: security, epoch: epoch)
+        }
+    }
+
+    /// issue #70：停止監看並作廢它之後送來的任何通知。冪等：沒有 watch 時只遞增世代，不呼叫任何人——
+    /// 每個 handle 恰 `stop()` 一次（比照 #43 lease），由 `focusWatch = nil` 保證。
+    private func stopFocusWatch() {
+        focusWatchEpoch &+= 1
+        guard let watch = focusWatch else { return }
+        focusWatch = nil                // 先清再 stop：stop 若同步回呼（或從 callback 內被呼叫），不會再停一次
+        watch.stop()
+    }
+
+    /// issue #70：焦點移動的那一刻，AX 推來**新焦點元素本身**的判定。
+    ///
+    /// 事件驅動的兩道閘門（暫時文字、定稿）只在事件抵達時查「此刻」的焦點；焦點在兩個事件之間進出密碼欄 P，
+    /// 它們就只看得到一般欄位。這裡是唯一看得到那次移動的點，所以一律在這裡就決定，不留給事後：
+    /// - `.secure`：硬停，與兩道既有閘門的 `.secure` 同一個 `abortForSecureField()`、同樣不記 insertEvent。
+    ///   `segmenter.hardReset()`＋`asr.cancel()`＋`audio.stop()`：P 期間的聲音還在辨識器裡的直接丟掉，
+    ///   之後的不再收。AX 通知在焦點移動後數毫秒內送達，遠早於辨識器吐出那段話（≥ 數百毫秒）。
+    /// - `.secureUnknown`：依 #59 fail closed，同樣硬停。**不比照暫時文字閘門只遮罩**——那條路的內容層保護交給
+    ///   事後的定稿閘門，而 #70 的前提正是事後看不到這次移動。只留 metadata（#10），來源標 `via:focusChange`。
+    /// - `.notSecure`：不攔。換到別的一般欄位由寫入前那道閘門處理（`.different`），這裡不重複記。
+    ///
+    /// 世代對不上（舊 watch 的遲到通知）或已不在錄音中：一律忽略。
+    private func focusChanged(to security: FocusedFieldSecurity, epoch: Int) {
+        guard epoch == focusWatchEpoch, case .listening = internalPhase else { return }
+        switch security {
+        case .notSecure:
+            return
+        case .secure:
+            abortForSecureField()
+        case .secureUnknown:
+            // **必須先記再 abort**：archive 會把 `historySessionID` 清成 nil，沒有 hid 的列會整筆靜默丟掉。
+            recordInsertEvent(kind: "insertSkipped", classification: "secureUnknown",
+                              utteranceText: "",
+                              detail: "sessionApp:\(capturedFrontAppBundleID ?? "?") via:focusChange")
+            abortForSecureField()
+        }
+    }
+
     /// 歸還一個 snapshot 發出的 identity token（issue #43）。nil＝reader 沒給（無 AX），沒東西可還——
     /// 不呼叫 reader，讓「每個非 nil token 恰歸還一次」這條不變式在測試裡乾淨可驗。
     private func releaseFieldLease(_ identity: FieldIdentity?) {
@@ -793,6 +855,7 @@ public final class DictationController {
         ocrTask = nil
         capturedOCRText = nil
         flushVolatileGateStats()            // issue #65 量測：Esc／暫時文字硬停／定稿硬停等直達封存的路徑
+        stopFocusWatch()                    // issue #70：直達封存的路徑（Esc、硬停、ASR 失敗）不經 endListening
         // 歸還 begin 時登記的 element token（issue #43）：必須在 ledger.archive() 清掉它之前。
         // registry 有引用計數，FeedbackCoordinator 若也 pin 了同一 element，這裡只減 ledger 那一份。
         releaseFieldLease(ledger.fieldIdentity)
