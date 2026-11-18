@@ -204,6 +204,67 @@ import SaymendCore
         #expect(backend.liveRegistrations == 0 && backend.liveActivationTokens == 0)
     }
 
+    // MARK: - resync：跨行程、卻沒有 App 啟用的焦點移動
+
+    /// 焦點跑到另一個行程（System Settings 的 remote view、系統授權框），前景 App 沒換：改掛過去並判定那個元素
+    @Test func resyncMovesTheObserverToTheProcessThatNowHasFocusAndReportsIt() {
+        let backend = FakeAXFocusBackend(focusedPID: appA)
+        let fieldP = element(3003)
+        var reports: [FocusedFieldSecurity] = []
+        let watch = makeWatcher(backend, secure: [fieldP]).startWatching { reports.append($0) }
+        backend.systemFocus = (fieldP, appB)
+
+        watch.resync()
+
+        #expect(backend.attaches == [appA, appB])
+        #expect(backend.detaches == [appA])
+        #expect(reports == [.secure])
+        watch.stop()
+        #expect(backend.detaches == [appA, appB])
+    }
+
+    /// 焦點還在同一個行程、讀不到系統焦點、或焦點在自己身上：什麼都不做（同行程內的移動由 observer 推）
+    @Test func resyncDoesNothingWhenFocusIsStillInTheWatchedProcess() {
+        let backend = FakeAXFocusBackend(focusedPID: appA)
+        var reports: [FocusedFieldSecurity] = []
+        let watch = makeWatcher(backend).startWatching { reports.append($0) }
+        backend.systemFocus = (element(1001), appA)
+        watch.resync()
+        backend.systemFocus = nil
+        watch.resync()
+        backend.systemFocus = (element(9001), me)
+        watch.resync()
+        #expect(backend.attaches == [appA])
+        #expect(backend.detaches.isEmpty)
+        #expect(reports.isEmpty)
+        watch.stop()
+    }
+
+    /// stop 之後的 resync 不讀、不掛、不報
+    @Test func resyncAfterStopDoesNothing() {
+        let backend = FakeAXFocusBackend(focusedPID: appA)
+        var reports: [FocusedFieldSecurity] = []
+        let watch = makeWatcher(backend, secure: [element(3003)]).startWatching { reports.append($0) }
+        watch.stop()
+        backend.systemFocus = (element(3003), appB)
+        watch.resync()
+        #expect(backend.systemFocusReads == 0)
+        #expect(backend.attaches == [appA])
+        #expect(reports.isEmpty)
+    }
+
+    /// resync 回報時 controller 當場硬停：新掛的那個恰卸一次
+    @Test func stoppingWhileHandlingAResyncDetachesTheNewObserverOnce() {
+        let backend = FakeAXFocusBackend(focusedPID: appA)
+        let fieldP = element(3003)
+        var watch: (any FocusWatch)?
+        watch = makeWatcher(backend, secure: [fieldP]).startWatching { _ in watch?.stop() }
+        backend.systemFocus = (fieldP, appB)
+        watch?.resync()
+        #expect(backend.detaches == [appA, appB])
+        #expect(backend.liveRegistrations == 0 && backend.liveActivationTokens == 0)
+    }
+
     // MARK: - AXFieldReader.focusSecurity：與既有閘門共用 #59 三態
 
     @Test func focusSecurityMapsTheSharedSecureVerdict() {
@@ -279,6 +340,10 @@ final class FakeAXFocusBackend: AXFocusObservingBackend {
     }
 
     func focusedApplicationPID() -> pid_t? { focusedPID }
+    /// 系統層級焦點（`resync` 讀的）。nil＝讀不到
+    var systemFocus: (element: AXUIElement, pid: pid_t)?
+    private(set) var systemFocusReads = 0
+    func systemFocusedElement() -> (element: AXUIElement, pid: pid_t)? { systemFocusReads += 1; return systemFocus }
     func focusedElement(ofApplication pid: pid_t) -> AXUIElement? { focusedElements[pid] }
 
     func observeActivations(_ handler: @escaping (pid_t) -> Void) -> AnyObject {

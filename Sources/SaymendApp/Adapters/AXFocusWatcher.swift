@@ -15,6 +15,8 @@ protocol AXFocusObservingBackend: AnyObject {
     func detach(_ registration: AnyObject)
     /// 目前焦點元素所屬的 App——session 開始時要掛在哪一個行程上
     func focusedApplicationPID() -> pid_t?
+    /// 系統層級的焦點元素與它所屬的行程（`resync` 用：焦點可以跨行程移動卻不觸發 App 啟用）
+    func systemFocusedElement() -> (element: AXUIElement, pid: pid_t)?
     /// 某個 App 自己記著的焦點元素。切到新 App 時那個 App 內部沒有「焦點變更」可推，只能主動問一次。
     func focusedElement(ofApplication pid: pid_t) -> AXUIElement?
     /// 訂閱前景 App 切換（main thread 回呼），回傳退訂用的 token
@@ -29,8 +31,16 @@ protocol AXFocusObservingBackend: AnyObject {
 /// 兩則通知排在同一輪 run loop 裡，處理第一則的當下系統焦點早已回到 A——事後再查等於重造 #70 的洞。
 /// 讀 P 的 subrole 不受「焦點已離開」影響，元素還在就問得到。
 ///
+/// 跨行程的焦點移動有兩條重掛路徑：前景 App 切換（`didActivateApplication`，即時），以及 controller 每個 tick
+/// 呼叫的 `resync()`（≤ 0.25 秒）——後者涵蓋不觸發 App 啟用的行程：System Settings 的 remote view、
+/// 系統授權框（SecurityAgent）、OAuth 登入 sheet、Spotlight 類非啟用 panel。這些正是輸入密碼的地方。
+///
 /// 已知邊界（寫在 PR，實機驗收才看得出來）：
-/// - App 不發 `kAXFocusedUIElementChanged`（或 observer 掛不上）就收不到，退回原本兩道事件驅動的閘門（#21）。
+/// - App 不發 `kAXFocusedUIElementChanged` 就收不到，退回原本兩道事件驅動的閘門（#21）。Chromium／Electron 的
+///   AX tree 是延遲啟用的，沒啟用時三道防線一起 fail open（既有行為，不是回歸）。
+/// - observer 掛不上（含目標 App 忙碌回 `cannotComplete`）不重試：依 #21 fail open，只留 debug log。
+///   每 tick 重試會讓卡住的 App 每 0.25 秒吃一次 0.2 秒的 IPC 逾時，拖住熱鍵與 Esc。
+/// - 元素在判定前就被銷毀（送出表單、頁面導航）：讀 subrole 回 `invalidUIElement`，依 #59 的寬鬆判定是 `.notSecure`。
 /// - 不監看自己（Saymend 自己的視窗）：在 main thread 上對自己的行程發同步 AX 查詢會卡到逾時。
 final class AXFocusWatcher: FocusChangeWatching {
     private let backend: any AXFocusObservingBackend
@@ -88,6 +98,16 @@ final class AXFocusWatch: FocusWatch {
         if let pid = backend.focusedApplicationPID(), pid != ownPID {
             attach(to: pid)
         }
+    }
+
+    /// 焦點已跑到別的行程（而且沒有觸發 App 啟用）：改掛過去，並判定那個元素一次。
+    /// 同一個行程不做事——同行程內的移動由 observer 推。每 tick 一次跨行程 IPC（讀系統焦點），`AXUIElementGetPid` 是本地呼叫。
+    func resync() {
+        guard !stopped, let focus = backend.systemFocusedElement(),
+              focus.pid != ownPID, focus.pid != watchedPID else { return }
+        detach()
+        attach(to: focus.pid)
+        report(focus.element)
     }
 
     func stop() {
@@ -180,19 +200,30 @@ final class LiveAXFocusObservingBackend: AXFocusObservingBackend {
         return Registration(observer: observer, application: application, box: box)
     }
 
+    /// 移除通知與 run loop source 同步做（之後不再派送），**釋放 refcon 與 AXObserver 延到下一輪 run loop**。
+    /// 理由：最常見的卸載點就在這個 observer 自己的 callout 裡（密碼欄硬停 → 封存 → stop → detach）。
+    /// HIServices 會不會在同一次 callout 裡接著派送已排隊的通知、或在 callback return 後還碰 observer，
+    /// 公開文件沒有保證；同步釋放的話，那兩種情況都是 use-after-free，而且正好在硬停這條路上。
+    /// 延後釋放之後，遲到的 callback 拿到的仍是活的 box，handler 由 `[weak self]`＋`stopped`／掛載世代擋掉。
+    /// fake backend 驗不到這一點（不是行為差異，是記憶體生命週期），只能靠這段說明守住。
     func detach(_ registration: AnyObject) {
         guard let registration = registration as? Registration else { return }
         AXObserverRemoveNotification(registration.observer, registration.application, Self.notification)
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(registration.observer), .commonModes)
-        registration.box.release()
+        DispatchQueue.main.async {
+            registration.box.release()            // closure 持有 registration，AXObserver 也一起活到這裡
+        }
     }
 
     func focusedApplicationPID() -> pid_t? {
-        if let element = AXFieldAccess.focusedElement() {
-            var pid: pid_t = 0
-            if AXUIElementGetPid(element, &pid) == .success { return pid }
-        }
-        return NSWorkspace.shared.frontmostApplication?.processIdentifier
+        systemFocusedElement()?.pid ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
+    func systemFocusedElement() -> (element: AXUIElement, pid: pid_t)? {
+        guard let element = AXFieldAccess.focusedElement() else { return nil }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success else { return nil }
+        return (element, pid)
     }
 
     func focusedElement(ofApplication pid: pid_t) -> AXUIElement? {

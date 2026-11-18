@@ -271,6 +271,7 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
         let id: Int
         init(env: StatefulFieldEnvironment, id: Int) { self.env = env; self.id = id }
         func stop() { env?.stopWatch(id) }
+        func resync() { env?.resync(id) }
     }
     private var watches: [Int: (onChange: @MainActor (FocusedFieldSecurity) -> Void, stopped: Bool)] = [:]
     private var nextWatchID = 0
@@ -279,11 +280,27 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
     /// `stop()` 的**原始**呼叫數（重複 stop 也算）：恰一次的驗帳就是 `watchStops == watchStarts`，
     /// controller 對同一個 handle stop 兩次會讓它大於 starts。
     private(set) var watchStops = 0
+    /// `resync()` 的呼叫數（controller 在錄音中每個 tick 呼叫一次）。跨行程重掛的行為在 App 端驗。
+    fileprivate(set) var resyncCalls = 0
+    /// `startWatching` 被呼叫、**watch 還沒登記之前**執行一次（預設 nil）。用來製造「snapshot 之後、observer 掛上之前」
+    /// 的焦點移動：這時沒有 watch 可通知，等同 AX 通知發出時 observer 還不存在。
+    var beforeStartWatching: (() -> Void)?
+    /// 非 nil＝下一次 `resync()` 時以這個判定回報（模擬「焦點已在別的行程、改掛過去後發現是密碼欄」）
+    var resyncReport: FocusedFieldSecurity?
+
+    @MainActor
+    private func resync(_ id: Int) {
+        resyncCalls += 1
+        guard let report = resyncReport, let watch = watches[id], !watch.stopped else { return }
+        resyncReport = nil
+        watch.onChange(report)
+    }
     /// 仍在監看（start 過、尚未 stop）的 watch 數
     var activeWatchCount: Int { watches.values.filter { !$0.stopped }.count }
 
     @MainActor
     func startWatching(onChange: @escaping @MainActor (FocusedFieldSecurity) -> Void) -> any FocusWatch {
+        beforeStartWatching?()
         watchStarts += 1
         nextWatchID += 1
         watches[nextWatchID] = (onChange, false)

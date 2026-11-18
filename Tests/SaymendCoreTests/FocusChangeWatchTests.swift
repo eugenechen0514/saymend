@@ -73,7 +73,7 @@ import Testing
         #expect(hud.states.last == .notice("密碼欄位不聽寫"))
         #expect(asr.cancelCount == 1, "走的是 abortForSecureField（停辨識）")
         #expect(env.watchStarts == 1 && env.watchStops == 1, "硬停的同時恰停一次監看")
-        #expect(env.identityEntryCount == 0, "監看不得替任何元素留持有者（#43 lease）")
+        #expect(env.identityEntryCount == 0, "硬停封存後 lease 歸零（監看本身不碰 registry 的驗證在 App 端）")
     }
 
     /// 同一個情境走**凍結終點**：使用者先在 A 點了一下（凍結），之後焦點才被搬進 P 又搬回來。
@@ -183,7 +183,7 @@ import Testing
     }
 
     /// 每一條離開錄音的路徑都恰停一次：Esc、ASR 失敗、暫時文字閘門硬停、定稿閘門硬停、鎖定模式點按結束。
-    @Test(arguments: ["esc", "asrFailed", "volatileGate", "finalizedGate", "lockedTap"])
+    @Test(arguments: ["esc", "asrFailed", "volatileGate", "finalizedGate", "lockedTap", "silenceTimeout", "streamEnded"])
     func everyWayOutOfRecordingStopsTheWatchExactlyOnce(_ path: String) {
         let env = passwordFixture()
         let (c, _, _) = makeStatefulController(env: env, focusWatcher: env)
@@ -203,6 +203,11 @@ import Testing
             c.hotkeyReleased(at: 10.1)                     // 點按＝鎖定
             c.hotkeyPressed(at: 11.0)
             c.hotkeyReleased(at: 11.1)                     // 再點按＝結束
+        case "silenceTimeout":
+            c.hotkeyReleased(at: 10.1)                     // 鎖定
+            c.tick(at: 70.5)                               // 60 秒沒有任何辨識事件＝逾時收尾
+        case "streamEnded":
+            c.asrStreamEnded(at: 10.5)                     // 錄音中 ASR 串流自己結束（沒先送 .failed）
         default:
             Issue.record("未知路徑 \(path)")
         }
@@ -249,5 +254,92 @@ import Testing
 
         #expect(asr.cancelCount == 0)
         #expect(env.text(in: "A") == "你好")
+    }
+
+    // MARK: - F9～F12：審查補強（開始端空窗、串流自行結束、跨行程 resync）
+
+    /// 開始端的空窗：snapshot 確認起點是 A 之後、observer 掛上之前（`audio.start()` 期間），焦點被搬進 P。
+    /// 那則 AX 通知發出時 observer 還不存在，根本不會送來；之後 App 內也沒有「下一次焦點變更」可推。
+    /// Whisper remote 錄音中沒有暫時文字，若不補查，整段錄音沒有任何一道防線。
+    @Test func focusMovedIntoAPasswordFieldBeforeTheObserverWasAttachedAbortsAtOnce() {
+        let env = passwordFixture()
+        env.beforeStartWatching = { env.focus("P", notifyingWatches: false) }
+        let (c, asr, hud) = makeStatefulController(env: env, focusWatcher: env)
+        c.hotkeyPressed(at: 10.0)
+
+        #expect(!c.ledger.isActive)
+        #expect(asr.cancelCount == 1)
+        #expect(hud.states.last == .notice("密碼欄位不聽寫"))
+        #expect(!hud.states.contains(.listening(mode: .hold, volatile: "")), "硬停在開始聽寫的畫面出現之前")
+        #expect(env.watchStarts == 1 && env.watchStops == 1)
+    }
+
+    @Test func secureUnknownBeforeTheObserverWasAttachedAbortsAndRecordsTheSource() {
+        let env = StatefulFieldEnvironment()
+        env.addField("A", text: "", bundleID: "com.foo.app")
+        env.addField("U", text: "", subroleUnknown: true, bundleID: "com.slow.app")
+        env.beforeStartWatching = { env.focus("U", notifyingWatches: false) }
+        let history = FakeHistory()
+        let (c, _, _) = makeStatefulController(env: env, history: history, focusWatcher: env)
+        c.hotkeyPressed(at: 10.0)
+
+        #expect(!c.ledger.isActive)
+        #expect(history.exchanges.map(\.outcomeText) == ["secureUnknown：sessionApp:com.foo.app via:watchStart"])
+        #expect(history.exchanges.first?.utteranceRaw == "")
+    }
+
+    /// 補查只在有監看時做：沒有監看就沒有空窗可補，也不多付一次 AX IPC（與 #70 之前逐位元相同）。
+    @Test func theStartRecheckCostsOneGateQueryOnlyWhenWatching() {
+        let watched = passwordFixture()
+        let (c1, _, _) = makeStatefulController(env: watched, focusWatcher: watched)
+        c1.hotkeyPressed(at: 10.0)
+        #expect(watched.fieldGateCalls == 1)
+        #expect(c1.ledger.isActive, "起點仍是一般欄位：照常聽寫")
+
+        let unwatched = passwordFixture()
+        let (c2, _, _) = makeStatefulController(env: unwatched)
+        c2.hotkeyPressed(at: 10.0)
+        #expect(unwatched.fieldGateCalls == 0)
+    }
+
+    /// 錄音中 ASR 串流自己結束（沒先送 `.failed`）：不經 `endListening`，直接進延續窗。不再收音，監看也要停。
+    @Test func anASRStreamThatEndsOnItsOwnStopsWatching() {
+        let env = passwordFixture()
+        let (c, _, _) = makeStatefulController(env: env, focusWatcher: env)
+        c.hotkeyPressed(at: 10.0)
+        c.handleTranscript(.finalized("你好"), at: 10.4)
+        c.asrStreamEnded(at: 10.6)
+        #expect(c.isLingering, "前提：直接進延續窗")
+        #expect(env.watchStarts == 1 && env.watchStops == 1 && env.activeWatchCount == 0)
+    }
+
+    /// 錄音中每個 tick 確認一次監看掛在目前焦點的行程上；不在錄音中（排空窗、延續窗）不做。
+    @Test func eachRecordingTickResyncsAndOtherPhasesDoNot() {
+        let env = passwordFixture()
+        let (c, _, _) = makeStatefulController(env: env, focusWatcher: env)
+        c.hotkeyPressed(at: 10.0)
+        c.tick(at: 10.25)
+        c.tick(at: 10.5)
+        #expect(env.resyncCalls == 2)
+        c.hotkeyReleased(at: 11.0)
+        c.tick(at: 11.25)
+        c.asrStreamEnded(at: 11.3)
+        c.tick(at: 11.5)
+        #expect(env.resyncCalls == 2, "排空窗、延續窗不收音，不重掛")
+    }
+
+    /// resync 改掛到別的行程後發現是密碼欄：當場硬停，**同一個 tick 不得再處理斷句器動作**——
+    /// 硬停後 phase 已是 idle，逾時動作會把它推進 finishing（重開一個不存在的排空窗、再停一次麥克風）。
+    @Test func aResyncThatFindsAPasswordFieldAbortsWithoutRunningTheSegmenter() {
+        let env = passwordFixture()
+        let (c, asr, hud) = makeStatefulController(env: env, focusWatcher: env)
+        c.hotkeyPressed(at: 10.0)
+        c.hotkeyReleased(at: 10.1)                         // 鎖定（逾時只在鎖定模式有意義）
+        env.resyncReport = .secure
+        c.tick(at: 70.5)                                   // 同一個 tick 斷句器也到了 60 秒逾時
+
+        #expect(asr.cancelCount == 1)
+        #expect(!c.isEngaged, "停在 idle，不得被逾時推進排空窗")
+        #expect(hud.states.last == .notice("密碼欄位不聽寫"))
     }
 }
