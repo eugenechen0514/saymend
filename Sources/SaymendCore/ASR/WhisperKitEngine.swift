@@ -11,8 +11,11 @@ public struct WhisperLoadError: Error, Equatable {
 /// 本機辨識薄協定（spec §3.1）：把 WhisperKit 具體型別擋在外面，引擎單測不必載真 3GB 模型。
 /// **「載入＋辨識」是單一原子呼叫**——引擎不分開呼叫 load/transcribe，消 TOCTOU。
 public protocol WhisperTranscribing: Sendable {
-    /// 背景預載指定模型（best-effort，錯誤吞掉）。
+    /// 前景預載指定模型（best-effort，錯誤吞掉）：聽寫時等模型載入用，**不是** Settings 的選擇。
     func preload(modelPath: URL) async
+    /// Settings 選定模型並在背景預載（issue #35，best-effort）。與 `preload` 分開，
+    /// 是因為只有使用者的選擇能讓舊的在途載入過期——前景存取不得撤銷選擇。
+    func preloadSelection(modelPath: URL) async
     /// 指定模型目前的載入狀態（供 UI 顯示與引擎決定要不要先報「載入模型中…」）。
     func state(modelPath: URL) async -> ModelLoadState
     /// 卸載目前模型，釋放記憶體。
@@ -75,6 +78,10 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
     /// 沒有誤報空間；門檻低一些才涵蓋得到短嘗試。低於此值視為誤觸熱鍵，不唸使用者。
     static let endOfStreamWarnAfter: Double = 1.5
 
+    /// 等模型期間使用者換選（或清除）了模型，這次聽寫放棄時的失敗原因（issue #35）。
+    /// HUD 呈現為「辨識失敗（…）」——要讓人知道是換了模型、得再說一次，而不是模型壞了。
+    static let reselectedWhileWaiting = "等模型期間已換選模型，請再說一次"
+
     public init(transcriber: any WhisperTranscribing,
                 configProvider: @escaping () -> WhisperLocalConfig,
                 optionsProvider: @escaping () -> WhisperStreamingOptions = { WhisperStreamingOptions() }) {
@@ -83,10 +90,11 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
         self.optionsProvider = optionsProvider
     }
 
-    /// 背景預載目前選定的模型（spec §6）。未選模型＝no-op，不視為錯誤。
-    public func preload() async {
+    /// Settings 選定模型時背景預載它（spec §6、issue #35）。未選模型＝no-op，不視為錯誤。
+    /// 走 `preloadSelection`：選回已載入的模型也算一次新的選擇，先前換選留下的在途載入因此過期。
+    public func preloadSelection() async {
         guard let path = configProvider().selectedModelPath else { return }
-        await transcriber.preload(modelPath: path)
+        await transcriber.preloadSelection(modelPath: path)
     }
 
     /// 目前選定模型的載入狀態；未選模型＝`.idle`。
@@ -181,8 +189,15 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
             // preload 是 best-effort（coordinator 內以 try? 吞掉錯誤），得回頭確認模型真的載起來了。
             // 少了這一關，載入失敗會被帶進 transcribe 觸發第二次載入＝再等一輪 ANE 編譯
             // （large 數分鐘），期間還誤顯「辨識中…」，最後才吐失敗。
+            //
+            // 也擋住另一種「沒載起來」（issue #35）：等模型期間使用者在 Settings 換選了別的模型或清除選擇，
+            // 這趟載入成了過期的選擇，載完也不寫回快取。照樣放棄這次聽寫——硬用過期的模型辨識，
+            // transcribe 會 cache miss 再開一趟載入、反過來淘汰使用者剛選的模型——但失敗原因要講實話：
+            // 不是模型壞了，是換了模型。
             guard await transcriber.state(modelPath: modelPath) == .loaded else {
-                continuation.yield(.failed(reason: "模型載入失敗"))
+                let stillSelected = configProvider().selectedModelPath.map(ModelPathKey.string)
+                    == ModelPathKey.string(modelPath)
+                continuation.yield(.failed(reason: stillSelected ? "模型載入失敗" : Self.reselectedWhileWaiting))
                 continuation.finish()
                 return
             }

@@ -49,16 +49,20 @@ public enum ModelLoadState: Equatable, Sendable {
 /// - **序列化重載**：不同 key 的載入也一律排隊，同時最多一個 loader 在跑。否則使用者連點兩個
 ///   模型時兩份 3GB 會同時載入＝峰值記憶體無上界；排隊後峰值壓到「1 個載入中 ＋ 1 個快取」。
 /// - **最後載入勝出**：每個新 flight 取得遞增 generation；完成結果只能取代更舊的 cache。
-///   cache hit 與 shared-flight join 只讀既有工作，不取得 supersede 權。如此既擋住舊 continuation
-///   晚到覆寫新模型，也不會被不同-key 持續 request 餓死、反覆丟棄已完成的 3GB 載入（issue #34）。
+///   前景（`model(for:)`）的 cache hit 與 shared-flight join 只讀既有工作，不取得 supersede 權。
+///   如此既擋住舊 continuation 晚到覆寫新模型，也不會被不同-key 持續 request 餓死、反覆丟棄
+///   已完成的 3GB 載入（issue #34）。Settings 的選擇另有規則，見下。
 /// - **有界快取**：只保留最近載入的一個模型——載入新 key 即淘汰舊的，讓 ARC 釋放記憶體，
 ///   避免多次切換模型累積數個 3GB pipe 而 OOM。
 /// - **失敗不毒化**：in-flight 擲錯時只清除仍對應同一 task 的 entry，下次呼叫會重新載入。
-///
-/// **已知邊界（issue #35）**：generation 表達的是 loader flight 建立順序，不是 Settings selection
-/// intent。選回已 cached 的 A 不會建立新 flight；若舊 B flight 已建立，取消外層 preload wrapper
-/// 不會傳入其 unstructured task，B 完成後仍可淘汰 A。這需要另設 desired-key／selection API，
-/// 不在本模組目前「cache access 與 flight adoption」契約內。
+/// - **Settings 選擇優先（issue #35）**：generation 只表達 loader flight 的建立順序，與 Settings 的
+///   選擇順序不同步——選回已 cached 的 A 不建 flight，先前已建立的 B flight 完成後仍會淘汰 A。
+///   因此 Settings 走專用入口 `preloadSelection`：每次呼叫（**cache hit 也算**）都取得新的
+///   selection 世代，並把它記在自己建立或加入的 flight 上。flight 完成時，若記著的 selection
+///   已不是最新的（被換選、選回 cached 模型、或外層 wrapper 在 flight 建立後才被取消），
+///   結果只交給呼叫端、不寫回 current。一般的 `model(for:)` 不碰 selection：前景讀 cache 不會
+///   撤銷使用者的選擇，join selection flight 也不會取得 ownership；沒有任何 selection 參與的
+///   前景 flight 照「最後載入勝出」採用。
 ///
 /// 泛型 `Model: Sendable`：真實情境為 `WhisperKitModelActor`（actor 即 Sendable，可安全跨界回傳）；
 /// 單測以 `Model = String` ＋計數 loader 驗行為，不需 WhisperKit。
@@ -81,6 +85,8 @@ public actor ModelLoadCoordinator<Model: Sendable> {
         let since: Date
         let generation: Int
         let epoch: Int
+        /// 建立或最後加入這趟 flight 的 Settings selection 世代（issue #35）；nil＝只有前景存取。
+        var selection: Int?
     }
 
     private let loader: @Sendable (URL) async throws -> Model
@@ -90,8 +96,12 @@ public actor ModelLoadCoordinator<Model: Sendable> {
     private var chainTail: Task<Void, Never>?
     /// 卸載世代：unload 遞增。載入完成時世代不符＝這份結果已過期，不得寫回 current。
     private var epoch = 0
-    /// 只在真的建立新 loader flight 時遞增；cache hit／join 不得奪走 write ownership。
+    /// 只在真的建立新 loader flight 時遞增；cache hit／join 都不遞增它（loader 建立順序）。
     private var loadGeneration = 0
+    /// 最新一次 Settings 選擇的世代（issue #35）。遞增的只有兩處：每次選擇（`load` 帶 `selecting`，
+    /// cache hit 也遞增——那是「選回已 cached 的模型」唯一的 supersede 訊號），以及
+    /// `withdrawIfCancelled` 撤銷最新選擇。前景 `model(for:)` 從不碰它。
+    private var selectionGeneration = 0
 
     /// 卸載後等待舊排隊鏈的寬限期（見 `unload()`）。只在卸載後生效，正常排隊仍是無限期嚴格序列化。
     private let queueGrace: Duration
@@ -158,17 +168,30 @@ public actor ModelLoadCoordinator<Model: Sendable> {
         }
     }
 
+    /// 前景存取（聽寫時取模型）：cache hit 直接回、同 key 在途就 join、否則排隊建立新 flight。
+    /// **不碰 Settings selection**（issue #35）——讀 cache 不撤銷使用者的選擇，join 也不取得 ownership。
     public func model(for url: URL) async throws -> Model {
+        try await load(url, selecting: false)
+    }
+
+    /// `selecting`：這次呼叫是 Settings 的一次選擇（`preloadSelection`）；false＝前景存取。
+    private func load(_ url: URL, selecting: Bool) async throws -> Model {
         // 已取消的舊 preload／caller 沒有 supersede 權；在碰任何 actor state 前 fail fast。
         try Task.checkCancellation()
+        // 選擇世代在取消檢查**之後**才遞增，且與檢查之間沒有 suspension：已取消的 wrapper 不算一次選擇，
+        // 不能在「檢查過了、還沒建 flight」之間先把上一個仍有效的選擇作廢。
+        let selection: Int? = selecting ? { selectionGeneration &+= 1; return selectionGeneration }() : nil
         // symlink 與實體路徑是同一個模型，正規化後才當 key（REV #8）
         let key = cacheKey(url)
         if let c = current, c.url == key { return c.model }
         if let flight = inFlight[key] {
+            // Settings 選擇加入在途 flight＝這趟現在代表最新的選擇；前景 join 不改 ownership。
+            if let selection { inFlight[key]?.selection = selection }
             await testHooks?.didJoinFlight(key)
             do {
                 let m = try await flight.task.value
                 await testHooks?.beforeCacheWrite(key)
+                withdrawIfCancelled(selection)
                 finishFlight(flight.task, model: m, for: key)
                 return m
             } catch {
@@ -183,11 +206,13 @@ public actor ModelLoadCoordinator<Model: Sendable> {
             await predecessor?.value                                 // 排隊：前一個載入結束才輪到自己
             return try await loader(key)
         }
-        inFlight[key] = Flight(task: task, since: now(), generation: generation, epoch: epoch)
+        inFlight[key] = Flight(task: task, since: now(), generation: generation, epoch: epoch,
+                               selection: selection)
         chainTail = Task { _ = try? await task.value }               // 成功或失敗都放行下一個
         do {
             let m = try await task.value
             await testHooks?.beforeCacheWrite(key)
+            withdrawIfCancelled(selection)
             finishFlight(task, model: m, for: key)
             return m
         } catch {
@@ -201,9 +226,26 @@ public actor ModelLoadCoordinator<Model: Sendable> {
         guard let flight = inFlight[key], flight.task == task else { return }
         inFlight[key] = nil
         guard epoch == flight.epoch else { return }
+        // issue #35：已過期的 Settings 選擇（被換選、選回 cached 模型、wrapper 取消）只把結果交給呼叫端。
+        if let owner = flight.selection, owner != selectionGeneration { return }
         // 新 flight 可以取代舊 cache；較舊 continuation 晚到時不得倒退 generation。
         if let current, current.generation > flight.generation { return }
         current = (key, model, flight.generation)
+    }
+
+    /// 外層 preload wrapper 在 flight 建立**之後**才被取消（issue #35）：外層 cancellation 傳不進
+    /// unstructured flight，只能在呼叫端回到這裡時撤銷——而且只撤銷「仍是最新的那次選擇」；
+    /// 已被後來的選擇取代時什麼都不做，免得把新的選擇一起撤掉。
+    ///
+    /// **已知邊界**：同一趟 flight 有多個呼叫端時，誰先回到 actor 誰執行 `finishFlight`。若沒被取消的
+    /// 前景 joiner 先回來，採用已經發生，這裡來不及撤銷。App 端換選與卸載會緊接著新的
+    /// `preloadSelection` 或 `unload()`，兩者都讓這趟 flight 確定過期；但「清除選擇」只取消 wrapper、
+    /// 不會送來新的選擇（`WhisperKitEngine.preloadSelection` 在未選模型時直接 return）。此時若剛好有
+    /// 聽寫 join 在同一趟 flight 上，結果取決於誰先回來：前景先回＝照常採用；被取消的 wrapper 先回＝
+    /// 不採用、該次聽寫報「已換選模型」。兩種結局都不會讓快取錯亂，只差一次重載。
+    private func withdrawIfCancelled(_ selection: Int?) {
+        guard let selection, Task.isCancelled, selection == selectionGeneration else { return }
+        selectionGeneration &+= 1
     }
 
     /// 失敗只清自己的 flight；unload 後若已有 successor 接手，不得誤刪。
@@ -211,6 +253,12 @@ public actor ModelLoadCoordinator<Model: Sendable> {
         if inFlight[key]?.task == task { inFlight[key] = nil }
     }
 
-    /// 背景預載（best-effort）：錯誤吞掉，由實際辨識時再擲出對應失敗。
+    /// 前景預載（best-effort）：錯誤吞掉，由實際辨識時再擲出對應失敗。
+    /// 聽寫時等模型載入走這裡（`WhisperKitEngine` 的有界等待）——它**不是** Settings 的選擇。
     public func preload(_ url: URL) async { _ = try? await model(for: url) }
+
+    /// Settings 選定模型（issue #35）：記下一次新的選擇並在背景載入（best-effort，錯誤吞掉）。
+    /// 已是目前模型時（cache hit）不重載，但這次選擇仍會讓先前所有選擇建立的在途 flight 過期。
+    /// 進 actor 前就已取消的舊 wrapper 不算一次選擇（`load` 入口的 fail fast 早於世代遞增）。
+    public func preloadSelection(_ url: URL) async { _ = try? await load(url, selecting: true) }
 }

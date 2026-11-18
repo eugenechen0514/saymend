@@ -190,6 +190,10 @@ public final class WhisperKitTranscriber: WhisperTranscribing {
         await coordinator.preload(modelPath)
     }
 
+    public func preloadSelection(modelPath: URL) async {
+        await coordinator.preloadSelection(modelPath)
+    }
+
     public func state(modelPath: URL) async -> ModelLoadState {
         await coordinator.state(for: modelPath)
     }
