@@ -220,14 +220,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             traditionalize: traditionalize,
             inputs: promptInputs,
             promptBudget: PromptBudget.productionDefault())   // Debug 可由 E2E env 注入；Release 恆為預設
-        feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: hud, profiles: profileStore,
+        // 救援提示的最短顯示保證（issue #61）：controller 與 FeedbackCoordinator 共用**同一個** arbiter，
+        // 兩邊的 present 才會被同一個保護期仲裁（FeedbackCoordinator 的 `.diff` 不再繞過）。
+        // 啟動期的 notice、`updateLevel`／`onUndoTap`／`containsScreenPoint`（不在 protocol 裡）照舊用具體的 `hud`。
+        let arbitratedHUD = HUDArbiter(inner: hud)
+        feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: arbitratedHUD, profiles: profileStore,
                                                   registry: axRegistry)
         controller = DictationController(
             audio: audio,
             asr: asrEngine,
             coordinator: coordinator,
             intent: intentService,
-            hud: hud,
+            hud: arbitratedHUD,
             settings: settings,
             clipboardRescue: { text, round in
                 // 鐵律最後手段：原文進剪貼簿。走 ClipboardChannel（issue #42）：撞上在途 paste 先等它收尾，

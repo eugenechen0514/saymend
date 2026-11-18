@@ -10,7 +10,9 @@ import os.log
 @MainActor
 final class FeedbackCoordinator: SessionFeedbackPresenting {
     private let overlay: OverlayWindowController
-    private let hud: HUDWindowController
+    /// 只用到 `present(.diff)`。持有 protocol 而非具體的 HUDWindowController：App 組裝時傳入的是
+    /// 與 controller 共用的 `HUDArbiter`（issue #61），diff 降級才不會繞過救援提示的保護期。
+    private let hud: any HUDPresenting
     private let profiles: (any AppProfileStore)?
     private var capability: [String: Bool] = [:]
     private var lastUpdate: FeedbackUpdate?
@@ -56,7 +58,7 @@ final class FeedbackCoordinator: SessionFeedbackPresenting {
         return 1.0 - (fadeElapsed / highlightFadeDuration)
     }
 
-    init(overlay: OverlayWindowController, hud: HUDWindowController,
+    init(overlay: OverlayWindowController, hud: any HUDPresenting,
          profiles: (any AppProfileStore)? = nil, registry: AXFieldRegistry) {
         self.overlay = overlay
         self.hud = hud

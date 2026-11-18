@@ -107,7 +107,42 @@ final class ClipboardSpy {
 
 final class FakeHUD: HUDPresenting {
     private(set) var states: [HUDState] = []
+    /// issue #61：經 `presentRescueNotice` 送來的救援提示文案（依序）。
+    private(set) var rescueNotices: [String] = []
     func present(_ state: HUDState) { states.append(state) }
+    /// 照舊 append `.notice(message)` 到 `states`：既有的 `.notice` 斷言零遷移，
+    /// `rescueNotices` 另外記下「這則走的是救援通道」。
+    func presentRescueNotice(_ message: String) {
+        rescueNotices.append(message)
+        states.append(.notice(message))
+    }
+}
+
+/// `HUDScheduling` 的虛擬時鐘（issue #61）。`advance(to:)` 依（到期時間、排程序）執行所有到期的區塊，
+/// 包括執行途中新排、且同樣已到期的。測試一律用絕對時間（`advance(to: 1.9)` 再 `advance(to: 2.0)`），
+/// 避免 1.999 + 0.001 這類浮點累加誤差。
+final class FakeHUDScheduler: HUDScheduling {
+    private(set) var now: TimeInterval = 0
+    private var pending: [(due: TimeInterval, seq: Int, block: () -> Void)] = []
+    private var nextSeq = 0
+    /// 尚未執行的區塊數（含 arbiter 會以 epoch 忽略的過期回呼）
+    var pendingCount: Int { pending.count }
+
+    func schedule(after seconds: TimeInterval, _ block: @escaping () -> Void) {
+        pending.append((now + seconds, nextSeq, block))
+        nextSeq += 1
+    }
+
+    func advance(to t: TimeInterval) {
+        precondition(t >= now, "虛擬時鐘不能倒退")
+        while let i = pending.indices.filter({ pending[$0].due <= t })
+                .min(by: { (pending[$0].due, pending[$0].seq) < (pending[$1].due, pending[$1].seq) }) {
+            let item = pending.remove(at: i)
+            now = item.due
+            item.block()
+        }
+        now = t
+    }
 }
 
 final class FakeFieldReader: FieldContextProviding {
@@ -161,6 +196,9 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
         if focusedID == nil { focusedID = id }
     }
     func focus(_ id: String) { precondition(fields[id] != nil); focusedID = id }
+    /// 讀不到焦點（AX 逾時、焦點落在非文字元素上）：閘門回 `.unknown`、snapshot 回空的 `FieldContext()`。
+    /// issue #65 用它模擬「session 有 identity，卻問不出現在的焦點」。
+    func blur() { focusedID = nil }
     func text(in id: String) -> String { fields[id]!.text }
     func select(in id: String, location: Int, length: Int) {
         fields[id]!.selectedRange = .init(location: location, length: length)
@@ -354,13 +392,18 @@ func makeController(
 }
 
 /// 以 StatefulFieldEnvironment 同時擔任 keystroke／paste／AX／reader 的 controller
+///
+/// `wrapHUD`（issue #61）：把 FakeHUD 包一層再交給 controller（端到端測試用來包 `HUDArbiter`）。
+/// 回傳的**仍是內層 FakeHUD**——也就是 arbiter 的輸出端、window 實際收到的序列。預設不包，
+/// FakeHUD 直接觀察 controller 的原始輸出（`makeController` 一律不包）。
 @MainActor
 func makeStatefulController(
     env: StatefulFieldEnvironment,
     polisher: GatedIntentService = GatedIntentService(),
     clipboard: ClipboardSpy? = nil,
     history: FakeHistory? = nil,
-    feedback: FakeFeedback? = nil
+    feedback: FakeFeedback? = nil,
+    wrapHUD: (FakeHUD) -> any HUDPresenting = { $0 }
 ) -> (DictationController, FakeASR, FakeHUD) {
     let audio = FakeAudio()
     let asr = FakeASR()
@@ -375,7 +418,7 @@ func makeStatefulController(
                                            gateEnabled: { settings.rawAppendGateEnabled })
     let controller = DictationController(
         audio: audio, asr: asr, coordinator: coordinator,
-        intent: polisher, hud: hud, settings: settings,
+        intent: polisher, hud: wrapHUD(hud), settings: settings,
         clipboardRescue: clipboard.map { spy in { spy.rescue($0, round: $1) } },
         fieldReader: env, feedback: feedback, history: history, contextOCR: nil)
     return (controller, asr, hud)

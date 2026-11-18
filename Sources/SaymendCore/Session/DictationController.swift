@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// 聽寫狀態機（規格 §3.1–§3.4）。
 /// 所有系統能力由 protocol 注入；時間一律由呼叫端傳入（可測試）。
@@ -116,6 +117,21 @@ public final class DictationController {
     private var capturedOCRText: String?
     /// internal 供測試 await（OCR 非同步落地，趕上哪句算哪句——M4 設計裁決 5）
     private(set) var ocrTask: Task<Void, Never>?
+    /// issue #65：本段（自上次 `startListening` 起）的暫時文字已遮罩。fail closed，同時是 AX 成本的熔斷：
+    /// 一旦遮罩，本段之後的暫時文字一律顯示 `""`、不再查閘門。只在 `startListening` 重置——
+    /// 它是進入 `.listening` 的唯一入口（新段、延續窗續聽都走它），多一個重置點只會是殺不到的 mutation。
+    private var volatileMasked = false
+    /// 暫時文字的呈現決定（issue #65）：照常顯示（可能是遮罩後的 `""`），或立即硬停。
+    private enum VolatilePreview: Equatable {
+        case show(String)
+        case abortSecure
+    }
+    /// issue #65 Step 0 量測（裁定 Q7）：本段暫時文字的頻率與閘門耗時。型別上只有數字與旗標。
+    /// 在 `endListening`／`archiveSession` 以 debug log 輸出後歸零（@testable 可讀）。
+    private(set) var volatileGateStats = VolatileGateStats()
+    /// 最近一次輸出到 log 的那份量測（測試觀察用：os.Logger 本身沒有可觀察的 seam）
+    private(set) var lastFlushedVolatileGateStats: VolatileGateStats?
+    private static let hudLog = Logger(subsystem: "io.saymend.app", category: "hud")
 
     public init(audio: any AudioCaptureService,
                 asr: any ASREngine,
@@ -184,6 +200,8 @@ public final class DictationController {
     /// 寫入前的焦點閘門攔下一句 raw 時的提示（issue #37）。
     /// **刻意不歸入 `insertSkipNotice` 那個「未潤飾（…）」家族**：那家族說的是「字在螢幕上、只是潤飾沒套用」，
     /// 這裡說的是「字根本沒上屏」——對使用者的下一步動作完全不同（前者可以不理，後者要去貼上）。
+    /// 以救援提示呈現（`hud.presentRescueNotice`，issue #61）：session 照常繼續，下一個暫時文字往往
+    /// 數百毫秒內就到，沒有最短顯示保證的話使用者根本讀不到。
     static let fieldChangedNotice = "欄位已切換，內容已入剪貼簿"
 
     public func escapePressed() {
@@ -326,12 +344,26 @@ public final class DictationController {
         segmenter.onTranscript(event, at: t)
         switch event {
         case .volatile(let text):
+            // `.finishing`（排空窗）本來就不呈現暫時文字，所以也不查閘門（白付 AX IPC）。
             if case .listening(let mode) = internalPhase {
-                presentListening(mode: mode, volatile: text)
+                volatileGateStats.recordEvent(at: t)
+                // issue #65：轉錄文字進 HUD 只有這一條路，密碼欄守衛必須跑在 present **之前**，
+                // 且查詢與 present 之間沒有 `await`（同一個 MainActor turn）。
+                switch volatilePreview(text) {
+                case .show(let shown):
+                    if volatileMasked { volatileGateStats.noteMasked() }
+                    presentListening(mode: mode, volatile: shown)
+                case .abortSecure:
+                    volatileGateStats.noteAborted()        // 必須在 abort 之前：archiveSession 會輸出並歸零
+                    // `segmenter.hardReset()` 讓焦點在密碼欄期間說的話不閉合、不送 LLM、不落地（V12）
+                    abortForSecureField()
+                }
             }
         case .finalized(let text, let quality):
             // M2 遺留債：聽寫中焦點切進密碼欄位（Tab、程式切換焦點——滑鼠/鍵盤活動已由凍結涵蓋，
             // 但焦點可以不經這兩者移動）。規格 §5.3：密碼欄位一個字都不能進。硬停整個 session。
+            // 暫時文字那條路（上面的 `.volatile` 分支，issue #65）另有自己的閘門，查到 `.secure` 同樣硬停；
+            // 它的遮罩**不得**讓這裡的閘門被省略——遮罩只管畫面，內容層的 fail closed 仍由這一道負責。
             //
             // issue #37：這裡原本每句都做一次完整 snapshot，只為讀一個 isSecure bool
             // （4–5 次 AX IPC，且在有選取＋白名單 App 時會對目前焦點發合成 Cmd+C），現在是輕量閘門。
@@ -408,7 +440,7 @@ public final class DictationController {
                     recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: text)
                     rescueToClipboard(text)
                     recordASRDiagnostic(text: text, quality: quality)
-                    hud.present(.notice("已凍結，內容已入剪貼簿"))
+                    hud.presentRescueNotice("已凍結，內容已入剪貼簿")
                     return
                 }
                 do {
@@ -425,7 +457,7 @@ public final class DictationController {
                                           detail: fieldChangeDetail(current: currentAppBundleID))
                         rescueToClipboard(text)
                         recordASRDiagnostic(text: text, quality: quality)
-                        hud.present(.notice(Self.fieldChangedNotice))
+                        hud.presentRescueNotice(Self.fieldChangedNotice)
                         skippedRaw = true
                         return
                     case .secureField(let subroleUnknown):
@@ -481,13 +513,13 @@ public final class DictationController {
                     // 的預設 round（ledger.generation），ClipboardChannel 把同一輪的救援串接成一份
                     // （issue #42 取捨 4 的修訂）。此處仍沒有 dispatch 的 lastRescueGeneration（:694-697）
                     // 那種「只救一份」的節流——那是刻意的：每一段都是使用者真的說過的話，都該留下。
-                    // 提示會被蓋掉：hold 模式下 asrStreamEnded（:463-465）會接著 present .lingering、
-                    // 非 active 時 archiveSession（:601）present .hidden，使用者實際看不到這行 notice。
-                    // 這是既有的 M8 LOW follow-up，已另立 issue #61（安全相關 notice 的最短顯示保證）。
+                    // 提示以救援提示呈現（issue #61）：hold 模式下 `asrStreamEnded` 緊接著會 present `.lingering`、
+                    // session 已不 active 時 `archiveSession` 會 present `.hidden`——沒有仲裁的話這行提示當場就被蓋掉。
+                    // App 端包的 `HUDArbiter` 保證它至少停留 `HUDArbiter.minimumHold`，期間的狀態延後重播。
                     // 不記 insertEvent：與緩衝句插入失敗那條保持一致（最小 diff、一致性優先）。
                     rescueToClipboard(text)
                     recordASRDiagnostic(text: text, quality: quality)
-                    hud.present(.notice("插入失敗，內容已入剪貼簿"))
+                    hud.presentRescueNotice("插入失敗，內容已入剪貼簿")
                 }
             }
         case .transcribing:
@@ -537,6 +569,36 @@ public final class DictationController {
         sawTextThisSession = true
         guard warningOnScreen, case .listening(let mode) = internalPhase else { return }
         presentListening(mode: mode, volatile: "")
+    }
+
+    /// 暫時文字上 HUD 前的密碼欄閘門（issue #65）。判定表見計畫 §4.1：
+    /// - 空字串、本段已遮罩：顯示 `""`，不查
+    /// - `fieldReader == nil`、`.same`、`.different`、起點就沒有 identity 的 `.unknown`（#21）：照常顯示
+    /// - session 有 identity 卻讀不到焦點的 `.unknown`、`.secureUnknown`：遮罩並熔斷
+    /// - `.secure`：硬停（與定稿路徑的 `.secure` 一致，不記 insertEvent）
+    ///
+    /// **只呼叫 `fieldGate`（實作只用 `registry.matches`），絕不呼叫 `snapshot()`**：snapshot 會登記
+    /// identity 持有者，這裡不歸還就破壞 #43 的 lease 不變式。
+    /// **不寫任何持久容器**（#10）：不呼叫 `recordInsertEvent`／`recordASRDiagnostic`——暫時文字可能
+    /// 正是焦點在密碼欄期間說出的字，「不知道是不是密碼欄」的分支同樣一個字都不留。
+    private func volatilePreview(_ text: String) -> VolatilePreview {
+        guard !text.isEmpty, !volatileMasked else { return .show("") }
+        let started = ContinuousClock.now
+        let gate = fieldReader?.fieldGate(sessionIdentity: ledger.fieldIdentity)
+        if gate != nil { volatileGateStats.recordGateCall(ContinuousClock.now - started) }
+        switch gate {
+        case .secure?:
+            return .abortSecure
+        case .secureUnknown?:
+            volatileMasked = true
+            return .show("")
+        case .unknown? where ledger.fieldIdentity != nil:
+            // session 起點有 AX 焦點，現在卻問不出來（含逾時）＝不知道焦點在哪：fail closed。
+            volatileMasked = true
+            return .show("")
+        case .unknown?, .same?, .different?, .none:
+            return .show(text)
+        }
     }
 
     /// 聽寫中的 HUD 狀態依 sessionTarget 分流：選取目標模式顯示 selectionListening
@@ -619,6 +681,8 @@ public final class DictationController {
             archiveAfterDrain = false
             sawNoSpeechWarning = false
             sawTextThisSession = false
+            // issue #65：遮罩是「本段」的。走到這裡代表上面的密碼欄拒絕沒觸發——人還在密碼欄時不會重置。
+            volatileMasked = false
             capturedContextBefore = field.contextBefore
             capturedContextAfter = field.contextAfter
             if !resuming {
@@ -684,7 +748,26 @@ public final class DictationController {
     private func endListening(at t: TimeInterval) {
         audio.stop()                 // audio finish → ASR 排空 → asrStreamEnded 收尾
         internalPhase = .finishing
+        flushVolatileGateStats()     // 排空窗不呈現暫時文字，本段量測到此為止
         hud.present(.hidden)
+    }
+
+    /// issue #65 量測輸出（裁定 Q7）：**只有數字與旗標**，以 debug 等級輸出（Release 預設不落地）。
+    /// 事件數為 0 不輸出。輸出後歸零，下一段從頭算。
+    /// 判讀：多段 log 彙整出「事件/秒 p95 × 閘門耗時 p95」，超過 20ms/s 再開節流 follow-up。
+    private func flushVolatileGateStats() {
+        let s = volatileGateStats
+        volatileGateStats = VolatileGateStats()
+        guard s.events > 0 else { return }
+        lastFlushedVolatileGateStats = s
+        let span = (s.lastAt ?? 0) - (s.firstAt ?? 0)
+        Self.hudLog.debug("""
+            volatile gate: events=\(s.events, privacy: .public) gateCalls=\(s.gateCalls, privacy: .public) \
+            maxPerSecond=\(s.maxPerSecond, privacy: .public) \
+            maxGateMs=\(s.maxGateSeconds * 1000, format: .fixed(precision: 3), privacy: .public) \
+            spanSeconds=\(span, format: .fixed(precision: 2), privacy: .public) \
+            masked=\(s.masked, privacy: .public) aborted=\(s.aborted, privacy: .public)
+            """)
     }
 
     private func endSession(at t: TimeInterval) {
@@ -709,6 +792,7 @@ public final class DictationController {
         ocrTask?.cancel()
         ocrTask = nil
         capturedOCRText = nil
+        flushVolatileGateStats()            // issue #65 量測：Esc／暫時文字硬停／定稿硬停等直達封存的路徑
         // 歸還 begin 時登記的 element token（issue #43）：必須在 ledger.archive() 清掉它之前。
         // registry 有引用計數，FeedbackCoordinator 若也 pin 了同一 element，這裡只減 ledger 那一份。
         releaseFieldLease(ledger.fieldIdentity)
@@ -871,7 +955,7 @@ public final class DictationController {
                     // （`ledger.generation` 已跳號）。用當下的世代會讓這段舊內容被當成新 session 的
                     // 同一輪而串在它的救援後面——round token 要防的正是這件事。
                     rescueToClipboard(text, round: generation)
-                    hud.present(.notice("選取已變動，結果已入剪貼簿"))
+                    hud.presentRescueNotice("選取已變動，結果已入剪貼簿")
                 case .undo, .degraded:
                     break                              // 無內容可救，安靜丟棄即可
                 }
@@ -897,7 +981,7 @@ public final class DictationController {
                 // 比照所有落地路徑（applyNewContent／applyCorrection 等）的 frozen 守衛，改走剪貼簿急救。
                 guard !ledger.frozen else {
                     rescueToClipboard(text)
-                    hud.present(.notice("已凍結，內容已入剪貼簿"))
+                    hud.presentRescueNotice("已凍結，內容已入剪貼簿")
                     return
                 }
                 do {
@@ -913,7 +997,7 @@ public final class DictationController {
                                           utteranceText: text,
                                           detail: fieldChangeDetail(current: currentAppBundleID))
                         rescueToClipboard(text)
-                        hud.present(.notice(Self.fieldChangedNotice))
+                        hud.presentRescueNotice(Self.fieldChangedNotice)
                     case .secureField(let subroleUnknown):
                         // 焦點已切進密碼欄，或 AX 問不出 subrole 而 fail closed（規格 §5.3／issue #59）：
                         // 與 finalized 那條逐字相同——記診斷後**硬停整個 session**。
@@ -937,7 +1021,7 @@ public final class DictationController {
                     }
                 } catch {
                     rescueToClipboard(text)
-                    hud.present(.notice("插入失敗，內容已入剪貼簿"))
+                    hud.presentRescueNotice("插入失敗，內容已入剪貼簿")
                 }
             case .editedSession:
                 hud.present(.notice("未修正（內容已變動，請再說一次）"))
@@ -949,7 +1033,7 @@ public final class DictationController {
                 performUndo(commandSnapshot: coordinator.currentTailSnapshot())
             case .degraded(let reason):
                 rescueToClipboard(snapshot.text)
-                hud.present(.notice("未處理（\(reason)），轉錄已入剪貼簿"))
+                hud.presentRescueNotice("未處理（\(reason)），轉錄已入剪貼簿")
             }
             return
         }
@@ -1060,7 +1144,7 @@ public final class DictationController {
         case .degraded(let reason):
             // M3 設計裁決 4：LLM 失敗不動選取（寧可不動不可亂改），轉錄入剪貼簿
             rescueToClipboard(commandRaw)
-            hud.present(.notice("未替換（\(reason)），轉錄已入剪貼簿"))
+            hud.presentRescueNotice("未替換（\(reason)），轉錄已入剪貼簿")
         }
     }
 
@@ -1094,6 +1178,12 @@ public final class DictationController {
     /// 它只把**同一輪**的救援串接起來，跨輪一律覆寫。round 用 `ledger.generation`——
     /// 一次聽寫 session 就是一輪，同一段話拆成多句救援才會連成一份可貼上的文字。
     /// 只有救「舊 session 的內容」時才明確傳 round（見 `dispatch` 的世代過期分支）。
+    ///
+    /// **配對的提示一律走 `hud.presentRescueNotice`**（issue #61）：內容沒上屏、唯一副本在剪貼簿，
+    /// 使用者必須讀到才知道要去貼上。包在外面的 `HUDArbiter` 保證它至少停留 2 秒。
+    /// 判準可機械驗證：同一個分支剛呼叫過本函式的那則 notice，才是救援提示。
+    /// 刻意不把提示併進本函式（`rescueToClipboard(_:notice:)`）：`abandonSelectionReplacement` 要求
+    /// 「先 archive、後提示」，合併會改動那個順序，arbiter 沒接上時反而退化成被 `.hidden` 蓋掉。
     private func rescueToClipboard(_ text: String, round: Int? = nil) {
         clipboardRescue?(text, round ?? ledger.generation)
     }
@@ -1107,7 +1197,7 @@ public final class DictationController {
         lastRescueGeneration = ledger.generation
         rescueToClipboard(text)
         archiveSession()
-        hud.present(.notice(notice))
+        hud.presentRescueNotice(notice)
     }
 
     /// 復原上一步（口頭 undo 與 Task 9 的 HUD 按鈕共用）。

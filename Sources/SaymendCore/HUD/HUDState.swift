@@ -25,4 +25,14 @@ public enum HUDState: Equatable, Sendable {
 
 public protocol HUDPresenting: AnyObject {
     func present(_ state: HUDState)
+    /// issue #61：內容沒上屏、唯一副本在剪貼簿的提示（救援提示）。包在外面的 `HUDArbiter` 保證它至少停留
+    /// `HUDArbiter.minimumHold`，期間到達的狀態延後重播。
+    /// **必須是 requirement**（不能只寫在 extension）：controller 經 `any HUDPresenting` 呼叫，
+    /// 只寫在 extension 會靜態派發到預設實作，arbiter 的覆寫永遠不會被叫到。
+    func presentRescueNotice(_ message: String)
+}
+
+public extension HUDPresenting {
+    /// 沒有仲裁能力的實作（`HUDWindowController`、未包 arbiter 的路徑）＝一般 notice，與 #61 之前逐位元相同。
+    func presentRescueNotice(_ message: String) { present(.notice(message)) }
 }
