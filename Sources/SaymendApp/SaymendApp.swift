@@ -224,6 +224,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // 兩邊的 present 才會被同一個保護期仲裁（FeedbackCoordinator 的 `.diff` 不再繞過）。
         // 啟動期的 notice、`updateLevel`／`onUndoTap`／`containsScreenPoint`（不在 protocol 裡）照舊用具體的 `hud`。
         let arbitratedHUD = HUDArbiter(inner: hud)
+        // 錄音期間的焦點變更監看（issue #70）：焦點在兩個暫時文字之間進出密碼欄時，事件驅動的閘門看不到，
+        // 只有 AX 的 focus-changed 通知看得到。判定與 reader 共用同一個 #59 三態。
+        let focusWatcher = AXFocusWatcher(security: { [axReader] element in axReader.focusSecurity(of: element) })
         feedbackCoordinator = FeedbackCoordinator(overlay: overlay, hud: arbitratedHUD, profiles: profileStore,
                                                   registry: axRegistry)
         controller = DictationController(
@@ -246,7 +249,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 // （DictationController 僅在 AX 無前後文且非安全欄位時呼叫此 closure）。
                 guard settings.ocrContextEnabled else { return nil }
                 return await ocrReader.captureText()
-            }
+            },
+            focusWatcher: focusWatcher
         )
         // 插入層備援診斷（issue #1）：主 inserter 失敗、備援救回時補一筆歷史事件。
         // 插入一律發生在 controller 的 MainActor 上，故直接轉呼叫。

@@ -280,6 +280,18 @@ final class AXFieldReader: FieldContextProviding {
         registry.release(identity)
     }
 
+    /// 焦點變更監看（issue #70）用的判定：AX 推來的**那個元素**是不是密碼欄。
+    /// 與 `snapshot(of:)`、`fieldGate` **共用同一個 `secureVerdict(of:)`**（#59 三態＋逾時重試一次）——
+    /// 三處各寫一份的話會漂移，而漂移的後果正是「開始聽寫擋得住、途中切進去擋不住」。
+    /// 只讀 subrole，不碰 identity registry（#43 lease 中性）。
+    func focusSecurity(of element: AXUIElement) -> FocusedFieldSecurity {
+        switch secureVerdict(of: element) {
+        case .secure: return .secure
+        case .unknown: return .secureUnknown
+        case .notSecure: return .notSecure
+        }
+    }
+
     /// 輕量焦點閘門（issue #37）：只讀「焦點元素」＋「subrole」兩次 AX 屬性，取代原本每句一次的完整
     /// `snapshot(of:)`（subrole／selectedTextRange／selectedText／整份 kAXValue，4–5 次跨行程 IPC，
     /// 而且在有選取＋白名單 App 時還會對目前焦點發一個合成 Cmd+C）。
