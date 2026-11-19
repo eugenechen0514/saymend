@@ -256,9 +256,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             feedback: feedbackCoordinator,
             history: historyStore,
             contextOCR: { [ocrReader, settings] in
-                // 設定開關為總閘（規格 §4.7）：關閉時連截圖都不嘗試。開啟後才進入既有降級序
-                // （DictationController 僅在 AX 無前後文且非安全欄位時呼叫此 closure）。
-                guard settings.ocrContextEnabled else { return nil }
+                // 何時截圖由 DictationController 依 `ocrContextMode` 決定；這裡再鎖一道：
+                // 模式為關閉時連截圖都不嘗試（隱私的第二道閘，防 controller 端判斷出錯）。
+                guard settings.ocrContextMode != .off else { return nil }
                 return await ocrReader.captureText()
             },
             focusWatcher: focusWatcher

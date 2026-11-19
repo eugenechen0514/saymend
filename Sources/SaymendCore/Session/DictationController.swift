@@ -63,7 +63,8 @@ public final class DictationController {
     private let feedback: (any SessionFeedbackPresenting)?
     /// 聽寫歷史（規格 §4.9）：nil＝不記錄。寫入失敗不得影響聽寫主流程。
     private let history: (any HistoryRecording)?
-    /// OCR 備援上下文（規格 §4.7）：AX 讀不到前後文時的非同步截圖辨識，App 端注入；nil＝停用。
+    /// OCR 螢幕語境（規格 §4.7）：非同步截圖辨識，App 端注入；nil＝停用。
+    /// 何時呼叫由 `settings.ocrContextMode` 決定（見 `OCRContextMode.shouldCapture`）。
     private let contextOCR: (() async -> String?)?
     /// 時間來源（歷史記錄時戳）；測試可注入固定時鐘。
     private let now: () -> Date
@@ -746,11 +747,14 @@ public final class DictationController {
                                                appName: field.frontAppName,
                                                targetKind: kind, finalText: nil))
                 }
-                // OCR 備援（規格 §4.7 降級序：AX 讀得到就不動用）；非同步，結果趕上哪句算哪句。
+                // OCR 螢幕語境（規格 §4.7）：由設定的模式決定是否截圖——`.fallback` 僅在 AX 讀不到
+                // 前後文時動用、`.always` 一律附加；非同步，結果趕上哪句算哪句。
                 capturedOCRText = nil
                 ocrTask?.cancel()
                 ocrTask = nil
-                if field.contextBefore == nil, field.contextAfter == nil, !field.isSecure,
+                if settings.ocrContextMode.shouldCapture(contextBefore: field.contextBefore,
+                                                         contextAfter: field.contextAfter,
+                                                         isSecure: field.isSecure),
                    let contextOCR {
                     ocrTask = Task { [weak self] in
                         let text = await contextOCR()

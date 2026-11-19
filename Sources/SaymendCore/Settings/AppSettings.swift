@@ -32,6 +32,36 @@ public enum HotkeyChoice: String, CaseIterable, Codable, Sendable {
     }
 }
 
+/// OCR 螢幕語境模式（規格 §4.7）。預設 `.off`（opt-in）：螢幕擷取最具侵入性。
+public enum OCRContextMode: String, CaseIterable, Codable, Sendable {
+    /// 不截圖
+    case off
+    /// 僅備援：輔助使用（AX）讀不到游標前後文時才截圖（原「啟用 OCR 備援」開關的行為）
+    case fallback
+    /// 一律附加：AX 讀得到前後文也照樣截圖，補上欄位以外的可見文字（如聊天視窗的上方訊息）
+    case always
+
+    /// 設定頁顯示字串（文案歸屬 Core，比照 HotkeyChoice.displayName）
+    public var displayName: String {
+        switch self {
+        case .off: return "關閉"
+        case .fallback: return "僅備援"
+        case .always: return "一律附加"
+        }
+    }
+
+    /// 這次聽寫要不要截圖。安全欄位一律不截（與模式無關）；`.fallback` 只在
+    /// 前後文兩邊都讀不到時動用（規格 §4.7 降級序）。
+    public func shouldCapture(contextBefore: String?, contextAfter: String?, isSecure: Bool) -> Bool {
+        guard !isSecure else { return false }
+        switch self {
+        case .off: return false
+        case .fallback: return contextBefore == nil && contextAfter == nil
+        case .always: return true
+        }
+    }
+}
+
 /// App 設定（規格 §4.9）。一般值進 UserDefaults；API key 進 SecretStore。
 ///
 /// `@unchecked Sendable`（三件事誠實揭露，勿以「stored 全 let」誤讀）：
@@ -54,7 +84,9 @@ public final class AppSettings: @unchecked Sendable {
         static let styleRulesOverride = "styleRulesOverride"
         static let historyEnabled = "historyEnabled"
         static let historyRetentionDays = "historyRetentionDays"
-        static let ocrContextEnabled = "ocrContextEnabled"
+        static let ocrContextMode = "ocrContextMode"
+        // 舊版布林開關的 key：只讀不寫，用來把既有使用者的選擇遷移成 `ocrContextMode`。
+        static let legacyOCRContextEnabled = "ocrContextEnabled"
         // Esc 退字的兩個邊界（issue #46）。key 字面值是 persistence 契約，測試以字面值釘住。
         static let escapeRetractsPolishedText = "escapeRetractsPolishedText"
         static let escapeRetractsFrozenSession = "escapeRetractsFrozenSession"
@@ -377,12 +409,20 @@ public final class AppSettings: @unchecked Sendable {
         return value
     }
 
-    /// OCR 螢幕語境備援開關（規格 §4.7）。預設關（opt-in）：螢幕擷取最具侵入性，
-    /// 由使用者明確開啟才動用。開啟後仍受既有降級序節制——僅在 AX 讀不到前後文、
-    /// 非安全欄位、且螢幕錄製權限已授權時才實際截圖。
-    public var ocrContextEnabled: Bool {
-        get { defaults.object(forKey: K.ocrContextEnabled) as? Bool ?? false }
-        set { defaults.set(newValue, forKey: K.ocrContextEnabled) }
+    /// OCR 螢幕語境模式（規格 §4.7）。預設 `.off`（opt-in）。不論模式為何，仍需非安全欄位
+    /// 且螢幕錄製權限已授權才會實際截圖。
+    ///
+    /// 遷移：新 key 沒有值時沿用舊版布林開關——舊的 `true` 對應 `.fallback`（行為完全相同），
+    /// `false`／未設定對應 `.off`。寫入只寫新 key；舊 key 保留不動，新 key 一旦存在就以新 key 為準。
+    public var ocrContextMode: OCRContextMode {
+        get {
+            if let raw = defaults.string(forKey: K.ocrContextMode),
+               let mode = OCRContextMode(rawValue: raw) {
+                return mode
+            }
+            return (defaults.object(forKey: K.legacyOCRContextEnabled) as? Bool ?? false) ? .fallback : .off
+        }
+        set { defaults.set(newValue.rawValue, forKey: K.ocrContextMode) }
     }
 
     /// 歷史保留天數（規格 §4.9「可設保留天數」；啟動時清除過期）

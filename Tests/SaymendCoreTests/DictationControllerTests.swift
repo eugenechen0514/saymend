@@ -1906,13 +1906,14 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 }
 
 @MainActor
-@Test func ocrRunsOnlyWhenAXContextMissingAndFeedsContext() async {
+@Test func ocrFallbackRunsWhenAXContextMissingAndFeedsContext() async {
     let intent = GatedIntentService()
     var ocrCalls = 0
     let reader = FakeFieldReader()
     reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1))   // 無前後文
     let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader,
                                             contextOCR: { ocrCalls += 1; return "螢幕參考" })
+    c.settings.ocrContextMode = .fallback
     c.hotkeyPressed(at: 10.0)
     await c.ocrTask?.value                           // 等非同步 OCR 落地
     c.handleTranscript(.finalized("你好"), at: 10.5)
@@ -1923,16 +1924,53 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 }
 
 @MainActor
-@Test func ocrSkippedWhenAXContextPresent() async {
+@Test func ocrFallbackSkippedWhenAXContextPresent() async {
     let intent = GatedIntentService()
     var ocrCalls = 0
     let reader = FakeFieldReader()
     reader.context = FieldContext(hasFocusedElement: true, caretLocation: 3, fieldIdentity: FieldIdentity(token: 1), contextBefore: "前文")
     let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader,
                                             contextOCR: { ocrCalls += 1; return "不該用到" })
+    c.settings.ocrContextMode = .fallback
     c.hotkeyPressed(at: 10.0)
     #expect(c.ocrTask == nil)
-    #expect(ocrCalls == 0)                           // AX 讀得到＝不動用 OCR（規格 §4.7 降級序）
+    #expect(ocrCalls == 0)                           // 僅備援：AX 讀得到＝不動用 OCR（規格 §4.7 降級序）
+}
+
+@MainActor
+@Test func ocrAlwaysRunsEvenWhenAXContextPresentAndKeepsBoth() async {
+    let intent = GatedIntentService()
+    var ocrCalls = 0
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 3, fieldIdentity: FieldIdentity(token: 1),
+                                  contextBefore: "前文", contextAfter: "後文")
+    let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader,
+                                            contextOCR: { ocrCalls += 1; return "聊天上方訊息" })
+    c.settings.ocrContextMode = .always
+    c.hotkeyPressed(at: 10.0)
+    await c.ocrTask?.value
+    c.handleTranscript(.finalized("你好"), at: 10.5)
+    c.tick(at: 12.1)
+    await c.lastIntentTask?.value
+    #expect(ocrCalls == 1)
+    // 一律附加：OCR 與 AX 前後文同時送進語境，互不取代
+    #expect(intent.calls.last?.context.ocrText == "聊天上方訊息")
+    #expect(intent.calls.last?.context.contextBefore == "前文")
+    #expect(intent.calls.last?.context.contextAfter == "後文")
+}
+
+@MainActor
+@Test func ocrOffNeverCapturesEvenWithoutAXContext() async {
+    let intent = GatedIntentService()
+    var ocrCalls = 0
+    let reader = FakeFieldReader()
+    reader.context = FieldContext(hasFocusedElement: true, caretLocation: 0, fieldIdentity: FieldIdentity(token: 1))   // 無前後文
+    let (c, _, _, _, _, _) = makeController(polisher: intent, fieldReader: reader,
+                                            contextOCR: { ocrCalls += 1; return "不該用到" })
+    #expect(c.settings.ocrContextMode == .off)       // 預設即關閉
+    c.hotkeyPressed(at: 10.0)
+    #expect(c.ocrTask == nil)
+    #expect(ocrCalls == 0)
 }
 
 @MainActor

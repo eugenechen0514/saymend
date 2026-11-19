@@ -78,18 +78,62 @@ func keychainStoreRoundTrip() throws {
     #expect(s.styleRulesOverride == nil)
     #expect(s.historyEnabled)
     #expect(s.historyRetentionDays == 30)
-    #expect(!s.ocrContextEnabled)          // OCR 預設關（opt-in）
+    #expect(s.ocrContextMode == .off)      // OCR 預設關（opt-in）
     s.customSystemPrompt = "簽名 --E"
     s.styleRulesOverride = "半形標點"
     s.historyEnabled = false
     s.historyRetentionDays = 7
-    s.ocrContextEnabled = true
+    s.ocrContextMode = .always
     let reloaded = AppSettings(defaults: UserDefaults(suiteName: suite)!, secrets: InMemorySecretStore())
     #expect(reloaded.customSystemPrompt == "簽名 --E")
     #expect(reloaded.styleRulesOverride == "半形標點")
     #expect(!reloaded.historyEnabled)
     #expect(reloaded.historyRetentionDays == 7)
-    #expect(reloaded.ocrContextEnabled)    // 開啟後持久化
+    #expect(reloaded.ocrContextMode == .always)   // 選擇後持久化
+}
+
+/// OCR 三段式模式：key 字面值是 persistence 契約，測試釘死；舊版布林開關要能遷移。
+@Test func ocrContextModeMigratesLegacyToggleAndPersists() {
+    // 舊版開啟（true）＝行為相同的「僅備援」
+    let (a, da) = freshSettings()
+    da.set(true, forKey: "ocrContextEnabled")
+    #expect(a.ocrContextMode == .fallback)
+
+    // 舊版明確關閉（false）＝關閉
+    let (b, db) = freshSettings()
+    db.set(false, forKey: "ocrContextEnabled")
+    #expect(b.ocrContextMode == .off)
+
+    // 新 key 一旦寫入就以新 key 為準，舊 key 不再影響
+    let (c, dc) = freshSettings()
+    dc.set(true, forKey: "ocrContextEnabled")
+    c.ocrContextMode = .off
+    #expect(c.ocrContextMode == .off)
+    #expect(dc.string(forKey: "ocrContextMode") == "off")
+    c.ocrContextMode = .always
+    #expect(dc.string(forKey: "ocrContextMode") == "always")
+
+    // 新 key 存了無法辨識的值：退回舊 key 推導（不當成開啟）
+    let (e, de) = freshSettings()
+    de.set("bogus", forKey: "ocrContextMode")
+    #expect(e.ocrContextMode == .off)
+}
+
+@Test func ocrContextModeShouldCaptureMatrix() {
+    // 關閉：任何情況都不截
+    #expect(!OCRContextMode.off.shouldCapture(contextBefore: nil, contextAfter: nil, isSecure: false))
+    // 僅備援：兩邊都讀不到才截；任一邊讀得到就不截
+    #expect(OCRContextMode.fallback.shouldCapture(contextBefore: nil, contextAfter: nil, isSecure: false))
+    #expect(!OCRContextMode.fallback.shouldCapture(contextBefore: "前", contextAfter: nil, isSecure: false))
+    #expect(!OCRContextMode.fallback.shouldCapture(contextBefore: nil, contextAfter: "後", isSecure: false))
+    // 一律附加：讀得到也截
+    #expect(OCRContextMode.always.shouldCapture(contextBefore: "前", contextAfter: "後", isSecure: false))
+    #expect(OCRContextMode.always.shouldCapture(contextBefore: nil, contextAfter: nil, isSecure: false))
+    // 安全欄位：所有模式一律不截
+    for mode in OCRContextMode.allCases {
+        #expect(!mode.shouldCapture(contextBefore: nil, contextAfter: nil, isSecure: true))
+        #expect(!mode.shouldCapture(contextBefore: "前", contextAfter: "後", isSecure: true))
+    }
 }
 
 /// issue #46：Esc 退字的兩個設定。key 字面值是 persistence 契約，測試釘死。
