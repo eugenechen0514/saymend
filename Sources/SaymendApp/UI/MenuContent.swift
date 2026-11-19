@@ -32,7 +32,7 @@ struct MenuContent: View {
                 }
             }
         }
-        SettingsLink { Text("設定…") }
+        OpenSettingsButton(title: "設定…")
         #if DEBUG
         // 這顆會把測試字串打進當下聚焦的任何欄位，正式版不得出現在選單。
         // （「測試替換」已隨 issue #44 移除：沒有 session／AX 的臨時 coordinator 不再能做任何替換。）

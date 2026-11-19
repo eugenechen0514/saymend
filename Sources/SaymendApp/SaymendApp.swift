@@ -409,18 +409,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func allSelectableModes() -> [CoreMode] {
         PromptAssembler.builtinCoreModes + coreModeStore.allUserModes()
     }
-
-    /// 開啟設定視窗（規格 §4.3「管理模式…」）。
-    /// macOS 14+ 與更早版本的 selector 名稱不同；分頁定位由 SwiftUI 記憶上次選取的 tab 提供，
-    /// 無公開 API 可強制切到特定 tab——使用者首次需自行點「核心模式」分頁。
-    /// （此為 SwiftUI Settings scene 的已知限制，記入 §8。）
-    @MainActor
-    func openCoreModeSettings() {
-        if #available(macOS 14, *) {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        } else {
-            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-        }
-        NSApp.activate(ignoringOtherApps: true)
-    }
 }
