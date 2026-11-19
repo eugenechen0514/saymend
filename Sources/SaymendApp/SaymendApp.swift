@@ -36,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// 的 MenuBarExtra 內容在「使用者真的改了模式」時重建一次（而非靠 0.25s tick 狂重建
     /// ——那正是子選單閃退的成因），使勾勾反映最新的解析結果。
     @Published private(set) var coreModeMenuToken = 0
+    /// 選單「最近救援」（issue #71）：只在救援發生時更新一次，不隨 tick 重建選單（理由同上）。
+    @Published private(set) var recentRescues: [ClipboardChannel.RecentRescue] = []
 
     private(set) var controller: DictationController!
     private let hud = HUDWindowController()
@@ -113,6 +115,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// 設定頁輪詢用：目前選定模型上次載入花了多久（issue #17）。
     func whisperLocalLastLoad() async -> CompletedLoad? {
         await whisperLocalEngine.lastLoad()
+    }
+
+    /// 選單「最近救援」點選（issue #71）：把那一輪的救援全文複製回剪貼簿。
+    /// 不比照歷史分頁先確認「會蓋掉剪貼簿裡的救援」：那份救援自己也在這個清單裡，蓋掉了還能再點回來。
+    func copyRecentRescue(_ rescue: ClipboardChannel.RecentRescue) {
+        ClipboardChannel.general.copyForUser(rescue.text)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -236,10 +244,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             intent: intentService,
             hud: arbitratedHUD,
             settings: settings,
-            clipboardRescue: { text, round in
+            clipboardRescue: { [weak self] text, round in
                 // 鐵律最後手段：原文進剪貼簿。走 ClipboardChannel（issue #42）：撞上在途 paste 先等它收尾，
                 // 落地後 paste 的還原不會再把它洗掉。round＝Core 給的 session 世代，只有同一輪才串接。
-                ClipboardChannel.general.rescue(text, round: round)
+                // 回傳值（issue #71）讓 Core 在覆寫上一輪救援時於提示註明；選單的最近救援同步更新。
+                let outcome = ClipboardChannel.general.rescue(text, round: round)
+                self?.recentRescues = ClipboardChannel.general.recentRescues
+                return outcome
             },
             fieldReader: axReader,
             feedback: feedbackCoordinator,

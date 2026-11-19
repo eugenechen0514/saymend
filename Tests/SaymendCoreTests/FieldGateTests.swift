@@ -63,12 +63,12 @@ import Testing
     }
 
     /// 跨 App：detail 要能事後判讀「從哪個 App 換到哪個 App」。
-    @Test func focusMovedToAnotherAppRecordsCrossAppDetail() {
+    @Test(arguments: [false, true]) func focusMovedToAnotherAppRecordsCrossAppDetail(earlierRescueInClipboard: Bool) {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
         env.addField("B", text: "", bundleID: "com.tinyspeck.slackmacgap")
         let history = FakeHistory()
-        let clipboard = ClipboardSpy()
+        let clipboard = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
         let (c, _, hud) = makeStatefulController(env: env, clipboard: clipboard, history: history)
         c.hotkeyPressed(at: 10.0)
         c.handleTranscript(.finalized("第一句"), at: 10.5)
@@ -78,8 +78,8 @@ import Testing
                 == "fieldChanged：crossApp:com.foo.app→com.tinyspeck.slackmacgap")
         #expect(env.text(in: "B") == "", "跨 App 更不能寫")
         #expect(clipboard.texts == ["第二句"], "內容不得遺失")
-        #expect(notices(hud) == [DictationController.fieldChangedNotice])
-        #expect(hud.rescueNotices == [DictationController.fieldChangedNotice], "#61：救援出口走 presentRescueNotice")
+        #expect(notices(hud) == [rescueNotice(DictationController.fieldChangedNotice, earlierRescueInClipboard)])
+        #expect(hud.rescueNotices == [rescueNotice(DictationController.fieldChangedNotice, earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
     }
 
     /// 焦點沒動：零診斷事件（誤判率的分母乾不乾淨全看這條）。

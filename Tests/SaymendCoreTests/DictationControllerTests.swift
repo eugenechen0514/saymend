@@ -668,11 +668,11 @@ import Testing
 }
 
 @MainActor
-@Test func fallbackPathSelectionPutsCommandRawInClipboard() async {
+@Test(arguments: [false, true]) func fallbackPathSelectionPutsCommandRawInClipboard(earlierRescueInClipboard: Bool) async {
     // selection degraded：既有行為（clipboardRescue(commandRaw)），本 task 驗證未被破壞
     let polisher = GatedIntentService()
     polisher.outcome = .degraded(reason: "測試降級")
-    let clip = ClipboardSpy()
+    let clip = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let reader = FakeFieldReader()
     reader.context = selectionField("既有選取", location: 0)
     let (c, _, _, _, _, hud) = makeController(polisher: polisher, clipboard: clip, fieldReader: reader)
@@ -685,7 +685,7 @@ import Testing
 
     #expect(clip.texts == ["改正式一點"])          // 指令話語進剪貼簿
     #expect(hud.states.contains(where: { if case .notice(let s) = $0 { return s.contains("轉錄已入剪貼簿") }; return false }))
-    #expect(hud.rescueNotices == ["未替換（測試降級），轉錄已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(hud.rescueNotices == [rescueNotice("未替換（測試降級），轉錄已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
 }
 
 @MainActor
@@ -1371,14 +1371,14 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 }
 
 @MainActor
-@Test func selectionChangedAbandonsToClipboardAndArchives() async {
+@Test(arguments: [false, true]) func selectionChangedAbandonsToClipboardAndArchives(earlierRescueInClipboard: Bool) async {
     let intent = GatedIntentService()
     intent.outcome = .editedSession("結果文字")
     let ax = FakeRangeReplacer()
     ax.verifyResult = .mismatch                    // 使用者點了別處，選取已變
     let reader = FakeFieldReader()
     reader.context = selectionField("原選取", location: 2)
-    let spy = ClipboardSpy()
+    let spy = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
     c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("改一下"), at: 11.0)
@@ -1387,21 +1387,21 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(spy.texts == ["結果文字"])              // 結果進剪貼簿供貼上（規格 §3.6）
     #expect(key.ops.isEmpty)                       // 欄位分毫未動
     #expect(!c.ledger.isActive)                    // session 結束
-    #expect(hud.states.contains(.notice("選取已變動，結果已入剪貼簿")))
-    #expect(hud.rescueNotices == ["選取已變動，結果已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(hud.states.contains(.notice(rescueNotice("選取已變動，結果已入剪貼簿", earlierRescueInClipboard))))
+    #expect(hud.rescueNotices == [rescueNotice("選取已變動，結果已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
 }
 
 /// #21 裁定 2／#45：選取即目標在替換當下無法用 AX 確認選取（熱鍵按下時讀得到、替換時讀不到＝焦點已跑）——
 /// 這是唯一無法用驗證救的刪字路徑。舊版用 OS「打字覆蓋選取」盲寫再凍結，可能把字打進錯的地方；
 /// 改為不對欄位發任何事件、內容進剪貼簿（#42 起不會被 paste 還原洗掉）、提示、封存。
 @MainActor
-@Test func selectionWithoutAXRescuesToClipboardWithoutTouchingTheField() async {
+@Test(arguments: [false, true]) func selectionWithoutAXRescuesToClipboardWithoutTouchingTheField(earlierRescueInClipboard: Bool) async {
     let intent = GatedIntentService()
     intent.outcome = .newContent("替換文。")
     let reader = FakeFieldReader()
     reader.context = selectionField("舊字", location: 0)
     let paste = RecordingInserter()
-    let clip = ClipboardSpy()
+    let clip = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let history = FakeHistory()
     let (c, _, _, key, _, hud) = makeController(polisher: intent, pasteInserter: paste, rangeReplacer: nil,
                                                clipboard: clip, fieldReader: reader, history: history)
@@ -1412,22 +1412,22 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(key.ops.isEmpty && paste.ops.isEmpty, "不得對欄位發任何事件；實際 key=\(key.ops) paste=\(paste.ops)")
     #expect(clip.texts == ["替換文。"])
     #expect(!c.ledger.isActive, "什麼都沒寫進欄位，session 沒有存在的理由")
-    #expect(hud.states.contains(.notice("無法替換選取，內容已入剪貼簿")))
-    #expect(hud.rescueNotices == ["無法替換選取，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(hud.states.contains(.notice(rescueNotice("無法替換選取，內容已入剪貼簿", earlierRescueInClipboard))))
+    #expect(hud.rescueNotices == [rescueNotice("無法替換選取，內容已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
     let skipped = history.exchanges.filter { $0.outcomeKind == "insertSkipped" }
     #expect(skipped.contains { $0.outcomeText == "unsupported" })
 }
 
 /// 同一件事從欄位實況看：選取原文一字不動、沒有任何 AX 寫入。
 @MainActor
-@Test func selectionWithoutAXLeavesTheSelectedTextInPlace() async {
+@Test(arguments: [false, true]) func selectionWithoutAXLeavesTheSelectedTextInPlace(earlierRescueInClipboard: Bool) async {
     let env = StatefulFieldEnvironment()
     env.axCapable = false
     env.addField("f", text: "前文舊字後文")
     env.select(in: "f", location: 2, length: 2)                  // 「舊字」
     let intent = GatedIntentService()
     intent.outcome = .newContent("新字")
-    let clip = ClipboardSpy()
+    let clip = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let (c, _, hud) = makeStatefulController(env: env, polisher: intent, clipboard: clip)
     c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("改成新字"), at: 11.0)
@@ -1436,8 +1436,8 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(env.text(in: "f") == "前文舊字後文", "舊版會用打字蓋選取寫成「前文新字後文」；實際 \(env.text(in: "f"))")
     #expect(env.axWrites.isEmpty)
     #expect(clip.texts == ["新字"])
-    #expect(hud.states.contains(.notice("無法替換選取，內容已入剪貼簿")))
-    #expect(hud.rescueNotices == ["無法替換選取，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(hud.states.contains(.notice(rescueNotice("無法替換選取，內容已入剪貼簿", earlierRescueInClipboard))))
+    #expect(hud.rescueNotices == [rescueNotice("無法替換選取，內容已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
 }
 
 /// 同世代第二句的緩衝 outcome：第一句已把內容救進剪貼簿並封存，第二句回來時不得再救一次——
@@ -1596,14 +1596,14 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 }
 
 @MainActor
-@Test func freezeDuringSelectionPendingAbandonsToClipboard() async {
+@Test(arguments: [false, true]) func freezeDuringSelectionPendingAbandonsToClipboard(earlierRescueInClipboard: Bool) async {
     let intent = GatedIntentService()
     intent.gatedRaws = ["改正式一點"]
     intent.outcomeByRaw = ["改正式一點": .editedSession("正式版")]
     let ax = FakeRangeReplacer()
     let reader = FakeFieldReader()
     reader.context = selectionField("原文字", location: 0)
-    let spy = ClipboardSpy()
+    let spy = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
     c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("改正式一點"), at: 11.0)
@@ -1613,11 +1613,11 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     #expect(ax.calls.isEmpty && key.ops.isEmpty)    // 凍結後不得替換（選取完整性不明）
     #expect(spy.texts == ["正式版"])
-    #expect(hud.rescueNotices == ["選取已變動，結果已入剪貼簿"], "#61：凍結時放棄替換同樣走救援提示")
+    #expect(hud.rescueNotices == [rescueNotice("選取已變動，結果已入剪貼簿", earlierRescueInClipboard)], "#61：凍結時放棄替換同樣走救援提示")
 }
 
 @MainActor
-@Test func frozenAfterSelectionReplacedRescuesBufferedNewContentToClipboard() async {
+@Test(arguments: [false, true]) func frozenAfterSelectionReplacedRescuesBufferedNewContentToClipboard(earlierRescueInClipboard: Bool) async {
     // Freeze-race（終審 finding）：首句替換選取成功後轉 .tail、帳本仍活著（未凍結）；
     // 第二句在首句 LLM 在途時就被緩衝（wasBuffered=true）。首句落地後、第二句 LLM 尚未回來時
     // 使用者手動活動觸發凍結——第二句的緩衝 .newContent 落地必須守 frozen（規格 §3.4「文字定稿、不再改寫」），
@@ -1629,7 +1629,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     let ax = FakeRangeReplacer()
     let reader = FakeFieldReader()
     reader.context = selectionField("原文字", location: 4)
-    let spy = ClipboardSpy()
+    let spy = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
     c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("改正式一點"), at: 11.0)
@@ -1646,14 +1646,14 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     #expect(key.ops.isEmpty)                        // 凍結後緩衝句不得合成鍵入到欄位（write-after-hands-off）
     #expect(spy.texts == ["補充內容。"])            // 改走剪貼簿急救
     #expect(c.ledger.sessionText == "正式版")       // dispatch 未改動已定稿文字
-    #expect(hud.states.contains(.notice("已凍結，內容已入剪貼簿")))
-    #expect(hud.rescueNotices == ["已凍結，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(hud.states.contains(.notice(rescueNotice("已凍結，內容已入剪貼簿", earlierRescueInClipboard))))
+    #expect(hud.rescueNotices == [rescueNotice("已凍結，內容已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
 }
 
 /// 緩衝句 `insertDetached` 拋錯（緩衝句的 catch 出口）：內容救進剪貼簿、以救援提示呈現（issue #61）。
 /// 時序骨架比照上一條：首句替換選取、第二句緩衝，首句落地後才放行第二句——這時讓主 inserter 與備援都失敗。
 @MainActor
-@Test func bufferedNewContentInsertFailureRescuesWithRescueNotice() async {
+@Test(arguments: [false, true]) func bufferedNewContentInsertFailureRescuesWithRescueNotice(earlierRescueInClipboard: Bool) async {
     let intent = GatedIntentService()
     intent.gatedRaws = ["第二句"]
     intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
@@ -1662,7 +1662,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     let reader = FakeFieldReader()
     reader.context = selectionField("原文字", location: 4)
     let paste = RecordingInserter()
-    let spy = ClipboardSpy()
+    let spy = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let (c, _, _, key, _, hud) = makeController(polisher: intent, pasteInserter: paste, rangeReplacer: ax,
                                                 clipboard: spy, fieldReader: reader)
     c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
@@ -1679,13 +1679,13 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     #expect(key.ops.isEmpty && paste.ops.isEmpty, "前提：一個字都沒進欄位")
     #expect(spy.texts == ["補充內容。"], "內容救進剪貼簿")
-    #expect(hud.rescueNotices == ["插入失敗，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(hud.rescueNotices == [rescueNotice("插入失敗，內容已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
     #expect(c.ledger.sessionText == "正式版", "沒落地就不得進帳本")
 }
 
 /// 緩衝句 `.degraded`：緩衝句從未上屏，降級＝轉錄原文救進剪貼簿、以救援提示呈現（issue #61）。
 @MainActor
-@Test func bufferedDegradedRescuesTheTranscriptWithRescueNotice() async {
+@Test(arguments: [false, true]) func bufferedDegradedRescuesTheTranscriptWithRescueNotice(earlierRescueInClipboard: Bool) async {
     let intent = GatedIntentService()
     intent.gatedRaws = ["第二句"]
     intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
@@ -1693,7 +1693,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     let ax = FakeRangeReplacer()
     let reader = FakeFieldReader()
     reader.context = selectionField("原文字", location: 4)
-    let spy = ClipboardSpy()
+    let spy = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let (c, _, _, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax, clipboard: spy, fieldReader: reader)
     c.hotkeyPressed(at: 10.0); c.hotkeyReleased(at: 10.1)
     c.handleTranscript(.finalized("改正式一點"), at: 11.0)
@@ -1706,7 +1706,7 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     intent.release()
     await c.lastIntentTask?.value
     #expect(spy.texts == ["第二句"], "降級：轉錄原文救進剪貼簿")
-    #expect(hud.rescueNotices == ["未處理（逾時 5 秒），轉錄已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(hud.rescueNotices == [rescueNotice("未處理（逾時 5 秒），轉錄已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
     #expect(key.ops.isEmpty, "緩衝句從未上屏，降級也不得補打")
 }
 
@@ -1733,14 +1733,14 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 /// 實機驗收缺口（M3 驗收項 4）：說完指令→放開→進延續窗→點別處（延續窗活動＝立即封存）
 /// →LLM 此刻才回來。封存後的緩衝 outcome 不得無聲蒸發——原文從未上屏，丟棄＝使用者白說話。
 @MainActor
-@Test func selectionOutcomeAfterLingerArchiveRescuesToClipboard() async {
+@Test(arguments: [false, true]) func selectionOutcomeAfterLingerArchiveRescuesToClipboard(earlierRescueInClipboard: Bool) async {
     let intent = GatedIntentService()
     intent.gatedRaws = ["改正式一點"]
     intent.outcomeByRaw = ["改正式一點": .editedSession("正式版")]
     let ax = FakeRangeReplacer()
     let reader = FakeFieldReader()
     reader.context = selectionField("原文字", location: 4)
-    let spy = ClipboardSpy()
+    let spy = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let (c, _, asr, key, _, hud) = makeController(polisher: intent, rangeReplacer: ax,
                                                   clipboard: spy, fieldReader: reader)
     c.hotkeyPressed(at: 10.0)
@@ -1755,8 +1755,8 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
     await c.lastIntentTask?.value
     #expect(spy.texts == ["正式版"])                 // 結果救進剪貼簿（規格 §3.6）
     #expect(key.ops.isEmpty)                        // 欄位分毫未動
-    #expect(hud.states.contains(.notice("選取已變動，結果已入剪貼簿")))
-    #expect(hud.rescueNotices == ["選取已變動，結果已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(hud.states.contains(.notice(rescueNotice("選取已變動，結果已入剪貼簿", earlierRescueInClipboard))))
+    #expect(hud.rescueNotices == [rescueNotice("選取已變動，結果已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
     #expect(ax.calls.isEmpty)                       // 封存後不得再碰選取
 }
 
@@ -2249,12 +2249,12 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 }
 
 @MainActor
-@Test func frozenFinalizedRescuesToClipboardWithoutInsertingIntoFocusedApp() async {
+@Test(arguments: [false, true]) func frozenFinalizedRescuesToClipboardWithoutInsertingIntoFocusedApp(earlierRescueInClipboard: Bool) async {
     // 合併阻擋級回歸（獨立 code review HIGH finding）：Whisper 遠端批次上傳的 .finishing 窗口長達 timeout，
     // 期間切 App 觸發 freeze（freeze 不改 internalPhase），稍後到達的 .finalized 先前會 insertFinalized
     // 把整段辨識打進「目前聚焦的別 App」。raw 插入路徑須守 !ledger.frozen，比照其他每條落地路徑。
     let polisher = GatedIntentService()
-    let spy = ClipboardSpy()
+    let spy = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let (c, audio, _, key, _, hud) = makeController(polisher: polisher, clipboard: spy)
     c.hotkeyPressed(at: 10.0)
     c.hotkeyReleased(at: 10.5)                          // 非 tap（>0.3s）→ endListening → phase .finishing
@@ -2266,8 +2266,8 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 
     #expect(key.ops.isEmpty)                            // 核心：不得合成鍵入／貼上到聚焦的別 App
     #expect(spy.texts == ["整段遠端辨識結果"])           // 不讓使用者白說話：改走剪貼簿急救
-    #expect(hud.states.last == .notice("已凍結，內容已入剪貼簿"))
-    #expect(hud.rescueNotices == ["已凍結，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(hud.states.last == .notice(rescueNotice("已凍結，內容已入剪貼簿", earlierRescueInClipboard)))
+    #expect(hud.rescueNotices == [rescueNotice("已凍結，內容已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
 
     // 不特別 hardReset：segmenter 殘留交由下游守衛統一處理——隨後的 asrStreamEnded 先 flush 出這句
     // 進 LLM，但 frozen 使 asrStreamEnded 立即封存（isActive→false），dispatch 被相位守衛丟棄。
@@ -2384,19 +2384,19 @@ private func selectionField(_ text: String, location: Int) -> FieldContext {
 /// `.hidden`（`archiveSession`）。本測試釘的是「有以救援提示發出正確文案」；「使用者最終看得到」
 /// 由 arbiter 的最短顯示保證負責，端到端時序見 `RescueNoticeDwellTests`（issue #61）。
 @MainActor
-@Test func rawFinalizedInsertFailureRescuesWholeUtteranceToClipboard() {
+@Test(arguments: [false, true]) func rawFinalizedInsertFailureRescuesWholeUtteranceToClipboard(earlierRescueInClipboard: Bool) {
     let env = StatefulFieldEnvironment()
     env.addField("A", text: "PREVIOUS")
     env.failInsertsRemaining = 2                    // keystroke 與 paste 都失敗
-    let spy = ClipboardSpy()
+    let spy = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
     let (c, _, hud) = makeStatefulController(env: env, clipboard: spy)
     c.hotkeyPressed(at: 10.0)
     c.handleTranscript(.finalized("使用者說了一整句話"), at: 10.5)
 
     #expect(env.text(in: "A") == "PREVIOUS", "插入失敗＝一個字都沒進欄位")
     #expect(spy.texts == ["使用者說了一整句話"], "不讓使用者白說話：整句救進剪貼簿")
-    #expect(hud.states.last == .notice("插入失敗，內容已入剪貼簿"), "文案須與緩衝句插入失敗那條逐字一致")
-    #expect(hud.rescueNotices == ["插入失敗，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+    #expect(hud.states.last == .notice(rescueNotice("插入失敗，內容已入剪貼簿", earlierRescueInClipboard)), "文案須與緩衝句插入失敗那條逐字一致")
+    #expect(hud.rescueNotices == [rescueNotice("插入失敗，內容已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
 }
 
 // MARK: - 剪貼簿救援的 round token（issue #42／PR #56 review 修訂）

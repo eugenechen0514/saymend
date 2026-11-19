@@ -44,11 +44,11 @@ import Testing
     /// controller 的密碼守衛閘門答完「焦點還在 A」之後、`insertFinalized` 真的寫下去之前，
     /// 外部把焦點程式化搬到 B。**寫入前的第二道閘門必須擋下來**——這正是把閘門下沉到
     /// coordinator（而不是留在 controller）唯一的理由，controller 那一道對這個窗口無能為力。
-    @Test func focusMovedInsideTheNarrowWindowSkipsTheWriteEntirely() {
+    @Test(arguments: [false, true]) func focusMovedInsideTheNarrowWindowSkipsTheWriteEntirely(earlierRescueInClipboard: Bool) {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
         env.addField("B", text: "", bundleID: "com.foo.app")
-        let clipboard = ClipboardSpy()
+        let clipboard = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
         let history = FakeHistory()
         let (c, _, hud) = makeStatefulController(env: env, clipboard: clipboard, history: history)
         c.hotkeyPressed(at: 10.0)                                  // session 起在 A
@@ -62,8 +62,8 @@ import Testing
         #expect(env.text(in: "A") == "", "閘門是不寫，不是改寫別處——A 不會被補上這句")
         #expect(env.text(in: "B") == "", "別的欄位一個字都不能進")
         #expect(clipboard.texts == ["機密內容"], "內容不得遺失：進剪貼簿")
-        #expect(lastNotice(hud) == DictationController.fieldChangedNotice)
-        #expect(hud.rescueNotices == [DictationController.fieldChangedNotice], "#61：救援出口走 presentRescueNotice")
+        #expect(lastNotice(hud) == rescueNotice(DictationController.fieldChangedNotice, earlierRescueInClipboard))
+        #expect(hud.rescueNotices == [rescueNotice(DictationController.fieldChangedNotice, earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
         #expect(skipEvents(history).count == 1, "恰一列診斷——閘門下沉後不得再有 shadow 那列重複計數")
         #expect(skipEvents(history).first?.outcomeText == "fieldChanged：sameApp:com.foo.app")
     }
@@ -331,7 +331,7 @@ import Testing
     /// 這條路徑上焦點一樣可能已經換掉——它與 finalized 路徑共用 `insertWithFallback`，
     /// 所以閘門也蓋得到，比照該處既有的失敗路徑救進剪貼簿並提示。
     /// 這句話的內容**就是** LLM outcome 本身，救完就結束，不需要（也不會）再丟棄一次 outcome。
-    @Test func aBufferedUtteranceLandingIntoAChangedFieldIsRescuedInstead() async {
+    @Test(arguments: [false, true]) func aBufferedUtteranceLandingIntoAChangedFieldIsRescuedInstead(earlierRescueInClipboard: Bool) async {
         let intent = GatedIntentService()
         intent.gatedRaws = ["第二句"]                     // 只卡第二句：首句立即回、先把選取替換掉
         intent.outcomeByRaw = ["改正式一點": .editedSession("正式版"),
@@ -341,7 +341,7 @@ import Testing
                                       fieldIdentity: FieldIdentity(token: 1),
                                       selectedRange: .init(location: 4, length: 3),
                                       selectedText: "原文字")
-        let clipboard = ClipboardSpy()
+        let clipboard = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
         let history = FakeHistory()
         let (c, _, _, key, _, hud) = makeController(polisher: intent, clipboard: clipboard,
                                                     fieldReader: reader, history: history)
@@ -363,8 +363,8 @@ import Testing
 
         #expect(key.ops == opsBeforeLanding, "緩衝句不得合成鍵入到別的欄位")
         #expect(clipboard.texts == ["補充內容。"], "改走剪貼簿急救")
-        #expect(hud.states.contains(.notice(DictationController.fieldChangedNotice)))
-        #expect(hud.rescueNotices == [DictationController.fieldChangedNotice], "#61：救援出口走 presentRescueNotice")
+        #expect(hud.states.contains(.notice(rescueNotice(DictationController.fieldChangedNotice, earlierRescueInClipboard))))
+        #expect(hud.rescueNotices == [rescueNotice(DictationController.fieldChangedNotice, earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
         #expect(c.ledger.sessionText == "正式版", "沒落地就不得進帳本")
         #expect(history.exchanges.contains { $0.outcomeKind == "insertSkipped"
                 && $0.outcomeText == "fieldChanged：crossApp:?→com.other.app" })
@@ -806,10 +806,10 @@ import Testing
     /// 斷言用**整份等於**（同 `aFieldChangedSkipStillRecordsTheASRDiagnostic`）：同時釘住
     /// 「凍結那句有記」與「沒有多記」。界線是「**可能是密碼欄**才不記」，不是「被擋就不記」——
     /// 凍結不是密碼欄，樣本照留。
-    @Test func aFrozenSkipStillRecordsTheASRDiagnostic() {
+    @Test(arguments: [false, true]) func aFrozenSkipStillRecordsTheASRDiagnostic(earlierRescueInClipboard: Bool) {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "", bundleID: "com.foo.app")
-        let clipboard = ClipboardSpy()
+        let clipboard = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
         let history = FakeHistory()
         let (c, _, hud) = makeStatefulController(env: env, clipboard: clipboard, history: history)
         let quality = TranscriptQuality(minAvgLogprob: -0.25, maxCompressionRatio: 1.125,
@@ -822,8 +822,8 @@ import Testing
 
         #expect(env.text(in: "A") == "第一句", "前提：凍結後那句不得上屏")
         #expect(clipboard.texts == ["第二句"], "前提：走的是凍結終點（救剪貼簿）")
-        #expect(lastNotice(hud) == "已凍結，內容已入剪貼簿")
-        #expect(hud.rescueNotices == ["已凍結，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+        #expect(lastNotice(hud) == rescueNotice("已凍結，內容已入剪貼簿", earlierRescueInClipboard))
+        #expect(hud.rescueNotices == [rescueNotice("已凍結，內容已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
         #expect(history.diagnostics.map(\.finalizedText) == ["第一句", "第二句"],
                 "凍結不是密碼欄，診斷樣本照留；診斷搬家不得順手把這格弄丟")
         #expect(skipEvents(history).first?.outcomeText == "frozen", "分類仍是 frozen")
@@ -861,11 +861,11 @@ import Testing
     ///
     /// 與上一條同型的空白：刪掉這個終點的呼叫全套照樣全綠。
     /// 這格特別可惜——插入失敗本身就是異常，正是事後查「當時到底聽到什麼」最需要樣本的時刻。
-    @Test func anInsertFailureStillRecordsTheASRDiagnostic() {
+    @Test(arguments: [false, true]) func anInsertFailureStillRecordsTheASRDiagnostic(earlierRescueInClipboard: Bool) {
         let env = StatefulFieldEnvironment()
         env.addField("A", text: "PREVIOUS", bundleID: "com.foo.app")
         env.failInsertsRemaining = 2                    // keystroke 與 paste 都失敗 → 走 catch 終點
-        let clipboard = ClipboardSpy()
+        let clipboard = ClipboardSpy(earlierRescueInClipboard: earlierRescueInClipboard)
         let history = FakeHistory()
         let (c, _, hud) = makeStatefulController(env: env, clipboard: clipboard, history: history)
         let quality = TranscriptQuality(minAvgLogprob: -0.25, maxCompressionRatio: 1.125,
@@ -875,8 +875,8 @@ import Testing
 
         #expect(env.text(in: "A") == "PREVIOUS", "前提：插入失敗＝一個字都沒進欄位（#38 原子契約）")
         #expect(clipboard.texts == ["整句話"], "前提：走的是插入失敗終點（救剪貼簿）")
-        #expect(lastNotice(hud) == "插入失敗，內容已入剪貼簿")
-        #expect(hud.rescueNotices == ["插入失敗，內容已入剪貼簿"], "#61：救援出口走 presentRescueNotice")
+        #expect(lastNotice(hud) == rescueNotice("插入失敗，內容已入剪貼簿", earlierRescueInClipboard))
+        #expect(hud.rescueNotices == [rescueNotice("插入失敗，內容已入剪貼簿", earlierRescueInClipboard)], "#61：救援出口走 presentRescueNotice")
         #expect(history.diagnostics.map(\.finalizedText) == ["整句話"],
                 "插入失敗不是密碼欄：診斷樣本照留")
     }
