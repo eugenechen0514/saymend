@@ -223,9 +223,11 @@ public final class DictationController {
     static let fieldChangedNotice = "欄位已切換，內容已入剪貼簿"
 
     /// issue #71：這一輪的救援覆寫掉了上一輪還留在剪貼簿裡的救援時，接在救援提示後面。
-    /// 只說「已被取代」，不說「你還沒貼上」——Cmd+V 不推進 changeCount，我們不知道使用者貼過沒有。
+    /// 只說「移到選單」，不說「你還沒貼上」——Cmd+V 不推進 changeCount，我們不知道使用者貼過沒有。
     /// 找回途徑是選單列的「最近救援」（App 端只放在記憶體、最多 5 筆）。
-    static let replacedEarlierRescueSuffix = "（上一段救援已被取代，可從選單「最近救援」找回）"
+    /// 刻意短（15 字）：救援提示只停 2.5 秒（至少 2 秒），接在 9～20 字的提示後面，長了讀不完；
+    /// 要讓人記住的只有選單的名字。
+    static let replacedEarlierRescueSuffix = "（上一段已移到選單「最近救援」）"
     /// issue #71：救援寫不進剪貼簿時，把提示裡的「已入剪貼簿」換成這句（每則救援提示都以「已入剪貼簿」收尾）。
     /// 這是 #41 起就存在的不實提示：寫入失敗時剪貼簿已放回原本的內容，使用者照提示貼上會拿到別的東西。
     static let rescueNotWrittenPhrase = "未能寫入剪貼簿（可從選單「最近救援」找回）"

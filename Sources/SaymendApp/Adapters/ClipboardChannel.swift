@@ -152,8 +152,9 @@ final class ClipboardChannel {
         settle()
         let previous = landedRescueOfRound(round)
         let accumulated = (previous ?? "") + text
-        // 會被這次覆寫的「別一輪」救援：settle 之後才讀（理由同 `landedRescueOfRound`）
-        let displacing = landedRescue.map { $0.round != round } == true && rescueStillInClipboard != nil
+        // 會被這次覆寫的「別一輪」救援：settle 之後才讀（理由同 `landedRescueOfRound`）。
+        // 不必比 round：同一輪且仍在剪貼簿時 `previous` 非 nil，下面先回 `.appended`、用不到這個值。
+        let displacing = rescueStillInClipboard != nil
         // 沒寫成：剪貼簿已放回累積前的舊救援（連同它的 round），不能宣稱新的全文在剪貼簿裡，也沒有東西被取代。
         // 照樣記進最近救援——這段內容此刻在任何地方都沒有，選單是唯一能找回它的地方；記成獨立的一筆，
         // 不併進那條累積鏈（鏈的下一次成功救援會以剪貼簿裡的舊內容為底，併進去就會把這段抹掉）。

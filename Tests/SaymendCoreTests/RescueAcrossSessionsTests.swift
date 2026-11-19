@@ -72,7 +72,7 @@ import Testing
         #expect(spy.texts == ["第一段", "第二段"], "前提：兩段都救進剪貼簿、分屬不同輪")
         #expect(Set(spy.rounds).count == 2)
         #expect(hud.rescueNotices == [fieldChanged, notice(for: cause) + suffix],
-                "第一段照常；第二段註明上一段已被取代，並指出找回途徑")
+                "第一段照常；第二段註明上一段已移到選單的「最近救援」")
     }
 
     /// 使用者在兩段之間自己複製過別的東西：上一段已不在剪貼簿（取回或放棄），沒有東西被取代，不註明
@@ -152,7 +152,7 @@ import Testing
         env.focus("B")
         c.handleTranscript(.finalized("一"), at: 10.5)
         #expect(hud.rescueNotices == ["欄位已切換，內容未能寫入剪貼簿（可從選單「最近救援」找回）"],
-                "沒有東西被取代，所以也不接「上一段已被取代」")
+                "沒有東西被取代，所以也不接「上一段已移到選單」")
         c.handleTranscript(.finalized("二"), at: 11.0)
         #expect(hud.rescueNotices.last == fieldChanged + suffix, "下一筆寫成了：照常判斷（這次確實取代了上一輪）")
     }
