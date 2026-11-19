@@ -64,6 +64,8 @@ final class ClipboardChannel {
     private let pasteboard: any SystemPasteboard
     private let settleDelay: TimeInterval
     private let timer: any ClipboardTimer
+    /// 最近救援的時間戳來源（測試可注入）
+    private let now: () -> Date
     private var activeLease: Lease?
     private var nextLeaseID = 0
     /// 最後一次落地的救援、它屬於哪一輪（round），與當時的 changeCount：
@@ -71,10 +73,11 @@ final class ClipboardChannel {
     private var landedRescue: (text: String, round: Int, changeCount: Int)?
 
     init(pasteboard: any SystemPasteboard, settleDelay: TimeInterval = 0.3,
-         timer: any ClipboardTimer = MainQueueClipboardTimer()) {
+         timer: any ClipboardTimer = MainQueueClipboardTimer(), now: @escaping () -> Date = Date.init) {
         self.pasteboard = pasteboard
         self.settleDelay = settleDelay
         self.timer = timer
+        self.now = now
     }
 
     /// 暫時寫入（paste）：保存 → clear → setString → body（送 Cmd+V）→ 安全窗後收尾還原。
@@ -134,6 +137,8 @@ final class ClipboardChannel {
     ///
     /// 代價（刻意取捨）：跨 session 不再串接＝新 session 的第一筆救援會**覆寫掉**上一個 session
     /// 還沒被取回的救援。兩害相權——黏在一起會讓使用者貼出他沒說過的內容，更糟。
+    /// issue #71 補上兩件事，讓這個覆寫不再是無聲的：回傳 `.replacedEarlierRescue`（Core 據此在提示後面註明），
+    /// 並把每一輪的救援記進 `recentRescues`（選單「最近救援」可以再複製回來）。
     ///
     /// 使用者**複製**過別的東西同樣會結束一輪：changeCount 前進、`rescueStillInClipboard` 變 nil。
     /// 但同一輪內的 Cmd+V 仍看不見：使用者逐句貼上時下一段照樣接上去，他再貼一次就會拿到重複的前段——
@@ -142,12 +147,42 @@ final class ClipboardChannel {
     /// `settle()` 必須在讀 `rescueStillInClipboard` **之前**（見 `rescueInClipboardBeforeWriting`）：
     /// paste 在途時剪貼簿是它寫的內容、changeCount 與 `landedRescue` 不符，先讀會判成「不是我方的」而丟掉前一段。
     /// 釘在 `accumulationWorksWhileAPasteIsStillInFlight`。
-    func rescue(_ text: String, round: Int) {
+    @discardableResult
+    func rescue(_ text: String, round: Int) -> ClipboardRescueOutcome {
         settle()
         let accumulated = (landedRescueOfRound(round) ?? "") + text
-        // 沒寫成：剪貼簿已放回累積前的舊救援（連同它的 round），不能宣稱新的全文在剪貼簿裡
-        guard overwrite(with: accumulated) else { return }
+        // 會被這次覆寫的「別一輪」救援：settle 之後才讀（理由同 `landedRescueOfRound`）
+        let displacing = landedRescue.map { $0.round != round } == true && rescueStillInClipboard != nil
+        // 寫不寫得進剪貼簿都記：寫不進去時這段內容在任何地方都沒有，選單是唯一能找回它的地方
+        recordRecentRescue(accumulated, round: round)
+        // 沒寫成：剪貼簿已放回累積前的舊救援（連同它的 round），不能宣稱新的全文在剪貼簿裡，也沒有東西被取代
+        guard overwrite(with: accumulated) else { return .landed }
         landedRescue = (accumulated, round, pasteboard.changeCount)
+        return displacing ? .replacedEarlierRescue : .landed
+    }
+
+    // MARK: - 最近救援（issue #71）
+
+    struct RecentRescue: Equatable {
+        let round: Int
+        let text: String
+        let at: Date
+    }
+
+    /// 選單「最近救援」顯示幾筆
+    static let recentRescueLimit = 5
+
+    /// 最近幾輪的救援全文，新的在前；同一輪累積時更新同一筆（內容是累積後的全文、時間是最後一次救援）。
+    /// **只放在記憶體**，結束 App 即清空：救援內容本來就只活在剪貼簿裡，這裡不把它落地到磁碟。
+    /// 密碼欄的內容不會出現在這裡——密碼欄路徑一律硬停、從不救援（#10／§5.3）。
+    private(set) var recentRescues: [RecentRescue] = []
+
+    private func recordRecentRescue(_ text: String, round: Int) {
+        recentRescues.removeAll { $0.round == round }
+        recentRescues.insert(RecentRescue(round: round, text: text, at: now()), at: 0)
+        if recentRescues.count > Self.recentRescueLimit {
+            recentRescues.removeLast(recentRescues.count - Self.recentRescueLimit)
+        }
     }
 
     /// 可以接上去的前一段：剪貼簿仍是我方上一份救援，**且**那份屬於同一輪。任一條不成立就回 nil＝覆寫。

@@ -102,7 +102,19 @@ final class ClipboardSpy {
     var texts: [String] { entries.map(\.text) }
     /// 要斷言 round 邊界的測試用（同 session 相同、跨 session 不同）。
     var rounds: [Int] { entries.map(\.round) }
-    func rescue(_ text: String, round: Int) { entries.append((text, round)) }
+    /// issue #71：照 App 端 `ClipboardChannel` 的語意回報——剪貼簿此刻仍是**別一輪**的救援（使用者沒複製過別的）
+    /// 而這次覆寫了它＝`.replacedEarlierRescue`。同一輪、或使用者已複製過別的東西＝`.landed`。
+    /// 真正的判定（changeCount、paste 在途）在 App 端的 `ClipboardChannelTests` 驗。
+    @discardableResult
+    func rescue(_ text: String, round: Int) -> ClipboardRescueOutcome {
+        let replaced = !userTookClipboard && entries.last.map { $0.round != round } == true
+        entries.append((text, round))
+        userTookClipboard = false
+        return replaced ? .replacedEarlierRescue : .landed
+    }
+    private var userTookClipboard = false
+    /// 使用者自己複製了別的東西（changeCount 前進）：上一份救援已不在剪貼簿，下一次救援不算取代
+    func userCopiedSomethingElse() { userTookClipboard = true }
 }
 
 final class FakeHUD: HUDPresenting {

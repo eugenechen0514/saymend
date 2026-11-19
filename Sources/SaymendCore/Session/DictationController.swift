@@ -55,8 +55,8 @@ public final class DictationController {
     /// @testable 可見：session 語系覆蓋等 M4 設定的斷言需直接讀取（規格 §4.5）
     let settings: AppSettings
     private var segmenter: UtteranceSegmenter
-    /// 鐵律最後手段：原文救不回時交給剪貼簿（app 端接 NSPasteboard）
-    private let clipboardRescue: ((String, Int) -> Void)?
+    /// 鐵律最後手段：原文救不回時交給剪貼簿（app 端接 NSPasteboard）。回報是否覆寫了上一輪的救援（issue #71）。
+    private let clipboardRescue: ((String, Int) -> ClipboardRescueOutcome)?
     /// 聚焦欄位快照：密碼欄位拒絕聽寫、session 起點取 AX 錨位（規格 §4.6／§5.3）
     private let fieldReader: (any FieldContextProviding)?
     /// 視覺回饋層（規格 §3.5）：Core 只發語意事件，App 端 FeedbackCoordinator 決定畫不畫、畫哪裡
@@ -103,6 +103,11 @@ public final class DictationController {
     /// 每個 generation 只救援一次剪貼簿：放棄路徑先救「替換結果」（最有價值），
     /// 之後同 generation 的緩衝句 outcome 不得覆蓋它（剪貼簿只有一格）。
     private var lastRescueGeneration: Int?
+    /// issue #71：最近一次救援用的 round，與「哪一輪覆寫過上一輪的救援」。兩者相等＝剛救的這一輪就是取代了別人的那一輪，
+    /// 它的每一則救援提示都帶上 `replacedEarlierRescueSuffix`（同一輪後續的救援提示若在 2 秒保護期內取代前一則，
+    /// 只在第一則說的話會被蓋掉）。刻意不隨 archive 清除：`abandonSelectionReplacement` 是「救援→封存→提示」。
+    private var lastRescueRound: Int?
+    private var rescueDisplacingRound: Int?
     /// 熱鍵按下當下的前後文窗口（LLM 語境；tail 與 selection 模式皆用）
     private var capturedContextBefore: String?
     private var capturedContextAfter: String?
@@ -148,7 +153,7 @@ public final class DictationController {
                 hud: any HUDPresenting,
                 settings: AppSettings,
                 segmenter: UtteranceSegmenter = UtteranceSegmenter(),
-                clipboardRescue: ((String, Int) -> Void)? = nil,
+                clipboardRescue: ((String, Int) -> ClipboardRescueOutcome)? = nil,
                 fieldReader: (any FieldContextProviding)? = nil,
                 feedback: (any SessionFeedbackPresenting)? = nil,
                 history: (any HistoryRecording)? = nil,
@@ -213,6 +218,11 @@ public final class DictationController {
     /// 以救援提示呈現（`hud.presentRescueNotice`，issue #61）：session 照常繼續，下一個暫時文字往往
     /// 數百毫秒內就到，沒有最短顯示保證的話使用者根本讀不到。
     static let fieldChangedNotice = "欄位已切換，內容已入剪貼簿"
+
+    /// issue #71：這一輪的救援覆寫掉了上一輪還留在剪貼簿裡的救援時，接在救援提示後面。
+    /// 只說「已被取代」，不說「你還沒貼上」——Cmd+V 不推進 changeCount，我們不知道使用者貼過沒有。
+    /// 找回途徑是選單列的「最近救援」（App 端只放在記憶體、最多 5 筆）。
+    static let replacedEarlierRescueSuffix = "（上一段救援已被取代，可從選單「最近救援」找回）"
 
     public func escapePressed() {
         if isLingering {
@@ -455,7 +465,7 @@ public final class DictationController {
                     recordInsertEvent(kind: "insertSkipped", classification: "frozen", utteranceText: text)
                     rescueToClipboard(text)
                     recordASRDiagnostic(text: text, quality: quality)
-                    hud.presentRescueNotice("已凍結，內容已入剪貼簿")
+                    presentRescueNotice("已凍結，內容已入剪貼簿")
                     return
                 }
                 do {
@@ -472,7 +482,7 @@ public final class DictationController {
                                           detail: fieldChangeDetail(current: currentAppBundleID))
                         rescueToClipboard(text)
                         recordASRDiagnostic(text: text, quality: quality)
-                        hud.presentRescueNotice(Self.fieldChangedNotice)
+                        presentRescueNotice(Self.fieldChangedNotice)
                         skippedRaw = true
                         return
                     case .secureField(let subroleUnknown):
@@ -535,7 +545,7 @@ public final class DictationController {
                     // 不記 insertEvent：與緩衝句插入失敗那條保持一致（最小 diff、一致性優先）。
                     rescueToClipboard(text)
                     recordASRDiagnostic(text: text, quality: quality)
-                    hud.presentRescueNotice("插入失敗，內容已入剪貼簿")
+                    presentRescueNotice("插入失敗，內容已入剪貼簿")
                 }
             }
         case .transcribing:
@@ -1053,7 +1063,7 @@ public final class DictationController {
                     // （`ledger.generation` 已跳號）。用當下的世代會讓這段舊內容被當成新 session 的
                     // 同一輪而串在它的救援後面——round token 要防的正是這件事。
                     rescueToClipboard(text, round: generation)
-                    hud.presentRescueNotice("選取已變動，結果已入剪貼簿")
+                    presentRescueNotice("選取已變動，結果已入剪貼簿")
                 case .undo, .degraded:
                     break                              // 無內容可救，安靜丟棄即可
                 }
@@ -1079,7 +1089,7 @@ public final class DictationController {
                 // 比照所有落地路徑（applyNewContent／applyCorrection 等）的 frozen 守衛，改走剪貼簿急救。
                 guard !ledger.frozen else {
                     rescueToClipboard(text)
-                    hud.presentRescueNotice("已凍結，內容已入剪貼簿")
+                    presentRescueNotice("已凍結，內容已入剪貼簿")
                     return
                 }
                 do {
@@ -1095,7 +1105,7 @@ public final class DictationController {
                                           utteranceText: text,
                                           detail: fieldChangeDetail(current: currentAppBundleID))
                         rescueToClipboard(text)
-                        hud.presentRescueNotice(Self.fieldChangedNotice)
+                        presentRescueNotice(Self.fieldChangedNotice)
                     case .secureField(let subroleUnknown):
                         // 焦點已切進密碼欄，或 AX 問不出 subrole 而 fail closed（規格 §5.3／issue #59）：
                         // 與 finalized 那條逐字相同——記診斷後**硬停整個 session**。
@@ -1119,7 +1129,7 @@ public final class DictationController {
                     }
                 } catch {
                     rescueToClipboard(text)
-                    hud.presentRescueNotice("插入失敗，內容已入剪貼簿")
+                    presentRescueNotice("插入失敗，內容已入剪貼簿")
                 }
             case .editedSession:
                 hud.present(.notice("未修正（內容已變動，請再說一次）"))
@@ -1131,7 +1141,7 @@ public final class DictationController {
                 performUndo(commandSnapshot: coordinator.currentTailSnapshot())
             case .degraded(let reason):
                 rescueToClipboard(snapshot.text)
-                hud.presentRescueNotice("未處理（\(reason)），轉錄已入剪貼簿")
+                presentRescueNotice("未處理（\(reason)），轉錄已入剪貼簿")
             }
             return
         }
@@ -1242,7 +1252,7 @@ public final class DictationController {
         case .degraded(let reason):
             // M3 設計裁決 4：LLM 失敗不動選取（寧可不動不可亂改），轉錄入剪貼簿
             rescueToClipboard(commandRaw)
-            hud.presentRescueNotice("未替換（\(reason)），轉錄已入剪貼簿")
+            presentRescueNotice("未替換（\(reason)），轉錄已入剪貼簿")
         }
     }
 
@@ -1277,13 +1287,25 @@ public final class DictationController {
     /// 一次聽寫 session 就是一輪，同一段話拆成多句救援才會連成一份可貼上的文字。
     /// 只有救「舊 session 的內容」時才明確傳 round（見 `dispatch` 的世代過期分支）。
     ///
-    /// **配對的提示一律走 `hud.presentRescueNotice`**（issue #61）：內容沒上屏、唯一副本在剪貼簿，
+    /// **配對的提示一律走 `presentRescueNotice(_:)`**（issue #61／#71，內部走 `hud.presentRescueNotice`）：內容沒上屏、唯一副本在剪貼簿，
     /// 使用者必須讀到才知道要去貼上。包在外面的 `HUDArbiter` 保證它至少停留 2 秒。
     /// 判準可機械驗證：同一個分支剛呼叫過本函式的那則 notice，才是救援提示。
     /// 刻意不把提示併進本函式（`rescueToClipboard(_:notice:)`）：`abandonSelectionReplacement` 要求
     /// 「先 archive、後提示」，合併會改動那個順序，arbiter 沒接上時反而退化成被 `.hidden` 蓋掉。
     private func rescueToClipboard(_ text: String, round: Int? = nil) {
-        clipboardRescue?(text, round ?? ledger.generation)
+        let round = round ?? ledger.generation
+        lastRescueRound = round
+        if clipboardRescue?(text, round) == .replacedEarlierRescue {
+            rescueDisplacingRound = round
+        }
+    }
+
+    /// 救援提示的唯一出口（issue #61／#71）：一律走 `hud.presentRescueNotice`（2 秒最短顯示），
+    /// 剛救的那一輪若覆寫了上一輪仍在剪貼簿裡的救援，接上 `replacedEarlierRescueSuffix`——
+    /// 否則上一段的遺失沒有任何痕跡，畫面上只看得到這一段的提示。
+    private func presentRescueNotice(_ message: String) {
+        let displaced = lastRescueRound != nil && lastRescueRound == rescueDisplacingRound
+        hud.presentRescueNotice(displaced ? message + Self.replacedEarlierRescueSuffix : message)
     }
 
     /// 放棄替換選取：不動欄位、結果進剪貼簿、封存、提示。三種成因（凍結／選取已變／無法用 AX 確認）同一套收尾，
@@ -1295,7 +1317,7 @@ public final class DictationController {
         lastRescueGeneration = ledger.generation
         rescueToClipboard(text)
         archiveSession()
-        hud.presentRescueNotice(notice)
+        presentRescueNotice(notice)
     }
 
     /// 復原上一步（口頭 undo 與 Task 9 的 HUD 按鈕共用）。
