@@ -169,7 +169,7 @@ final class FakeFieldReader: FieldContextProviding {
 ///
 /// 多欄位＋焦點切換：`focus(_:)` 不會通知 controller（模擬 Tab／maxlength 自動跳格這類不觸發使用者活動偵測的焦點移動）。
 /// identity 走真的 `FieldIdentityRegistry`，每次 snapshot 都登記一個持有者，配合 controller 的 lease 紀律（#43）。
-final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, SessionRangeReplacing {
+final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, SessionRangeReplacing, FocusChangeWatching {
     /// false＝這個 App 不支援 AX 讀寫：verify／replace 一律 .unsupported（純追加照常）
     var axCapable = true
     var failInsertsRemaining = 0
@@ -195,7 +195,21 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
                            subroleUnknown: subroleUnknown, selectedRange: nil, bundleID: bundleID)
         if focusedID == nil { focusedID = id }
     }
-    func focus(_ id: String) { precondition(fields[id] != nil); focusedID = id }
+    /// 移動焦點。`notifyingWatches`（issue #70）：預設照 AX 的 `kAXFocusedUIElementChangedNotification`，
+    /// 以**新焦點那個欄位**的判定同步通知所有仍在監看的 watch——但只有把 env 當成 `focusWatcher`
+    /// 交給 controller 的測試才有 watch，其他測試的 `focus(_:)` 仍代表「監看不到的焦點移動」。
+    /// 傳 false＝這次移動 AX 沒推通知（App 不發、observer 沒掛上），用來單獨驗事件驅動的閘門。
+    func focus(_ id: String, notifyingWatches: Bool = true) {
+        precondition(fields[id] != nil)
+        focusedID = id
+        guard notifyingWatches else { return }
+        let security = focusSecurity(of: fields[id]!)
+        // 快照目前在監看的 id：handler 可能當場 stop（controller 硬停），也可能開新 watch
+        for watchID in watches.keys.sorted() {
+            guard let watch = watches[watchID], !watch.stopped else { continue }
+            MainActor.assumeIsolated { watch.onChange(security) }
+        }
+    }
     /// 讀不到焦點（AX 逾時、焦點落在非文字元素上）：閘門回 `.unknown`、snapshot 回空的 `FieldContext()`。
     /// issue #65 用它模擬「session 有 identity，卻問不出現在的焦點」。
     func blur() { focusedID = nil }
@@ -248,6 +262,70 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
         return registry.matches(sessionIdentity, element: focusedID)
             ? .same
             : .different(currentAppBundleID: state.bundleID)
+    }
+
+    // MARK: FocusChangeWatching（issue #70）
+
+    private final class Watch: FocusWatch {
+        weak var env: StatefulFieldEnvironment?
+        let id: Int
+        init(env: StatefulFieldEnvironment, id: Int) { self.env = env; self.id = id }
+        func stop() { env?.stopWatch(id) }
+        func resync() { env?.resync(id) }
+    }
+    private var watches: [Int: (onChange: @MainActor (FocusedFieldSecurity) -> Void, stopped: Bool)] = [:]
+    private var nextWatchID = 0
+    /// `startWatching` 的呼叫數
+    private(set) var watchStarts = 0
+    /// `stop()` 的**原始**呼叫數（重複 stop 也算）：恰一次的驗帳就是 `watchStops == watchStarts`，
+    /// controller 對同一個 handle stop 兩次會讓它大於 starts。
+    private(set) var watchStops = 0
+    /// `resync()` 的呼叫數（controller 在錄音中每個 tick 呼叫一次）。跨行程重掛的行為在 App 端驗。
+    fileprivate(set) var resyncCalls = 0
+    /// `startWatching` 被呼叫、**watch 還沒登記之前**執行一次（預設 nil）。用來製造「snapshot 之後、observer 掛上之前」
+    /// 的焦點移動：這時沒有 watch 可通知，等同 AX 通知發出時 observer 還不存在。
+    var beforeStartWatching: (() -> Void)?
+    /// 非 nil＝下一次 `resync()` 時以這個判定回報（模擬「焦點已在別的行程、改掛過去後發現是密碼欄」）
+    var resyncReport: FocusedFieldSecurity?
+
+    @MainActor
+    private func resync(_ id: Int) {
+        resyncCalls += 1
+        guard let report = resyncReport, let watch = watches[id], !watch.stopped else { return }
+        resyncReport = nil
+        watch.onChange(report)
+    }
+    /// 仍在監看（start 過、尚未 stop）的 watch 數
+    var activeWatchCount: Int { watches.values.filter { !$0.stopped }.count }
+
+    @MainActor
+    func startWatching(onChange: @escaping @MainActor (FocusedFieldSecurity) -> Void) -> any FocusWatch {
+        beforeStartWatching?()
+        watchStarts += 1
+        nextWatchID += 1
+        watches[nextWatchID] = (onChange, false)
+        return Watch(env: self, id: nextWatchID)
+    }
+
+    private func stopWatch(_ id: Int) {
+        watchStops += 1
+        watches[id]?.stopped = true
+    }
+
+    /// 模擬「stop 之前就已排進 run loop、stop 之後才送達」的遲到通知：送給**已停止**的 watch。
+    /// production 的 observer 移除後不會再送，但 controller 不能依賴這點——它必須自己認得舊 watch。
+    @MainActor
+    func deliverToStoppedWatches(_ security: FocusedFieldSecurity) {
+        for watchID in watches.keys.sorted() where watches[watchID]?.stopped == true {
+            watches[watchID]?.onChange(security)
+        }
+    }
+
+    /// 與 production `AXFieldReader.focusSecurity(of:)` 同一條判定：只看元素本身的 subrole，不碰 identity
+    private func focusSecurity(of state: State) -> FocusedFieldSecurity {
+        if state.isSecure { return .secure }
+        if state.subroleUnknown { return .secureUnknown }
+        return .notSecure
     }
 
     // MARK: TextInserter（只會插入）
@@ -403,7 +481,8 @@ func makeStatefulController(
     clipboard: ClipboardSpy? = nil,
     history: FakeHistory? = nil,
     feedback: FakeFeedback? = nil,
-    wrapHUD: (FakeHUD) -> any HUDPresenting = { $0 }
+    wrapHUD: (FakeHUD) -> any HUDPresenting = { $0 },
+    focusWatcher: (any FocusChangeWatching)? = nil
 ) -> (DictationController, FakeASR, FakeHUD) {
     let audio = FakeAudio()
     let asr = FakeASR()
@@ -420,6 +499,7 @@ func makeStatefulController(
         audio: audio, asr: asr, coordinator: coordinator,
         intent: polisher, hud: wrapHUD(hud), settings: settings,
         clipboardRescue: clipboard.map { spy in { spy.rescue($0, round: $1) } },
-        fieldReader: env, feedback: feedback, history: history, contextOCR: nil)
+        fieldReader: env, feedback: feedback, history: history, contextOCR: nil,
+        focusWatcher: focusWatcher)
     return (controller, asr, hud)
 }
