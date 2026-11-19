@@ -5,13 +5,13 @@ import SaymendCore
 /// 隱私透明（規格 §4.9）：明列「哪些內容會送到哪個 LLM 端點」。
 struct PrivacySettingsTab: View {
     let settings: AppSettings
-    @State private var ocrEnabled: Bool
+    @State private var ocrMode: OCRContextMode
     /// 引擎在「一般」分頁切換，故本分頁的快照須於出現時重讀（spec §6.1）
     @State private var asrEngineKind: ASREngineKind
 
     init(settings: AppSettings) {
         self.settings = settings
-        _ocrEnabled = State(initialValue: settings.ocrContextEnabled)
+        _ocrMode = State(initialValue: settings.ocrContextMode)
         _asrEngineKind = State(initialValue: settings.asrEngineKind)
     }
 
@@ -39,11 +39,18 @@ struct PrivacySettingsTab: View {
             Section("錄音") {
                 LabeledContent("錄音檔", value: "不儲存（預設且目前無此功能）")
             }
-            Section("OCR 螢幕語境備援") {
-                Toggle("啟用 OCR 螢幕語境備援", isOn: $ocrEnabled)
+            Section("OCR 螢幕語境") {
+                Picker("OCR 螢幕語境", selection: $ocrMode) {
+                    ForEach(OCRContextMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(Self.modeDescription(ocrMode))
+                    .font(.caption).foregroundStyle(ocrMode == .always ? .orange : .secondary)
                 LabeledContent("螢幕錄製權限",
                                value: CGPreflightScreenCaptureAccess() ? "已授權" : "未授權（需於系統設定開啟後才能實際截圖）")
-                if ocrEnabled, !CGPreflightScreenCaptureAccess() {
+                if ocrMode != .off, !CGPreflightScreenCaptureAccess() {
                     Text("已開啟，但尚未取得螢幕錄製權限——目前不會截圖。")
                         .font(.caption).foregroundStyle(.orange)
                     Button("請求螢幕錄製權限…") {
@@ -55,7 +62,7 @@ struct PrivacySettingsTab: View {
                     Text("授權後請重新啟動 Saymend，權限才會生效。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("預設關閉。開啟後，僅在輔助使用讀不到游標前後文、且非安全欄位時，才截取聚焦欄位附近的小區域畫面。OCR 由 Vision 於本機執行；截圖不落地、辨識文字僅作當次 LLM 語境、不留歷史。截圖範圍是螢幕可見畫面——若鄰近有其他 App 視窗露出，其可見文字可能一併入鏡。")
+                Text("預設關閉。截圖範圍為聚焦欄位附近的小區域畫面，安全欄位一律不截。OCR 由 Vision 於本機執行；截圖不落地、辨識文字僅作當次 LLM 語境、不留歷史。截圖範圍是螢幕可見畫面——若鄰近有其他 App 視窗露出，其可見文字可能一併入鏡。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("密碼欄位") {
@@ -65,7 +72,19 @@ struct PrivacySettingsTab: View {
         }
         .formStyle(.grouped)
         .padding()
-        .onChange(of: ocrEnabled) { _, v in settings.ocrContextEnabled = v }
+        .onChange(of: ocrMode) { _, v in settings.ocrContextMode = v }
         .onAppear { asrEngineKind = settings.asrEngineKind }
+    }
+
+    /// 各模式的說明文字（何時截圖）
+    private static func modeDescription(_ mode: OCRContextMode) -> String {
+        switch mode {
+        case .off:
+            return "不截圖。"
+        case .fallback:
+            return "僅在輔助使用讀不到游標前後文時，才截圖補語境。"
+        case .always:
+            return "每次聽寫都截圖，即使輔助使用已讀到前後文——可補上欄位以外的可見文字（如聊天視窗上方的訊息），但截圖次數與送給 LLM 的內容都會增加。"
+        }
     }
 }
