@@ -1,13 +1,14 @@
 import Foundation
 
-/// 收尾補解碼（issue #22）：串流結束時，把**從來沒進過解碼器**的尾端音訊補解一次。
+/// 收尾補解碼（issue #22）：串流結束時，從已定稿片段的結束點重解到音訊結尾，
+/// 把**從來沒進過解碼器**的尾端一起解進來。
 ///
 /// **為什麼會有沒解過的尾端**：套件的串流轉錄器每一趟先記下樣本數（`lastBufferSize`），
 /// 再從已定稿片段的結束點解到那個位置為止。`stopStreamTranscription` 只把迴圈旗標關掉，
 /// 正在跑的那一趟做完就離開，**那一趟取樣點之後進來的音訊不會再有下一趟**。
 /// 一趟要多久，尾端就掉多少：實機 2026-08-19 量到 large-v3_turbo 一趟平均 6.28 秒，
-/// 48 秒的朗讀有約 9.9 秒從頭到尾沒被解碼。小模型一趟較短，但講到最後一刻才放開熱鍵時，
-/// 照同樣的道理也會掉尾巴（依程式推演，未實測）。
+/// 48 秒的朗讀有約 9.9 秒從頭到尾沒被解碼。小模型一趟較短，但講到最後一刻才放開熱鍵時也會掉
+/// （合成語音實測：small 即時餵 24 秒的朗讀，最後約 0.7 秒沒被解碼）。
 ///
 /// **補解碼的窗口與套件每一趟相同**：從已定稿片段的結束點解到音訊結尾。結果取代最後一趟的
 /// 暫時文字，再交給引擎的收尾補發（`WhisperKitEngine.flushTail`）轉正。定稿文字不動。
@@ -15,8 +16,12 @@ import Foundation
 /// 本型別只放**決策**（要不要補、補哪一段、結果怎麼併）。真正的解碼要載入模型，
 /// 在 `WhisperKitModelActor.streamTranscribe` 裡以 closure 傳進 `run`。
 enum StreamTailDrain {
-    /// 串流轉錄器的記帳，取自它的狀態變更回呼。三個欄位都只增不減（套件的語意），
-    /// 所以停止那一刻的判定**涵蓋**之後的判定：那時說不用補，之後也不會要補。
+    /// 串流轉錄器的記帳，取自它的狀態變更回呼。
+    ///
+    /// `decodedSamples` 與 `confirmedEndSeconds` 只增不減（套件的語意），而 `plan` 判定時的音訊總長與
+    /// 能量已經是最終值（停止監看要等 `audioDone`，那是在 `StreamFedAudioSource.finish()` 之後才設的）。
+    /// 所以沒解過的長度、窗口、要看的格數只會變少：**停止那一刻說不用補，之後也不會要補**。
+    /// `lastProgress` 不在此列，`plan` 也不看它。
     struct Ledger: Equatable, Sendable {
         /// 最後一趟解碼開始時的樣本數（套件的 `State.lastBufferSize`）：之後的樣本都沒解過
         var decodedSamples: Int = 0
@@ -42,8 +47,8 @@ enum StreamTailDrain {
         case drained
         /// 解碼成功但沒有文字：沿用最後一趟的暫時文字
         case emptyResult
-        /// 解碼擲錯：沿用最後一趟的暫時文字
-        case failed
+        /// 解碼擲錯：沿用最後一趟的暫時文字。原因只記錯誤本身的描述（模型錯誤，不含任何辨識文字），供回查
+        case failed(reason: String)
         /// 解碼期間被取消（Esc）：什麼都不交
         case cancelled
     }
@@ -58,21 +63,26 @@ enum StreamTailDrain {
         }
     }
 
-    /// 解碼窗口的最短長度。
+    /// 解碼窗口的下限（秒），**窗口要超過它才補**。
     ///
-    /// 比照套件「新音訊不到 1 秒不解碼」的下限，但量的是**整個窗口**。用意是不讓補解碼替
-    /// 不到 1 秒的 session 開先例：那種 session 套件一趟都沒解過，現況是一個字都不出；
-    /// 補解碼若照單全收，按到熱鍵時的一聲雜音（鍵盤、咳嗽）會被解成 Whisper 的幻覺句上屏。
-    /// 窗口超過 1 秒的尾端，正常迴圈本來就會解，補解碼只是把它做完。
+    /// 這不是我們訂的門檻，是對齊套件解碼器本身的下限：`TranscribeTask.run` 的迴圈條件是
+    /// `seek < seekClipEnd - windowPadding`，`windowPadding` 取自 `DecodingOptions.windowClipTime`
+    /// （預設 1 秒，用來避免片尾幻覺）。窗口不超過它，解碼器一個窗口都不會解、結果必定是空的——
+    /// 照樣補的話，只會讓 HUD 白顯示一段「辨識中…」。
+    /// 抄來的值會過期：`drainWindowFloorMatchesWhisperKit` 釘住它與套件預設一致。
+    ///
+    /// 附帶的效果：不到 1 秒的 session 照舊一個字都不出（套件一趟都沒解過，現況就是如此）。
     static let minimumWindowSeconds: Double = 1.0
 
     /// 要不要補解碼；要的話回傳要解的那一段。
     ///
-    /// **有聲判定刻意不用套件的 `AudioProcessor.isVoiceDetected`**。那個函式只看新音訊的
-    /// 前段（`prefix(max(10, n - 10))`，n 超過 20 格時最後 1 秒不看），因為串流中最後那 1 秒
-    /// 下一趟還會再看到。收尾沒有下一趟：講到最後一刻才放開時，聲音正好落在它不看的那 1 秒。
-    /// 這裡改成沒解過的每一格都看，不足一格的殘量也算一格（`StreamFedAudioSource.finish`
-    /// 會把殘量結算成最後一格）。
+    /// **有聲判定刻意不用套件的 `AudioProcessor.isVoiceDetected`**。那個函式只看新音訊的前段
+    /// （`prefix(max(10, n - 10))`）：新音訊超過 1 秒時，最後最多 1 秒不看，因為串流中下一趟還會看到。
+    /// 收尾沒有下一趟：講到最後一刻才放開時，聲音正好落在它不看的那一段。
+    ///
+    /// 這裡改成沒解過的每一格都看。能量格從第 0 個樣本起每 `energyBufferLength` 個一格
+    /// （最後不足一格的殘量由 `StreamFedAudioSource.finish` 結算成一格），所以從
+    /// 「沒解過的第一個樣本所在的那一格」看到最後一格。
     static func plan(ledger: Ledger,
                      totalSamples: Int,
                      relativeEnergy: [Float],
@@ -82,11 +92,10 @@ enum StreamTailDrain {
         let undecoded = totalSamples - ledger.decodedSamples
         guard undecoded > 0 else { return nil }
         let window = Double(totalSamples) / sampleRate - Double(ledger.confirmedEndSeconds)
-        guard window >= minimumWindowSeconds else { return nil }
+        guard window > minimumWindowSeconds else { return nil }
         if useVAD {
-            let bucket = StreamFedAudioSource.energyBufferLength
-            let buckets = (undecoded + bucket - 1) / bucket
-            guard relativeEnergy.suffix(buckets).contains(where: { $0 > silenceThreshold }) else {
+            let firstUndecodedBucket = ledger.decodedSamples / StreamFedAudioSource.energyBufferLength
+            guard relativeEnergy.dropFirst(firstUndecodedBucket).contains(where: { $0 > silenceThreshold }) else {
                 return nil
             }
         }
@@ -126,7 +135,7 @@ enum StreamTailDrain {
         do {
             drained = try await decode(tail.clipStartSeconds)
         } catch {
-            return isCancelled() ? .cancelled : .failed
+            return isCancelled() ? .cancelled : .failed(reason: String(describing: error))
         }
         if isCancelled() { return .cancelled }
         guard let progress = progress(after: ledger, drained: drained) else { return .emptyResult }

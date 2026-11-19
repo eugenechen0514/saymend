@@ -58,6 +58,14 @@ private func plan(total: Int, decoded: Int, confirmedEnd: Float = 0,
         #expect(plan(total: total, decoded: 2 * sr, energy: e) != nil)
     }
 
+    /// 解到的位置不在格子邊界上：沒解過的第一個樣本所在的那一格也要看。
+    /// 以「沒解過的長度 ÷ 一格」回推格數的話，這一格會被漏掉（decoded=33,000 落在第 20 格中間，
+    /// 33,000～49,000 共 16,000 個樣本＝恰好 10 格，回推只看第 21～30 格）。
+    @Test func theBucketHoldingTheFirstUndecodedSampleCounts() {
+        let e = energy(31, voicedAt: [20])
+        #expect(plan(total: 49_000, decoded: 33_000, energy: e) != nil)
+    }
+
     /// **為什麼不用套件的 `isVoiceDetected`。** 它只看新音訊的前段：超過 2 秒時最後 1 秒不看，
     /// 因為串流中那 1 秒下一趟還會看到。收尾沒有下一趟——講到最後一刻才放開，聲音就落在那 1 秒。
     @Test func voiceInTheLastSecondOfALongTailIsDrained() {
@@ -77,20 +85,25 @@ private func plan(total: Int, decoded: Int, confirmedEnd: Float = 0,
         #expect(plan(total: 3 * sr, decoded: 2 * sr, energy: energy(30), useVAD: false) != nil)
     }
 
-    /// 不到 1 秒的 session 套件一趟都沒解過，現況是一個字都不出。補解碼不替它開先例：
-    /// 按熱鍵時的一聲雜音會被解成幻覺句上屏。
+    /// 窗口不超過 1 秒：套件的解碼器本來就不解（`windowClipTime`），補了必定是空的，只會讓 HUD 白顯示「辨識中…」。
     @Test(arguments: [
-        (total: 12_800, confirmedEnd: Float(0)),     // 整段 0.8 秒
+        (total: 12_800, confirmedEnd: Float(0)),       // 整段 0.8 秒
         (total: 5 * 16_000, confirmedEnd: Float(4.2)), // 5 秒的 session，但窗口只剩 0.8 秒
+        (total: 16_000, confirmedEnd: Float(0)),       // 剛好 1 秒：解碼器的條件是嚴格大於
     ])
-    func aWindowUnderOneSecondIsNotDrained(total: Int, confirmedEnd: Float) {
+    func aWindowOfAtMostOneSecondIsNotDrained(total: Int, confirmedEnd: Float) {
         let e = energy(50, voicedAt: Set(0..<50))
         #expect(plan(total: total, decoded: 0, confirmedEnd: confirmedEnd, energy: e) == nil)
     }
 
-    /// 窗口剛好 1 秒：要補（下限含等號）
-    @Test func aWindowOfExactlyOneSecondIsDrained() {
-        #expect(plan(total: sr, decoded: 0, energy: energy(10, voicedAt: Set(0..<10))) != nil)
+    /// 窗口超過 1 秒一個格子：要補
+    @Test func aWindowJustOverOneSecondIsDrained() {
+        #expect(plan(total: sr + bucket, decoded: 0, energy: energy(11, voicedAt: Set(0..<11))) != nil)
+    }
+
+    /// 下限是抄來的套件預設。套件改了，補解碼的判定就和解碼器實際的行為脫節。
+    @Test func drainWindowFloorMatchesWhisperKit() {
+        #expect(StreamTailDrain.minimumWindowSeconds == Double(DecodingOptions().windowClipTime))
     }
 }
 
@@ -173,7 +186,7 @@ private final class Emitted: @unchecked Sendable {
         let out = Emitted()
         let outcome = await StreamTailDrain.run(tail, ledger: ledger, isCancelled: { false },
                                                 decode: { _ in throw DecodeFailure() }, emit: out.append)
-        #expect(outcome == .failed)
+        #expect(outcome == .failed(reason: String(describing: DecodeFailure())))
         #expect(out.all.isEmpty)
     }
 
@@ -224,6 +237,21 @@ private final class Emitted: @unchecked Sendable {
         #expect(WhisperKitModelActor.shouldStopEarly(progress: p, options: options, compressionCheckWindow: 60) == nil)
     }
 
+    /// 壓縮比剛好等於門檻：不中止（套件是嚴格大於）
+    @Test func aCompressionRatioExactlyAtTheThresholdContinues() {
+        let tokens = Array(repeating: 42, count: 61)
+        let ratio = TextUtilities.compressionRatio(of: Array(tokens.suffix(60)))
+        let atThreshold = DecodingOptions(compressionRatioThreshold: ratio, logProbThreshold: -1.0)
+        #expect(WhisperKitModelActor.shouldStopEarly(progress: progress(tokens: tokens), options: atThreshold,
+                                                     compressionCheckWindow: 60) == nil)
+    }
+
+    /// 對數機率剛好等於門檻：不中止（套件是嚴格小於）
+    @Test func anAverageLogprobExactlyAtTheThresholdContinues() {
+        let p = progress(tokens: [1, 2, 3], avgLogprob: -1.0)
+        #expect(WhisperKitModelActor.shouldStopEarly(progress: p, options: options, compressionCheckWindow: 60) == nil)
+    }
+
     @Test func aLowAverageLogprobStops() {
         let p = progress(tokens: [1, 2, 3], avgLogprob: -1.5)
         #expect(WhisperKitModelActor.shouldStopEarly(progress: p, options: options, compressionCheckWindow: 60) == false)
@@ -232,5 +260,50 @@ private final class Emitted: @unchecked Sendable {
     @Test func aGoodAverageLogprobContinues() {
         let p = progress(tokens: [1, 2, 3], avgLogprob: -0.5)
         #expect(WhisperKitModelActor.shouldStopEarly(progress: p, options: options, compressionCheckWindow: 60) == nil)
+    }
+}
+
+/// 套件狀態到我們這邊的接線（issue #22）。**接錯就是重覆上屏或漏字**，而且不會有任何編譯或執行期徵兆：
+/// 定稿結束點變成 0，補解碼會從頭解，已上屏的定稿會被收尾補發再插一次。
+@Suite struct TailDrainWiringTests {
+    /// 套件的 `State` init 是 internal，測試建不出來，改用同一組欄位的假件
+    private struct FakeState: StreamerStateReading {
+        var lastBufferSize = 612_345
+        var lastConfirmedSegmentEndSeconds: Float = 17.4
+        var confirmedSegments = [
+            TranscriptionSegment(start: 0, end: 9.1, text: "第一句。", avgLogprob: -0.2, compressionRatio: 1.1),
+            TranscriptionSegment(start: 9.1, end: 17.4, text: "第二句。", avgLogprob: -0.3, compressionRatio: 1.2),
+        ]
+        var unconfirmedSegments = [
+            TranscriptionSegment(start: 17.4, end: 30.0, text: "還在改", avgLogprob: -0.6, compressionRatio: 1.5),
+        ]
+    }
+    private func state() -> FakeState { FakeState() }
+
+    @Test func theLedgerTakesTheDecodedSamplesAndTheConfirmedEnd() {
+        let p = WhisperStreamProgress(confirmed: "x", unconfirmed: "y")
+        let ledger = WhisperKitModelActor.tailLedger(from: state(), progress: p)
+        #expect(ledger == .init(decodedSamples: 612_345, confirmedEndSeconds: 17.4, lastProgress: p))
+    }
+
+    @Test func progressKeepsConfirmedAndUnconfirmedApart() {
+        let p = WhisperKitModelActor.progress(from: state())
+        #expect(p == WhisperStreamProgress(
+            confirmed: "第一句。第二句。", unconfirmed: "還在改",
+            confirmedQuality: [.init(avgLogprob: -0.2, compressionRatio: 1.1),
+                               .init(avgLogprob: -0.3, compressionRatio: 1.2)],
+            unconfirmedQuality: [.init(avgLogprob: -0.6, compressionRatio: 1.5)]))
+    }
+
+    /// 補解碼從已定稿片段的結束點解起，其餘解碼參數與串流每一趟相同（特殊 token 照樣濾掉、詞彙偏置照樣帶）
+    @Test func theDrainDecodesFromTheClipStartWithTheStreamingOptions() {
+        let streaming = WhisperKitModelActor.decodingOptions(language: "zh", promptTokens: [11, 12],
+                                                             options: WhisperStreamingOptions(logProbThreshold: -0.8))
+        let o = WhisperKitModelActor.drainDecodingOptions(streaming, clipStart: 17.4)
+        #expect(o.clipTimestamps == [17.4])
+        #expect(o.language == "zh")
+        #expect(o.skipSpecialTokens)
+        #expect(o.promptTokens == [11, 12])
+        #expect(o.logProbThreshold == -0.8)
     }
 }
