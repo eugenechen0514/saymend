@@ -51,7 +51,9 @@ struct CoreModeMenu: View {
             }
 
             Divider()
-            Button("管理模式…") { delegate.openCoreModeSettings() }
+            // 分頁定位由 SwiftUI 記憶上次選取的 tab 提供，無公開 API 可強制切到「核心模式」分頁
+            // ——使用者首次需自行點選（SwiftUI Settings scene 的已知限制，記入規格 §8）。
+            OpenSettingsButton(title: "管理模式…")
         }
     }
 }
