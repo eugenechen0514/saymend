@@ -102,17 +102,27 @@ final class ClipboardSpy {
     var texts: [String] { entries.map(\.text) }
     /// 要斷言 round 邊界的測試用（同 session 相同、跨 session 不同）。
     var rounds: [Int] { entries.map(\.round) }
-    /// issue #71：照 App 端 `ClipboardChannel` 的語意回報——剪貼簿此刻仍是**別一輪**的救援（使用者沒複製過別的）
-    /// 而這次覆寫了它＝`.replacedEarlierRescue`。同一輪、或使用者已複製過別的東西＝`.landed`。
-    /// 真正的判定（changeCount、paste 在途）在 App 端的 `ClipboardChannelTests` 驗。
+    /// issue #71：照 App 端 `ClipboardChannel` 的語意回報。真正的判定（changeCount、paste 在途）在 App 端的
+    /// `ClipboardRescueReplacementTests` 驗；這裡只模型化 controller 需要的四種結果：
+    /// 剪貼簿仍是同一輪＝`.appended`、仍是別一輪＝`.replacedEarlierRescue`、不是救援（或使用者複製過別的）＝`.landed`、
+    /// `failNextWrite`＝`.notWritten`（剪貼簿維持原狀）。
     @discardableResult
     func rescue(_ text: String, round: Int) -> ClipboardRescueOutcome {
-        let replaced = !userTookClipboard && entries.last.map { $0.round != round } == true
         entries.append((text, round))
-        userTookClipboard = false
-        return replaced ? .replacedEarlierRescue : .landed
+        if failNextWrite { failNextWrite = false; return .notWritten }
+        defer { landedRound = round; userTookClipboard = false }
+        guard !userTookClipboard, let landed = landedRound else { return .landed }
+        return landed == round ? .appended : .replacedEarlierRescue
     }
+    /// 剪貼簿此刻是哪一輪的救援（nil＝不是我方救援）
+    private var landedRound: Int?
     private var userTookClipboard = false
+    /// 下一次救援寫不進剪貼簿
+    var failNextWrite = false
+    /// `earlierRescueInClipboard`：測試開始時剪貼簿裡已經有一份**別一輪**、使用者還沒動過的救援（issue #71 的情境）
+    init(earlierRescueInClipboard: Bool = false) {
+        if earlierRescueInClipboard { landedRound = Int.min }
+    }
     /// 使用者自己複製了別的東西（changeCount 前進）：上一份救援已不在剪貼簿，下一次救援不算取代
     func userCopiedSomethingElse() { userTookClipboard = true }
 }
@@ -403,6 +413,12 @@ final class StatefulFieldEnvironment: TextInserter, FieldContextProviding, Sessi
         else { return nil }
         return String.Index(index, within: text)
     }
+}
+
+/// issue #71：剪貼簿裡原本有別一輪的救援時，救援提示應有的樣子
+@MainActor
+func rescueNotice(_ base: String, _ earlierRescueInClipboard: Bool) -> String {
+    earlierRescueInClipboard ? base + DictationController.replacedEarlierRescueSuffix : base
 }
 
 /// 歷史 spy

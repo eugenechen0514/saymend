@@ -150,20 +150,29 @@ final class ClipboardChannel {
     @discardableResult
     func rescue(_ text: String, round: Int) -> ClipboardRescueOutcome {
         settle()
-        let accumulated = (landedRescueOfRound(round) ?? "") + text
+        let previous = landedRescueOfRound(round)
+        let accumulated = (previous ?? "") + text
         // 會被這次覆寫的「別一輪」救援：settle 之後才讀（理由同 `landedRescueOfRound`）
         let displacing = landedRescue.map { $0.round != round } == true && rescueStillInClipboard != nil
-        // 寫不寫得進剪貼簿都記：寫不進去時這段內容在任何地方都沒有，選單是唯一能找回它的地方
-        recordRecentRescue(accumulated, round: round)
-        // 沒寫成：剪貼簿已放回累積前的舊救援（連同它的 round），不能宣稱新的全文在剪貼簿裡，也沒有東西被取代
-        guard overwrite(with: accumulated) else { return .landed }
+        // 沒寫成：剪貼簿已放回累積前的舊救援（連同它的 round），不能宣稱新的全文在剪貼簿裡，也沒有東西被取代。
+        // 照樣記進最近救援——這段內容此刻在任何地方都沒有，選單是唯一能找回它的地方；記成獨立的一筆，
+        // 不併進那條累積鏈（鏈的下一次成功救援會以剪貼簿裡的舊內容為底，併進去就會把這段抹掉）。
+        guard overwrite(with: accumulated) else {
+            recordRecentRescue(accumulated, round: round, continuingChain: false)
+            return .notWritten
+        }
+        recordRecentRescue(accumulated, round: round, continuingChain: previous != nil)
+        chainEntryID = recentRescues.first?.id
         landedRescue = (accumulated, round, pasteboard.changeCount)
+        if previous != nil { return .appended }
         return displacing ? .replacedEarlierRescue : .landed
     }
 
     // MARK: - 最近救援（issue #71）
 
     struct RecentRescue: Equatable {
+        /// 每一份救援各自的 id（選單的 `ForEach` 用）。同一輪可以有好幾筆：累積鏈斷過就是另一份內容
+        let id: Int
         let round: Int
         let text: String
         let at: Date
@@ -172,14 +181,28 @@ final class ClipboardChannel {
     /// 選單「最近救援」顯示幾筆
     static let recentRescueLimit = 5
 
-    /// 最近幾輪的救援全文，新的在前；同一輪累積時更新同一筆（內容是累積後的全文、時間是最後一次救援）。
+    /// 最近幾份救援的全文，新的在前。**接在同一條累積鏈上**（剪貼簿仍是這一輪上一份救援）時更新同一筆
+    /// （內容是累積後的全文、時間是最後一次救援）；鏈斷了就新增一筆——同一輪可以有好幾筆。
+    /// 以 round 整筆取代的話，鏈一斷（使用者 Cmd+C 過、從選單複製回別一輪、過期的舊 round 救援插隊），
+    /// 下一次同輪救援就會把該輪先前的內容從選單抹掉，而它可能正是提示說「可以找回」的那一段。
     /// **只放在記憶體**，結束 App 即清空：救援內容本來就只活在剪貼簿裡，這裡不把它落地到磁碟。
     /// 密碼欄的內容不會出現在這裡——密碼欄路徑一律硬停、從不救援（#10／§5.3）。
     private(set) var recentRescues: [RecentRescue] = []
 
-    private func recordRecentRescue(_ text: String, round: Int) {
-        recentRescues.removeAll { $0.round == round }
-        recentRescues.insert(RecentRescue(round: round, text: text, at: now()), at: 0)
+    /// 剪貼簿裡那條累積鏈對應的那一筆
+    private var chainEntryID: Int?
+    private var nextRecentID = 0
+
+    private func recordRecentRescue(_ text: String, round: Int, continuingChain: Bool) {
+        let id: Int
+        if continuingChain, let chain = chainEntryID, let index = recentRescues.firstIndex(where: { $0.id == chain }) {
+            recentRescues.remove(at: index)
+            id = chain
+        } else {
+            nextRecentID += 1
+            id = nextRecentID
+        }
+        recentRescues.insert(RecentRescue(id: id, round: round, text: text, at: now()), at: 0)
         if recentRescues.count > Self.recentRescueLimit {
             recentRescues.removeLast(recentRescues.count - Self.recentRescueLimit)
         }

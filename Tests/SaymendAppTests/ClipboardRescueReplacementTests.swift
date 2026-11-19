@@ -34,9 +34,17 @@ import SaymendCore
         #expect(c.rescue("甲", round: 1) == .landed, "剪貼簿原本是使用者的內容，不是救援")
     }
 
-    @Test func accumulatingWithinARoundReplacesNothing() {
+    @Test func accumulatingWithinARoundReportsAppended() {
         let c = channel(pasteboard())
         c.rescue("甲", round: 1)
+        #expect(c.rescue("乙", round: 1) == .appended)
+    }
+
+    /// 同一輪、但使用者在兩次救援之間複製過別的東西：鏈斷了，重新開始一份（不是接上、也沒有取代別一輪）
+    @Test func theSameRoundAfterTheUserCopiedSomethingStartsAfresh() {
+        let c = channel(pasteboard())
+        c.rescue("甲", round: 1)
+        c.copyForUser("使用者的")
         #expect(c.rescue("乙", round: 1) == .landed)
     }
 
@@ -69,13 +77,14 @@ import SaymendCore
         #expect(c.rescue("第二段", round: 2) == .replacedEarlierRescue)
     }
 
-    /// 寫不進剪貼簿：剪貼簿已放回原本那份上一輪的救援，沒有東西被取代
-    @Test func aRescueThatFailsToWriteReplacesNothing() {
+    /// 寫不進剪貼簿：剪貼簿已放回原本那份上一輪的救援，沒有東西被取代——回報 `.notWritten`，
+    /// 提示才不會說「已入剪貼簿」（照提示貼上會拿到上一段）
+    @Test func aRescueThatFailsToWriteReportsNotWritten() {
         let backing = pasteboard()
         let pb = SetStringFailingPasteboard(backing: backing, failingAttempts: [2])
         let c = channel(pb)
         c.rescue("第一段", round: 1)
-        #expect(c.rescue("第二段", round: 2) == .landed)
+        #expect(c.rescue("第二段", round: 2) == .notWritten)
         #expect(backing.string(forType: .string) == "第一段")
     }
 
@@ -92,15 +101,39 @@ import SaymendCore
         #expect(c.recentRescues[1].at == Date(timeIntervalSince1970: 1_800_000_120), "時間是該輪最後一次救援")
     }
 
-    /// 同一輪在別輪之後又救了一次（世代過期的緩衝句 outcome 用舊 round 救）：那一輪移到最前面
-    @Test func anOlderRoundRescuedAgainMovesToTheFront() {
+    /// 同一輪在別輪之後又救了一次（世代過期的緩衝句 outcome 用舊 round 救）：剪貼簿此刻是第 2 輪的，
+    /// 第 1 輪接不上去（#56），所以是**另一份**內容——新增一筆，第 1 輪原本那筆（甲）不得被抹掉：
+    /// 它可能正是第 2 輪的提示說「可以從選單找回」的那一段。
+    @Test func anOlderRoundRescuedAfterANewerOneGetsItsOwnEntry() {
         let c = channel(pasteboard())
         c.rescue("甲", round: 1)
         c.rescue("乙", round: 2)
         c.rescue("丙", round: 1)
-        #expect(c.recentRescues.map(\.round) == [1, 2])
-        #expect(c.recentRescues.map(\.text) == ["丙", "乙"],
-                "剪貼簿此刻是第 2 輪的、第 1 輪不能接上去（#56），清單照剪貼簿實際拿到的內容記")
+        #expect(c.recentRescues.map(\.round) == [1, 2, 1])
+        #expect(c.recentRescues.map(\.text) == ["丙", "乙", "甲"])
+        #expect(Set(c.recentRescues.map(\.id)).count == 3, "選單以 id 區分，同一輪的兩筆不得撞 id")
+    }
+
+    /// 照提示走的流程：從選單把上一段複製回來（鏈斷了）→ 同一輪又救援 → 兩份都要留著
+    @Test func breakingTheChainKeepsTheEarlierContentOfTheSameRound() {
+        let c = channel(pasteboard())
+        c.rescue("A", round: 5)
+        c.copyForUser("從選單複製回來的上一段")
+        c.rescue("B", round: 5)
+        #expect(c.recentRescues.map(\.text) == ["B", "A"])
+    }
+
+    /// 寫入失敗的那段記成獨立的一筆，不併進累積鏈：鏈的下一次成功救援以剪貼簿裡的舊內容為底，
+    /// 併進去就會把失敗的那段抹掉
+    @Test func aFailedWriteIsKeptAsItsOwnEntryAndTheChainCarriesOn() {
+        let backing = pasteboard()
+        let pb = SetStringFailingPasteboard(backing: backing, failingAttempts: [2])   // 第 2 次＝寫入「甲乙」
+        let c = channel(pb)
+        c.rescue("甲", round: 1)
+        c.rescue("乙", round: 1)
+        #expect(c.recentRescues.map(\.text) == ["甲乙", "甲"])
+        #expect(c.rescue("丙", round: 1) == .appended, "剪貼簿已放回「甲」，鏈照樣接得上")
+        #expect(c.recentRescues.map(\.text) == ["甲丙", "甲乙"], "鏈那一筆更新並移到最前；失敗那筆原樣留著")
     }
 
     @Test func recentRescuesAreCappedAtFive() {

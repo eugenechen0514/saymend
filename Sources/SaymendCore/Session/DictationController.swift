@@ -104,10 +104,13 @@ public final class DictationController {
     /// 之後同 generation 的緩衝句 outcome 不得覆蓋它（剪貼簿只有一格）。
     private var lastRescueGeneration: Int?
     /// issue #71：最近一次救援用的 round，與「哪一輪覆寫過上一輪的救援」。兩者相等＝剛救的這一輪就是取代了別人的那一輪，
-    /// 它的每一則救援提示都帶上 `replacedEarlierRescueSuffix`（同一輪後續的救援提示若在 2 秒保護期內取代前一則，
-    /// 只在第一則說的話會被蓋掉）。刻意不隨 archive 清除：`abandonSelectionReplacement` 是「救援→封存→提示」。
+    /// 它**接在同一條累積鏈上**的後續救援提示也帶上 `replacedEarlierRescueSuffix`（後一則若在 2 秒保護期內取代前一則，
+    /// 只在第一則說的話會被蓋掉）。鏈斷了（使用者複製過別的東西，`.landed`）就不再帶——那時被蓋掉的是使用者的內容，不是救援。
+    /// 刻意不隨 archive 清除：`abandonSelectionReplacement` 是「救援→封存→提示」。
     private var lastRescueRound: Int?
     private var rescueDisplacingRound: Int?
+    /// 最近一次救援沒寫進剪貼簿（issue #71）：提示不能說「已入剪貼簿」，改指向選單的「最近救援」
+    private var lastRescueNotWritten = false
     /// 熱鍵按下當下的前後文窗口（LLM 語境；tail 與 selection 模式皆用）
     private var capturedContextBefore: String?
     private var capturedContextAfter: String?
@@ -223,6 +226,9 @@ public final class DictationController {
     /// 只說「已被取代」，不說「你還沒貼上」——Cmd+V 不推進 changeCount，我們不知道使用者貼過沒有。
     /// 找回途徑是選單列的「最近救援」（App 端只放在記憶體、最多 5 筆）。
     static let replacedEarlierRescueSuffix = "（上一段救援已被取代，可從選單「最近救援」找回）"
+    /// issue #71：救援寫不進剪貼簿時，把提示裡的「已入剪貼簿」換成這句（每則救援提示都以「已入剪貼簿」收尾）。
+    /// 這是 #41 起就存在的不實提示：寫入失敗時剪貼簿已放回原本的內容，使用者照提示貼上會拿到別的東西。
+    static let rescueNotWrittenPhrase = "未能寫入剪貼簿（可從選單「最近救援」找回）"
 
     public func escapePressed() {
         if isLingering {
@@ -1295,8 +1301,16 @@ public final class DictationController {
     private func rescueToClipboard(_ text: String, round: Int? = nil) {
         let round = round ?? ledger.generation
         lastRescueRound = round
-        if clipboardRescue?(text, round) == .replacedEarlierRescue {
+        let outcome = clipboardRescue?(text, round)
+        lastRescueNotWritten = outcome == .notWritten
+        switch outcome {
+        case .replacedEarlierRescue?:
             rescueDisplacingRound = round
+        case .landed?:
+            // 鏈斷了、重新開始：這一輪先前那次取代已經提示過，現在被蓋掉的是使用者自己的內容（既有行為，不提示）
+            if rescueDisplacingRound == round { rescueDisplacingRound = nil }
+        case .appended?, .notWritten?, nil:
+            break                       // 同一條鏈延續（寫入失敗時剪貼簿也還是那條鏈）；沒接剪貼簿則無從判斷
         }
     }
 
@@ -1304,6 +1318,13 @@ public final class DictationController {
     /// 剛救的那一輪若覆寫了上一輪仍在剪貼簿裡的救援，接上 `replacedEarlierRescueSuffix`——
     /// 否則上一段的遺失沒有任何痕跡，畫面上只看得到這一段的提示。
     private func presentRescueNotice(_ message: String) {
+        if lastRescueNotWritten {
+            let phrase = "已入剪貼簿"
+            hud.presentRescueNotice(message.contains(phrase)
+                ? message.replacingOccurrences(of: phrase, with: Self.rescueNotWrittenPhrase)
+                : message + "，" + Self.rescueNotWrittenPhrase)
+            return
+        }
         let displaced = lastRescueRound != nil && lastRescueRound == rescueDisplacingRound
         hud.presentRescueNotice(displaced ? message + Self.replacedEarlierRescueSuffix : message)
     }

@@ -25,7 +25,7 @@ struct MenuContent: View {
             Menu("最近救援") {
                 Text("點選即複製回剪貼簿")
                 Divider()
-                ForEach(delegate.recentRescues, id: \.round) { rescue in
+                ForEach(delegate.recentRescues, id: \.id) { rescue in
                     Button(RecentRescueMenuText.title(text: rescue.text, at: rescue.at)) {
                         delegate.copyRecentRescue(rescue)
                     }
