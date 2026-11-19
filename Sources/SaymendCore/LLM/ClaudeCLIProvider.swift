@@ -105,6 +105,14 @@ public final class ClaudeCLIProvider: LLMProvider, @unchecked Sendable {
         }
     }
 
+    /// 信封 JSON Schema（與 PromptAssembler 機器契約、EnvelopeParser.strict 同一份合約）。
+    /// 2026-11-19 實測：不帶 schema 時 opus 約 30% 會在 JSON 前後吐出雜訊 token
+    /// （如「取」「(」「</thinking_mode>」「<reasoning_effort>…」、甚至空輸出），strict parser 全數拒收、
+    /// 聽寫降級為原文；帶上 --json-schema 後 40/40 乾淨、延遲無明顯差異。
+    /// 下游仍一律走 EnvelopeParser.strict——schema 只是讓 CLI 端產出合法信封，不取代邊界驗證。
+    static let envelopeSchema =
+        #"{"type":"object","properties":{"intent":{"type":"string","enum":["new_content","edit_command","undo"]},"text":{"type":"string"}},"required":["intent","text"],"additionalProperties":false}"#
+
     /// hermetic flag 組合（spec §4.2 五條；Task 1 spike 定案 2026-07-21）。
     /// 不用 --bare：它強制 API-key auth、與 OAuth 互斥（help 明載）；
     /// 隔離靠 --setting-sources ""（不載 user/project/local ＝ CLAUDE.md/hooks/MCP 全不進）
@@ -118,6 +126,7 @@ public final class ClaudeCLIProvider: LLMProvider, @unchecked Sendable {
          "--strict-mcp-config",
          "--system-prompt-file", systemPromptFile,
          "--output-format", "text",
+         "--json-schema", envelopeSchema,                  // structured output：擋模型在信封外吐雜訊
          "--model", model]
     }
 

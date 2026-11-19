@@ -67,6 +67,8 @@ private func makeProvider(_ runner: FakeRunner,
     #expect(FakeRunner.value(after: "--setting-sources", in: a) == "")   // 排除 user/project/local（spike 定案的關鍵救援）
     #expect(a.contains("--strict-mcp-config"), "MCP 雙保險（spike (f) 實測無異狀後加入）")
     #expect(FakeRunner.value(after: "--output-format", in: a) == "text")
+    #expect(FakeRunner.value(after: "--json-schema", in: a) == ClaudeCLIProvider.envelopeSchema,
+            "缺 --json-schema：opus 會在信封外吐雜訊 token，strict parser 拒收→聽寫全數降級")
     #expect(FakeRunner.value(after: "--model", in: a) == "sonnet")
     #expect(a.contains { $0.contains("SYS") } == false)            // system prompt 絕不在 argv
 }
@@ -199,4 +201,18 @@ private func makeProvider(_ runner: FakeRunner,
     } catch {
         #expect(error as? ClaudeCLIError == .spawnFailed)
     }
+}
+
+/// schema 必須與 strict parser 的合約一致：top-level 恰為 intent/text、intent 為三值列舉、禁多餘欄位。
+/// 若 schema 與 parser 漂移（例如多一個欄位），CLI 產出的信封會被 strict parser 以 missingOrExtraFields 拒收。
+@Test func envelopeSchemaMatchesStrictParserContract() throws {
+    let data = Data(ClaudeCLIProvider.envelopeSchema.utf8)
+    let obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(obj["type"] as? String == "object")
+    #expect(obj["additionalProperties"] as? Bool == false)
+    #expect(Set(try #require(obj["required"] as? [String])) == ["intent", "text"])
+    let props = try #require(obj["properties"] as? [String: Any])
+    #expect(Set(props.keys) == ["intent", "text"])
+    let intent = try #require(props["intent"] as? [String: Any])
+    #expect(Set(try #require(intent["enum"] as? [String])) == ["new_content", "edit_command", "undo"])
 }
