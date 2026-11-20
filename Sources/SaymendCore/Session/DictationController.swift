@@ -185,7 +185,7 @@ public final class DictationController {
     public func hotkeyPressed(at t: TimeInterval) {
         switch internalPhase {
         case .idle, .finishing, .lingering:
-            // finishing：上一 session 排空中按下＝立刻開新 session（跳號過濾舊事件）。
+            // finishing：上一 session 排空中按下＝先封存舊 session、再立刻開新 session（跳號過濾舊事件，issue #83）。
             // lingering：延續窗內按下＝同 session 續聽（帳本延續，規格 §3.4）。
             pressedAt = t
             startListening(mode: .hold, at: t)
@@ -706,6 +706,20 @@ public final class DictationController {
             archiveSession()
             hud.present(.notice("密碼欄位不聽寫"))
             return
+        }
+        // 排空中按下＝開新 session（issue #83）：舊 session 必須先封存乾淨，比照排空中按 Esc。
+        // 以前直接往下走到 `ledger.begin` 覆寫舊 session、完全不經 `archiveSession()`：舊 session 永遠不
+        // `finishSession`（歷史沒定稿），起始欄位的 lease 也漏還（#43）。
+        //
+        // 下面的 `readerTask?.cancel()` 會終止舊的辨識串流（`AsyncStream` 的 `onTermination` 連帶取消引擎的
+        // pump），還沒送達的定稿就此捨棄——那是「立刻開新 session」的既有取捨，本處不改（保住它是行為變更）。
+        // 至少在**舊** session 的歷史留一列，不再零痕跡。內容不知道（根本沒送達），`utteranceText` 留空。
+        // **必須先記再封存**：archive 會把 `historySessionID` 清成 nil，沒有 hid 的列會整筆靜默丟掉。
+        //
+        // 只限 `.finishing`：`.lingering` 是同 session 續聽（下面的 `resuming`），`.idle` 早已封存過。
+        if case .finishing = internalPhase {
+            recordInsertEvent(kind: "drainAbandoned", classification: "newSession", utteranceText: "")
+            archiveSession()
         }
         do {
             readerTask?.cancel()
