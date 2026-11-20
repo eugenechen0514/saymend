@@ -11,7 +11,7 @@ import WhisperKit
 public actor WhisperKitModelActor {
     private let pipe: WhisperKit
 
-    /// 收尾補解碼的結果（issue #22）。只記數字與結果分類，不記任何文字。
+    /// 收尾補解碼的結果（issue #22）與停止的補送（issue #79）。只記數字與結果分類，不記任何文字。
     /// **這幾行沒有測試覆蓋**：os_log 的輸出無法在單元測試裡攔截。
     private static let log = Logger(subsystem: "io.saymend.app", category: "ASR")
 
@@ -144,7 +144,8 @@ public actor WhisperKitModelActor {
     ///   結束串流，補解碼的結果沒人收，只是白跑一趟（大模型十幾秒）。
     ///
     /// **測試覆蓋的誠實說明**：欄位對應與解碼參數抽成了純函式（`progress(from:)`、`tailLedger`、
-    /// `drainDecodingOptions`），決策在 `StreamTailDrain`，都有測試。剩下的接線——停止與補解的時機、
+    /// `drainDecodingOptions`），決策在 `StreamTailDrain`，停止監看的迴圈在 `StreamStopWatch`（issue #79），
+    /// 都有測試。剩下的接線——狀態回呼把 `isRecording` 交給停止監看、停止與補解的時機、
     /// 取消與「我們要求停止」的判斷、結果交給 `onProgress`——要真的模型才跑得到，沒有單元測試，
     /// 由實機驗收擋。
     func streamTranscribe(source: StreamFedAudioSource,
@@ -180,6 +181,8 @@ public actor WhisperKitModelActor {
         // 後面的話，引擎記住的暫時文字會被蓋回最後一趟的，收尾補發轉正的就不是補解碼的結果。
         // 迴圈離開時段落已是最終狀態，之後的回呼不會帶來新文字，略過沒有損失。
         let streamerFinished = Sendable_Flag()
+        // 停止監看要知道套件是否又開始錄了（issue #79，見 `StreamStopWatch`）
+        let recording = StreamerRecordingBox()
 
         // 子元件全部取自 pipe，但只在此 actor 內流動、不回傳給呼叫端
         let streamer = AudioStreamTranscriber(
@@ -195,6 +198,7 @@ public actor WhisperKitModelActor {
             compressionCheckWindow: options.compressionCheckWindow,
             useVAD: options.useVAD,
             stateChangeCallback: { _, new in
+                recording.record(new.isRecording)
                 guard !streamerFinished.isSet else { return }
                 let progress = Self.progress(from: new)
                 ledger.record(Self.tailLedger(from: new, progress: progress))
@@ -213,18 +217,23 @@ public actor WhisperKitModelActor {
         let announced = Sendable_Flag()
         let stopRequested = Sendable_Flag()
 
-        // 停止監看：串流轉錄器的主迴圈在 stopStreamTranscription 之前不返回
+        // 停止監看：串流轉錄器的主迴圈在 stopStreamTranscription 之前不返回。
+        // 停過之後仍要看著：停止落在套件開始錄之前會被它蓋掉（issue #79，見 `StreamStopWatch`）
         let stopWatcher = Task {
-            while !Task.isCancelled {
-                if shouldStop() {
+            await StreamStopWatch.run(
+                shouldStop: shouldStop,
+                streamerRecording: { recording.isRecording },
+                beforeFirstStop: {
                     // 先報再停：正在跑的那一趟（大模型可達 10 秒）也算在使用者要等的時間裡
                     if planTail() != nil, announced.setOnce() { onTailDrain() }
                     stopRequested.set()
+                },
+                stop: { attempt in
+                    if attempt > 1 {
+                        Self.log.notice("停止落在串流轉錄器開始錄之前，補送停止（第 \(attempt, privacy: .public) 次）")
+                    }
                     await streamer.stopStreamTranscription()
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(50))
-            }
+                })
         }
         defer { stopWatcher.cancel() }
         try await streamer.startStreamTranscription()
