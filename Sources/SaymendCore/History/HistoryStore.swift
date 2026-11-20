@@ -31,7 +31,12 @@ public struct HistoryExchangeRecord: Codable, Equatable, Sendable, FetchableReco
     public var at: Date
     public var utteranceRaw: String
     // "newContent" | "editedSession" | "undo" | "degraded" | "insertFailed" | "insertSkipped"
-    // | "outcomeDropped"（issue #37：raw 有片段被寫入前的焦點閘門攔掉，這句的 LLM 結果整個丟棄）
+    // | "outcomeDropped"（issue #37：raw 有片段被寫入前的焦點閘門攔掉，這句的 LLM 結果整個丟棄；
+    //   issue #11：outcome 回來時 session 已結束，分類 `sessionEnded`）
+    // | "finalizedDropped"（issue #20：session 已封存／已進延續窗才收到的定稿，被相位守衛丟掉；
+    //   只記字數，`utteranceRaw` 一律為空）
+    // | "insertRecovered" | "insertFallback"（文字有落地的插入層診斷）
+    // 分類細節見 `DictationController.recordInsertEvent` 的說明。
     public var outcomeKind: String
     public var outcomeText: String?
 
