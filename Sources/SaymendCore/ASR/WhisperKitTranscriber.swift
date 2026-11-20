@@ -11,6 +11,10 @@ import WhisperKit
 public actor WhisperKitModelActor {
     private let pipe: WhisperKit
 
+    /// 收尾補解碼的結果（issue #22）。只記數字與結果分類，不記任何文字。
+    /// **這幾行沒有測試覆蓋**：os_log 的輸出無法在單元測試裡攔截。
+    private static let log = Logger(subsystem: "io.saymend.app", category: "ASR")
+
     public init(modelFolder: URL) async throws {
         do {
             self.pipe = try await WhisperKit(Self.modelConfig(modelFolder: modelFolder))
@@ -79,14 +83,78 @@ public actor WhisperKitModelActor {
                                  compressionRatio: segment.compressionRatio)
     }
 
+    /// 照抄套件 `AudioStreamTranscriber.shouldStopEarly`（private，叫不到）。
+    ///
+    /// 收尾補解碼（issue #22）要與串流中的每一趟用同一套提早中止條件：少了它，退化成複讀的
+    /// 窗口會一路解到 token 上限才停，大模型放開熱鍵後要多等好幾秒，結果還是被門檻判失敗。
+    /// 回傳 false＝中止這個窗口、nil＝繼續（套件 `TranscriptionCallback` 的語意）。
+    static func shouldStopEarly(progress: TranscriptionProgress,
+                                options: DecodingOptions,
+                                compressionCheckWindow: Int) -> Bool? {
+        let currentTokens = progress.tokens
+        if currentTokens.count > compressionCheckWindow {
+            let checkTokens: [Int] = currentTokens.suffix(compressionCheckWindow)
+            let compressionRatio = TextUtilities.compressionRatio(of: checkTokens)
+            if compressionRatio > options.compressionRatioThreshold ?? 0.0 {
+                return false
+            }
+        }
+        if let avgLogprob = progress.avgLogprob, let logProbThreshold = options.logProbThreshold {
+            if avgLogprob < logProbThreshold {
+                return false
+            }
+        }
+        return nil
+    }
+
+    /// 套件狀態 → 我們的進度。抽成純函式是為了測得到欄位對應：定稿與暫時文字接反了不會有任何
+    /// 編譯或執行期徵兆，只會讓暫時文字被當成定稿上屏。
+    static func progress(from state: some StreamerStateReading) -> WhisperStreamProgress {
+        WhisperStreamProgress(confirmed: state.confirmedSegments.map(\.text).joined(),
+                              unconfirmed: state.unconfirmedSegments.map(\.text).joined(),
+                              confirmedQuality: state.confirmedSegments.map(quality(of:)),
+                              unconfirmedQuality: state.unconfirmedSegments.map(quality(of:)))
+    }
+
+    /// 套件狀態 → 收尾補解碼的記帳（issue #22）。**接錯就是重覆上屏或漏字**：定稿結束點若變成 0，
+    /// 補解碼會從頭解，已上屏的定稿會被收尾補發再插一次；解到的樣本數若變成 0，每次收尾都白補一趟。
+    static func tailLedger(from state: some StreamerStateReading,
+                           progress: WhisperStreamProgress) -> StreamTailDrain.Ledger {
+        .init(decodedSamples: state.lastBufferSize,
+              confirmedEndSeconds: state.lastConfirmedSegmentEndSeconds,
+              lastProgress: progress)
+    }
+
+    /// 補解碼用的解碼參數：串流每一趟用的那一組，加上解碼起點（與套件
+    /// `AudioStreamTranscriber.transcribeAudioSamples` 的 `clipTimestamps` 相同做法）。
+    /// 起點錯了同樣是重覆上屏（從 0 解）或漏字。
+    static func drainDecodingOptions(_ decoding: DecodingOptions, clipStart: Float) -> DecodingOptions {
+        var d = decoding
+        d.clipTimestamps = [clipStart]
+        return d
+    }
+
     /// 串流辨識：音訊由 `source` 灌入（呼叫端負責餵），進度經回呼吐出。
-    /// 本方法在串流結束（呼叫端停止或音訊耗盡）前不返回。
+    /// 本方法在串流結束（呼叫端停止或音訊耗盡）、且收尾補解碼（issue #22）做完之前不返回。
+    ///
+    /// - `onTailDrain`：停止串流轉錄器的那一刻判定**可能要補**時呼叫一次（見 `WhisperStreamEvent.drainingTail`）。
+    ///   之後未必真的補：那一刻與套件真正停下之間，它可能又開了一趟、解到了結尾。但那段時間確實還在解碼，
+    ///   顯示「辨識中…」不算錯。
+    /// - `tailDrainAllowed`：音訊是否**正常**收完。音訊轉換失敗、超過長度上限時，呼叫端已經以錯誤
+    ///   結束串流，補解碼的結果沒人收，只是白跑一趟（大模型十幾秒）。
+    ///
+    /// **測試覆蓋的誠實說明**：欄位對應與解碼參數抽成了純函式（`progress(from:)`、`tailLedger`、
+    /// `drainDecodingOptions`），決策在 `StreamTailDrain`，都有測試。剩下的接線——停止與補解的時機、
+    /// 取消與「我們要求停止」的判斷、結果交給 `onProgress`——要真的模型才跑得到，沒有單元測試，
+    /// 由實機驗收擋。
     func streamTranscribe(source: StreamFedAudioSource,
                           language: String,
                           promptPhrases: [String],
                           options: WhisperStreamingOptions,
                           onProgress: @escaping @Sendable (WhisperStreamProgress) -> Void,
-                          shouldStop: @escaping @Sendable () -> Bool) async throws {
+                          onTailDrain: @escaping @Sendable () -> Void,
+                          shouldStop: @escaping @Sendable () -> Bool,
+                          tailDrainAllowed: @escaping @Sendable () -> Bool) async throws {
         var promptTokens: [Int]?
         if !promptPhrases.isEmpty, let tok = pipe.tokenizer {
             // 詞彙表偏置（spec §7）：tokenize 後濾掉特殊 token（id ≥ specialTokenBegin），只留文字 token
@@ -104,6 +172,15 @@ public actor WhisperKitModelActor {
         // 注意：`source.relativeEnergyWindow` **不在這裡設**——本方法要等模型載完才被呼叫，
         // 而餵音訊的 Task 早就開始 append 了。窗口在 `transcribe` 建構 source 時就給定。
 
+        // 收尾補解碼要知道套件解到哪裡、從哪裡解起（issue #22）。套件的 state 是 private，
+        // 只有狀態變更回呼看得到，所以在回呼裡記下來。
+        let ledger = StreamTailLedgerBox()
+        // 套件迴圈離開之後，回呼不再轉發。套件每個 token 都另開 `Task` 回它的 actor 更新 `currentText`，
+        // 這些 Task 可能晚於迴圈離開才跑；跑的時候會帶著最後一趟的暫時文字觸發回呼。排在補解碼的結果
+        // 後面的話，引擎記住的暫時文字會被蓋回最後一趟的，收尾補發轉正的就不是補解碼的結果。
+        // 迴圈離開時段落已是最終狀態，之後的回呼不會帶來新文字，略過沒有損失。
+        let streamerFinished = Sendable_Flag()
+
         // 子元件全部取自 pipe，但只在此 actor 內流動、不回傳給呼叫端
         let streamer = AudioStreamTranscriber(
             audioEncoder: pipe.audioEncoder,
@@ -118,17 +195,31 @@ public actor WhisperKitModelActor {
             compressionCheckWindow: options.compressionCheckWindow,
             useVAD: options.useVAD,
             stateChangeCallback: { _, new in
-                onProgress(WhisperStreamProgress(
-                    confirmed: new.confirmedSegments.map(\.text).joined(),
-                    unconfirmed: new.unconfirmedSegments.map(\.text).joined(),
-                    confirmedQuality: new.confirmedSegments.map(Self.quality(of:)),
-                    unconfirmedQuality: new.unconfirmedSegments.map(Self.quality(of:))))
+                guard !streamerFinished.isSet else { return }
+                let progress = Self.progress(from: new)
+                ledger.record(Self.tailLedger(from: new, progress: progress))
+                onProgress(progress)
             })
+
+        // 停止那一刻與迴圈離開後各判一次要不要補（前者涵蓋後者，見 `StreamTailDrain.Ledger`）
+        let planTail: @Sendable () -> StreamTailDrain.Tail? = {
+            guard tailDrainAllowed() else { return nil }
+            return StreamTailDrain.plan(ledger: ledger.current,
+                                        totalSamples: source.audioSamples.count,
+                                        relativeEnergy: source.relativeEnergy,
+                                        useVAD: options.useVAD,
+                                        silenceThreshold: options.silenceThreshold)
+        }
+        let announced = Sendable_Flag()
+        let stopRequested = Sendable_Flag()
 
         // 停止監看：串流轉錄器的主迴圈在 stopStreamTranscription 之前不返回
         let stopWatcher = Task {
             while !Task.isCancelled {
                 if shouldStop() {
+                    // 先報再停：正在跑的那一趟（大模型可達 10 秒）也算在使用者要等的時間裡
+                    if planTail() != nil, announced.setOnce() { onTailDrain() }
+                    stopRequested.set()
                     await streamer.stopStreamTranscription()
                     return
                 }
@@ -137,6 +228,74 @@ public actor WhisperKitModelActor {
         }
         defer { stopWatcher.cancel() }
         try await streamer.startStreamTranscription()
+        streamerFinished.set()
+
+        // 收尾補解碼（issue #22）。只在**我們要求停止**之後補：迴圈在那之前就自己離開＝套件吞掉了一次
+        // 解碼錯誤（`realtimeLoop` 的 catch 只 log 就 break），模型剛壞過，不再補。
+        // **分不出來的情況**：要求停止之後，正在跑的那一趟才擲錯——套件一樣吞掉，這裡照樣補。
+        // 多半也會失敗（`.failed`），退回原本的行為，代價是多顯示一段「辨識中…」。
+        guard stopRequested.isSet, !Task.isCancelled, let tail = planTail() else { return }
+        // 依 `Ledger` 的單調性，停止監看此時必定已經報過，這行照理到不了。留著是防禦：
+        // 萬一套件改了記帳語意，補解碼期間 HUD 至少還有「辨識中…」。測試驅動不到它。
+        if announced.setOnce() { onTailDrain() }
+        let snapshot = ledger.current
+        let samples = Array(source.audioSamples)
+        let window = options.compressionCheckWindow
+        let started = ContinuousClock.now
+        let outcome = await StreamTailDrain.run(tail, ledger: snapshot, decode: { clipStart in
+            // 與串流中的每一趟相同：同一組解碼參數、從已定稿片段的結束點解到音訊結尾
+            let drainDecoding = Self.drainDecodingOptions(decoding, clipStart: clipStart)
+            let task = TranscribeTask(currentTimings: TranscriptionTimings(),
+                                      progress: Progress(),
+                                      audioProcessor: source,
+                                      audioEncoder: pipe.audioEncoder,
+                                      featureExtractor: pipe.featureExtractor,
+                                      segmentSeeker: pipe.segmentSeeker,
+                                      textDecoder: pipe.textDecoder,
+                                      tokenizer: tokenizer)
+            let result = try await task.run(audioArray: samples, decodeOptions: drainDecoding) { progress in
+                Self.shouldStopEarly(progress: progress, options: drainDecoding, compressionCheckWindow: window)
+            }
+            return result.segments.map { .init(text: $0.text, quality: Self.quality(of: $0)) }
+        }, emit: onProgress)
+        let elapsed = started.duration(to: .now)
+        let elapsedSeconds = Double(elapsed.components.seconds)
+            + Double(elapsed.components.attoseconds) / 1e18
+        Self.log.notice("""
+            收尾補解碼：未解碼 \(tail.undecodedSeconds, format: .fixed(precision: 2), privacy: .public)s \
+            窗口 \(tail.clipStartSeconds, format: .fixed(precision: 2), privacy: .public)s 起 \
+            \(tail.windowSeconds, format: .fixed(precision: 2), privacy: .public)s \
+            耗時 \(elapsedSeconds, format: .fixed(precision: 2), privacy: .public)s \
+            結果 \(String(describing: outcome), privacy: .public)
+            """)
+    }
+}
+
+/// 接線函式（`progress(from:)`、`tailLedger`）讀的套件狀態欄位。抽成協定只為了測得到：
+/// `AudioStreamTranscriber.State` 的 init 是 internal，測試建不出來。
+protocol StreamerStateReading {
+    var lastBufferSize: Int { get }
+    var lastConfirmedSegmentEndSeconds: Float { get }
+    var confirmedSegments: [TranscriptionSegment] { get }
+    var unconfirmedSegments: [TranscriptionSegment] { get }
+}
+
+extension AudioStreamTranscriber.State: StreamerStateReading {}
+
+/// 收尾補解碼的記帳（issue #22）。寫入端是套件的狀態變更回呼（套件 actor 內），
+/// 讀取端是停止監看的 Task 與 `streamTranscribe` 本身，故以鎖保護。
+final class StreamTailLedgerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = StreamTailDrain.Ledger()
+
+    var current: StreamTailDrain.Ledger {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func record(_ ledger: StreamTailDrain.Ledger) {
+        lock.lock(); defer { lock.unlock() }
+        value = ledger
     }
 }
 
@@ -215,6 +374,9 @@ public final class WhisperKitTranscriber: WhisperTranscribing {
                                                   relativeEnergyWindow: options.relativeEnergyWindow,
                                                   silenceThreshold: options.silenceThreshold)
                 let audioDone = Sendable_Flag()
+                /// 音訊是**正常**收完的（issue #22）：只有這時才收尾補解碼。另外兩條讓 `audioDone`
+                /// 成立的路（轉換失敗、超過上限）已經以錯誤結束串流，補了也沒人收。
+                let audioFinishedNormally = Sendable_Flag()
 
                 // 餵音訊：與辨識並行，音訊耗盡即標記結束讓串流轉錄器收工
                 // **誠實說明覆蓋範圍**：下面這段餵音訊迴圈（含 0.5 秒降頻與收尾補一筆統計）
@@ -250,6 +412,10 @@ public final class WhisperKitTranscriber: WhisperTranscribing {
                     // 而短 session 可能一次降頻窗口都沒滿過，不補就完全沒有統計可依據。
                     continuation.yield(.audioStats(voicedBuckets: source.voicedBuckets,
                                                    seconds: source.duration))
+                    // 先標正常收完、再標結束：停止監看看到結束時，補解碼的判定必須已經讀得到這一面。
+                    // （Esc 不會取消這個 Task——它是 unstructured，只在 transcribe 收尾的 defer 被取消。
+                    // 擋住取消後補解碼的是 `streamTranscribe` 迴圈離開後的 `Task.isCancelled`。）
+                    audioFinishedNormally.set()
                     audioDone.set()
                 }
                 defer { feeder.cancel() }
@@ -261,7 +427,9 @@ public final class WhisperKitTranscriber: WhisperTranscribing {
                         source: source, language: language, promptPhrases: promptPhrases,
                         options: options,
                         onProgress: { continuation.yield(.progress($0)) },
-                        shouldStop: { audioDone.isSet || Task.isCancelled })
+                        onTailDrain: { continuation.yield(.drainingTail) },
+                        shouldStop: { audioDone.isSet || Task.isCancelled },
+                        tailDrainAllowed: { audioFinishedNormally.isSet })
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -278,4 +446,11 @@ final class Sendable_Flag: @unchecked Sendable {
     private var value = false
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     func set() { lock.lock(); value = true; lock.unlock() }
+    /// 設起來；原本沒設才回 true。「只做一次」的動作由回傳值決定，判斷與設定在同一把鎖內。
+    func setOnce() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !value else { return false }
+        value = true
+        return true
+    }
 }

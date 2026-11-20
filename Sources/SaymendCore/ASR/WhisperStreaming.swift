@@ -83,6 +83,11 @@ public enum WhisperStreamEvent: Equatable, Sendable {
     case progress(WhisperStreamProgress)
     /// 音訊事實：至今超過靜音門檻的格數、已累積的音訊秒數
     case audioStats(voicedBuckets: Int, seconds: Double)
+    /// 串流已結束，但尾端有沒解過的有聲音訊，**可能**要補解碼（issue #22，見 `StreamTailDrain`）。
+    /// 一個串流最多一次，在停止串流轉錄器的那一刻發出：大模型要等正在跑的那一趟做完、
+    /// 再補解一次，放開熱鍵後可能要十幾秒，這段時間畫面上要有東西。
+    /// 發了未必真的補（那一刻之後套件可能又解了一趟到結尾），但那段時間確實還在解碼。
+    case drainingTail
 }
 
 public extension WhisperStreamingOptions {

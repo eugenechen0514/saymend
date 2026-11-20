@@ -388,6 +388,40 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         #expect(finalizedTexts(evs) == ["第一句。", "第二句定稿了。", "第三句還在改"])
     }
 
+    // MARK: - 收尾補解碼（issue #22）
+
+    /// 放開熱鍵後 HUD 已收起來；補解碼（大模型十幾秒）期間要顯示「辨識中…」，
+    /// 而且要排在補解碼之前的那些事件後面、補解碼的結果前面。補解碼的結果照常由收尾補發轉正。
+    @Test func aTailDrainShowsTranscribingAndItsResultIsFinalized() async throws {
+        let f = FakeStreamTranscriber()
+        f.events = [
+            .progress(.init(confirmed: "", unconfirmed: "前半")),
+            .drainingTail,
+            .progress(.init(confirmed: "", unconfirmed: "前半和沒解過的後半")),
+        ]
+        let evs = await drive(engine(f))
+        #expect(evs.filter { $0 == .transcribing }.count == 2)   // 開始辨識一次、補解碼一次
+        let drainAt = try #require(evs.lastIndex(of: .transcribing))
+        let volatileAt = try #require(evs.firstIndex(of: .volatile("前半")))
+        let resultAt = try #require(evs.firstIndex(of: .volatile("前半和沒解過的後半")))
+        #expect(volatileAt < drainAt)
+        #expect(drainAt < resultAt)
+        #expect(finalizedTexts(evs) == ["前半和沒解過的後半"])
+    }
+
+    /// 沒有補解碼的串流只有開始辨識那一次「辨識中…」：其他事件不得被誤映射成它
+    @Test func withoutATailDrainTranscribingIsShownOnce() async {
+        let f = FakeStreamTranscriber()
+        f.events = [
+            .audioStats(voicedBuckets: 5, seconds: 1),
+            .progress(.init(confirmed: "", unconfirmed: "一句話")),
+            .audioStats(voicedBuckets: 9, seconds: 2),
+        ]
+        let evs = await drive(engine(f))
+        #expect(evs.filter { $0 == .transcribing }.count == 1)
+        #expect(finalizedTexts(evs) == ["一句話"])
+    }
+
     /// 尾端已經被轉正（unconfirmed 收斂成空）時不得再補一次空白事件
     @Test func emptyTailFlushesNothing() async {
         let f = FakeStreamTranscriber()
