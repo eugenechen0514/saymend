@@ -117,6 +117,11 @@ public final class DictationController {
     private var capturedContextAfter: String?
     /// 進行中 session 的歷史 id（nil＝未記錄，如歷史關閉或密碼欄位）
     private var historySessionID: String?
+    /// 最近一次封存的 session 的歷史 id（issue #20）：封存後辨識器才送來的定稿，相位守衛會丟掉它，
+    /// 但要記一列在**剛封存的那個** session 底下，否則事後完全查不到。
+    /// 每次封存都無條件覆寫（含 nil）：沒有 id 的 session 封存後，遲到的定稿不得掛到更早的 session 上。
+    /// 只供 `.idle` 的相位守衛使用——LLM outcome 用的是話語閉合當下捕捉的 id（`processUtterance`）。
+    private var archivedHistorySessionID: String?
     /// 熱鍵按下當下的前景 App 名稱（第 7 層動態上下文，規格 §4.7）
     private var capturedFrontAppName: String?
     /// 熱鍵按下當下的前景 App bundleID（issue #37 診斷：判讀「同 App 換欄位」還是「跨 App」）
@@ -360,6 +365,7 @@ public final class DictationController {
     public func handleTranscript(_ event: TranscriptEvent, at t: TimeInterval) {
         switch internalPhase {
         case .idle, .lingering:
+            recordFinalizedDroppedByPhase(event)   // 照舊丟掉，但不再零紀錄（issue #20）
             return
         case .listening, .finishing:
             break   // finishing（排空窗）的尾端 finalized 仍須處理，不能丟
@@ -551,7 +557,12 @@ public final class DictationController {
                     // 提示以救援提示呈現（issue #61）：hold 模式下 `asrStreamEnded` 緊接著會 present `.lingering`、
                     // session 已不 active 時 `archiveSession` 會 present `.hidden`——沒有仲裁的話這行提示當場就被蓋掉。
                     // App 端包的 `HUDArbiter` 保證它至少停留 `HUDArbiter.minimumHold`，期間的狀態延後重播。
-                    // 不記 insertEvent：與緩衝句插入失敗那條保持一致（最小 diff、一致性優先）。
+                    // 記一列 `insertFailed`（issue #20）：提示與剪貼簿都是會消失的容器，使用者一旦沒看到，
+                    // 事後在歷史裡就完全查不到這段話去了哪裡。#20 那次遺失正是零紀錄的。
+                    // 與緩衝句插入失敗那條（`insertDetached` 的 catch）一致：兩條都記，分類分別標 `raw`／`buffered`。
+                    // 文字照記：閘門已答過不是密碼欄（`.secureField` 走上面的分支、不會擲錯），且它同時正要進剪貼簿。
+                    recordInsertEvent(kind: "insertFailed", classification: "raw",
+                                      utteranceText: text, detail: "\(error)")
                     rescueToClipboard(text)
                     recordASRDiagnostic(text: text, quality: quality)
                     presentRescueNotice("插入失敗，內容已入剪貼簿")
@@ -582,6 +593,37 @@ public final class DictationController {
                                            minAvgLogprob: Double(quality.minAvgLogprob),
                                            maxCompressionRatio: Double(quality.maxCompressionRatio),
                                            segmentCount: quality.segmentCount))
+    }
+
+    /// 相位守衛丟掉的定稿（issue #20）：丟照丟，但留一列 `finalizedDropped`，分類是當下的相位。
+    ///
+    /// - `.idle`：session 已封存（Esc、密碼欄硬停、ASR 失敗…），辨識器在那之後才送來的定稿。
+    ///   掛在**剛封存的那個** session 底下（`archivedHistorySessionID`）。
+    /// - `.lingering`：串流已結束才又收到定稿——readerTask 的順序保證這不該發生，正因如此更要有警報。
+    ///   session 還沒封存，掛在目前的 session 底下。
+    ///
+    /// **只記字數，`utteranceText` 一律留空**（issue #10 的不變式）：走到 `.idle` 的封存原因包含
+    /// 密碼欄硬停，那之後送來的定稿可能正是焦點在密碼欄期間說的話。這裡刻意不追蹤封存原因去放行
+    /// 「安全的」那幾種——日後新增的封存路徑若忘了標，預設就會洩漏；只留 metadata 則永遠 fail closed。
+    /// 要回答的問題是「有沒有發生、發生在哪個 session、多長」，字數已經足夠。
+    ///
+    /// 只有「有內容的定稿」才算使用者的話被丟掉；暫時文字、空定稿、示警都不是。
+    private func recordFinalizedDroppedByPhase(_ event: TranscriptEvent) {
+        guard case .finalized(let text, _) = event, !text.isEmpty else { return }
+        let phase: String
+        let droppedFrom: String?
+        switch internalPhase {
+        case .idle:
+            phase = "idle"
+            droppedFrom = archivedHistorySessionID
+        case .lingering:
+            phase = "lingering"
+            droppedFrom = historySessionID
+        case .listening, .finishing:
+            return                              // 這兩個相位不會丟，呼叫端也不會在這時呼叫
+        }
+        recordHistoryEvent(sessionID: droppedFrom, kind: "finalizedDropped", classification: phase,
+                           utteranceText: "", detail: "chars:\(text.count)")
     }
 
     /// 辨識出任何文字＝確實偵測到語音，「沒偵測到語音」示警就此解除（issue #18）。
@@ -902,6 +944,7 @@ public final class DictationController {
     }
 
     private func archiveSession() {
+        archivedHistorySessionID = historySessionID   // 無條件覆寫（含 nil），理由見宣告處（issue #20）
         // 定稿入史（規格 §4.9）：ledger.archive() 會清空 sessionText，故先抓最終全文。
         if let hid = historySessionID {
             let final = ledger.sessionText
@@ -991,6 +1034,11 @@ public final class DictationController {
         // 這句話有沒有片段被寫入前的閘門攔掉（issue #37）：捕捉當下值後立即重設，下一句從乾淨狀態算起
         let utteranceSkippedRaw = skippedRaw
         skippedRaw = false
+        // 這句話屬於哪個歷史 session（issue #11）：**話語閉合當下**就決定，與 `generation` 同一個捕捉點。
+        // outcome 回來時 session 可能已封存（`historySessionID` 已清空）、甚至已開了下一個 session
+        // （`historySessionID` 是別人的）——用回來當下的值，前者零紀錄、後者記錯 session。
+        // nil＝閉合當下就沒在記錄（歷史關閉），之後也不補記、更不借用別的 session 的 id。
+        let utteranceHistoryID = historySessionID
         let previous = lastIntentTask
         pendingIntents += 1
         lastIntentTask = Task { [weak self] in
@@ -1001,8 +1049,8 @@ public final class DictationController {
             _ = await previous?.value
             await MainActor.run {
                 self.dispatch(outcome, snapshot: snapshot, sessionBefore: sessionBefore,
-                              generation: generation, wasBuffered: wasBuffered,
-                              skippedRaw: utteranceSkippedRaw)
+                              generation: generation, historyID: utteranceHistoryID,
+                              wasBuffered: wasBuffered, skippedRaw: utteranceSkippedRaw)
             }
         }
     }
@@ -1011,13 +1059,16 @@ public final class DictationController {
                           snapshot: InsertionCoordinator.UtteranceSnapshot,
                           sessionBefore: String,
                           generation: Int,
+                          historyID: String?,
                           wasBuffered: Bool,
                           skippedRaw: Bool) {
         pendingIntents = max(0, pendingIntents - 1)
+        let utteranceRaw = snapshot.text.isEmpty ? sessionBefore : snapshot.text
         // 歷史記錄（規格 §4.9）：丟棄的 outcome 也入史——回查除錯正是要看見被丟棄的（守衛之前記）。
-        if settings.historyEnabled, let hid = historySessionID {
+        // 掛在話語閉合當下的 session（`historyID`，issue #11），不是回來當下的 `historySessionID`。
+        if settings.historyEnabled, let hid = historyID {
             history?.recordExchange(.init(sessionID: hid, at: now(),
-                                          utteranceRaw: snapshot.text.isEmpty ? sessionBefore : snapshot.text,
+                                          utteranceRaw: utteranceRaw,
                                           outcomeKind: outcome.historyKind, outcomeText: outcome.historyText))
         }
         // issue #37 裁定 Q4：這句話有片段被寫入前的閘門攔掉（根本沒上屏），LLM 的 outcome 一律安靜丟棄。
@@ -1029,14 +1080,12 @@ public final class DictationController {
         //
         // 只記診斷、**不發第二則提示、不再進剪貼簿**：使用者在跳過的當下已經被告知內容在剪貼簿了。
         if skippedRaw {
-            // 世代守衛不可省：`recordInsertEvent` 用的是**呼叫當下**的 `historySessionID`，
-            // 而本早退位在下面那道 `guard ledger.generation == generation` 之前。時序
+            // 掛在話語閉合當下的 session（`historyID`），所以**不需要**世代守衛：時序
             // 「session A 部分跳過、LLM 卡住 → Esc 封存 A → 開 session B 並說完一句（B 有自己的 hid）
-            // → A 的舊 outcome 才回來」會讓這筆診斷掛到 **B** 的 hid 底下，A 的跳過在資料上變成 B 的。
-            if ledger.generation == generation {
-                recordInsertEvent(kind: "outcomeDropped", classification: "skippedRaw",
-                                  utteranceText: snapshot.text.isEmpty ? sessionBefore : snapshot.text)
-            }
+            // → A 的舊 outcome 才回來」下，這筆診斷照樣落在 A 底下，不會變成 B 的。
+            // （以前用的是**呼叫當下**的 `historySessionID`，只能靠世代守衛乾脆不記——A 的跳過因此零紀錄，issue #11。）
+            recordHistoryEvent(sessionID: historyID, kind: "outcomeDropped", classification: "skippedRaw",
+                               utteranceText: utteranceRaw)
             // **部分片段被跳過時，落地的那段仍須入帳**。`snapshotAndBeginNext()` 已經把它從
             // `coordinator.currentUtteranceText` 移進 snapshot，早退若直接 return，那段字就只存在於
             // 欄位與 `coordinator.displayedText`（鏡像），`ledger.sessionText` 從頭到尾沒認過它。兩個後果：
@@ -1065,6 +1114,11 @@ public final class DictationController {
         // 但緩衝句（選取模式）的 outcome 不能無聲蒸發：它的原文從未上屏，丟棄＝使用者白說話。
         // 典型時序：說完指令→放開→進延續窗→點別處（延續窗活動＝立即封存）→LLM 此刻才回來。
         // 規格 §3.6「放棄替換，結果進 HUD 供複製」：救進剪貼簿＋提示（實機回報的驗收缺口）。
+        //
+        // 歷史（issue #11）：上面那列 outcome 只說「LLM 回了什麼」，看起來跟有落地的一模一樣。
+        // 緊接著補一列說明它的下場，分類 `sessionEnded`（session 已封存，或已被下一個 session 取代）：
+        // 救進剪貼簿的記 `insertSkipped`（內容沒丟，是沒寫進欄位——與其他救援出口同一個 kind），
+        // 其餘記 `outcomeDropped`。HUD 照舊不發：封存是使用者自己的動作（點別處、Esc），不是錯誤。
         guard ledger.isActive, ledger.generation == generation else {
             if wasBuffered, lastRescueGeneration != generation {
                 switch outcome {
@@ -1074,12 +1128,17 @@ public final class DictationController {
                     // 世代已過期，救的是**舊 session** 的內容，而使用者此刻可能已經開了新 session
                     // （`ledger.generation` 已跳號）。用當下的世代會讓這段舊內容被當成新 session 的
                     // 同一輪而串在它的救援後面——round token 要防的正是這件事。
+                    recordHistoryEvent(sessionID: historyID, kind: "insertSkipped", classification: "sessionEnded",
+                                       utteranceText: utteranceRaw)
                     rescueToClipboard(text, round: generation)
                     presentRescueNotice("選取已變動，結果已入剪貼簿")
+                    return
                 case .undo, .degraded:
                     break                              // 無內容可救，安靜丟棄即可
                 }
             }
+            recordHistoryEvent(sessionID: historyID, kind: "outcomeDropped", classification: "sessionEnded",
+                               utteranceText: utteranceRaw)
             return
         }
         // 選取目標尚未落地：pending 期間的所有 outcome 一律走選取分派（首次替換的三種結局）
@@ -1140,6 +1199,9 @@ public final class DictationController {
                         abortForSecureField()
                     }
                 } catch {
+                    // 與 raw 定稿插入失敗那條一致（issue #20）：記一列 `insertFailed`，分類標 `buffered`。
+                    recordInsertEvent(kind: "insertFailed", classification: "buffered",
+                                      utteranceText: text, detail: "\(error)")
                     rescueToClipboard(text)
                     presentRescueNotice("插入失敗，內容已入剪貼簿")
                 }
@@ -1422,17 +1484,24 @@ public final class DictationController {
         return "crossApp:\(capturedFrontAppBundleID ?? "?")→\(current ?? "?")"
     }
 
-    /// 插入層事件補列（M7 §4）：kind 三分——insertFailed＝coordinator 拋錯（真 I/O 失敗）、
+    /// 插入層事件補列（M7 §4）：kind 三分——insertFailed＝coordinator 拋錯（真 I/O 失敗；classification
+    /// `raw`／`buffered` 標出是定稿上屏還是緩衝句落地，detail 帶錯誤，issue #20）、
     /// insertSkipped＝守衛拒絕（原文正確保留，非失敗；classification `fieldChanged` 即 issue #37
     /// 寫入前閘門攔下這一句、`secureUnknown` 即 AX 連兩次問不出 subrole 而 fail closed、
-    /// `frozen` 即使用者已動手）、outcomeDropped＝這句的 LLM 結果被丟棄（classification
-    /// `skippedRaw`：raw 有片段沒上屏，潤飾套下去會把被拒的內容偷渡回欄位）。
+    /// `frozen` 即使用者已動手、`sessionEnded` 即緩衝句的 outcome 在 session 結束後才回來而改救剪貼簿）、
+    /// outcomeDropped＝這句的 LLM 結果被丟棄（classification `skippedRaw`：raw 有片段沒上屏，潤飾套下去
+    /// 會把被拒的內容偷渡回欄位；`sessionEnded`：outcome 回來時 session 已封存或已被取代，issue #11）。
+    /// 另有 `finalizedDropped`（issue #20）不經本函式：相位守衛丟掉的定稿，見 `recordFinalizedDroppedByPhase`。
     ///
-    /// 與正常 outcome 列共用 gate 與 session。**時序不是單一規則**，回查歷史排序時要分三種：
-    /// - 在 `handleTranscript` 記的（`frozen`、`fieldChanged`）：早於該句的 outcome 列——
+    /// 本函式掛在**呼叫當下**的 `historySessionID`。在途 outcome 的下場（`dispatch` 的世代守衛之前）
+    /// 不能用它——那時 session 可能已封存或已換人，改用 `recordHistoryEvent` 帶話語閉合當下的 id。
+    ///
+    /// 與正常 outcome 列共用 gate 與 session。**時序不是單一規則**，回查歷史排序時要分四種：
+    /// - 在 `handleTranscript` 記的（`frozen`、`fieldChanged`、`insertFailed/raw`）：早於該句的 outcome 列——
     ///   守衛跑在上屏當下，該句稍後才產生自己的 outcome 列。
-    /// - 在 dispatch／apply 記的（`tailAdvanced`／`unverified`／`fieldMismatch`／`outcomeDropped`）：
-    ///   在該句的 outcome 列**之後**（dispatch 先記、apply 後跑），兩列相鄰。
+    /// - 在 dispatch／apply 記的（`tailAdvanced`／`unverified`／`fieldMismatch`／`outcomeDropped`／
+    ///   `sessionEnded`／`insertFailed/buffered`）：在該句的 outcome 列**之後**（dispatch 先記、apply 後跑），兩列相鄰。
+    /// - `finalizedDropped`：那段定稿根本沒進斷句器，**永遠不會有** outcome 列。
     /// - `secureUnknown`（`:341` 那道守衛與寫入前的閘門**都會**記）與 `secureField`（**只有**
     ///   寫入前的閘門會記——`:341` 的 `.secure` case 直接 `abortForSecureField()` 就 return，
     ///   不留 `insertSkipped` 列）：兩者都**沒有** outcome 列可相鄰，session 當場 abort。
@@ -1443,7 +1512,16 @@ public final class DictationController {
     /// 可能是密碼欄位的路徑一律傳 `""`，改把判讀用的 metadata 放進 `detail`（issue #10 的不變式）。
     private func recordInsertEvent(kind: String, classification: String,
                                    utteranceText: String, detail: String? = nil) {
-        guard settings.historyEnabled, let hid = historySessionID else { return }
+        recordHistoryEvent(sessionID: historySessionID, kind: kind, classification: classification,
+                           utteranceText: utteranceText, detail: detail)
+    }
+
+    /// 診斷列的唯一出口：明確指定掛在哪個 session。nil＝那個 session 沒在記錄，**不記**——
+    /// 不退回目前的 `historySessionID`，否則舊 session 的內容會被記成新 session 的（issue #11）。
+    /// `settings.historyEnabled` 仍以寫入當下為準：使用者中途關閉歷史之後，一列都不補。
+    private func recordHistoryEvent(sessionID: String?, kind: String, classification: String,
+                                    utteranceText: String, detail: String? = nil) {
+        guard settings.historyEnabled, let hid = sessionID else { return }
         history?.recordExchange(.init(sessionID: hid, at: now(),
                                       utteranceRaw: utteranceText,
                                       outcomeKind: kind,
