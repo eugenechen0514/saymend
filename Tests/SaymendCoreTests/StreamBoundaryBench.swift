@@ -7,8 +7,9 @@ import WhisperKit
 /// issue #19 的量測 harness：**預設不跑**，設了 `SAYMEND_BENCH19_MODEL` 才跑。
 ///
 /// 用合成語音以即時速度餵給真的 `WhisperKitTranscriber`（與正式路徑同一條：串流轉錄器、
-/// 收尾補解碼都在），記下每一則進度快照，再照 `WhisperKitEngine.pump` 的規則算出引擎會送出的定稿。
-/// 分析在 repo 外做，這裡只負責產生資料。
+/// 收尾補解碼都在），記下每一則進度快照，並算出**不做邊界重複判斷**時會送出的定稿當對照組。
+/// 正式引擎（含判斷）的結果用 `StreamBoundaryReplay` 把快照重播給它取得。
+/// 這裡只負責產生資料；語料、矩陣與分析腳本在 `Scripts/bench/stream-boundary/`（見 ADR 0002）。
 ///
 /// 環境變數：
 /// - `SAYMEND_BENCH19_MODEL`：模型資料夾
@@ -47,7 +48,7 @@ struct StreamBoundaryBench {
         let drainingTailAt: Double?
         let feedEndAt: Double
         let finishedAt: Double
-        /// 照 `WhisperKitEngine.pump` 算出的 `.finalized` 序列（定稿增量＋收尾補發）
+        /// 對照組：不做邊界重複判斷時的 `.finalized` 序列（定稿增量＋收尾補發），即 #19 之前的行為
         let emissions: [String]
         /// 比對用：繁轉簡、去掉標點與空白（小模型會簡繁混用，不正規化會漏判重複）
         let emissionsN: [String]
@@ -179,7 +180,7 @@ struct StreamBoundaryBench {
                       textN: normalize(item.text), error: errorText)
     }
 
-    /// 照 `WhisperKitEngine.pump` 的規則：定稿變了就送新增的那段，結束時把殘留的暫時文字補發。
+    /// #19 之前的 `WhisperKitEngine.pump` 規則：定稿變了就送新增的那段，結束時把殘留的暫時文字補發。
     static func emissions(of snapshots: [Snapshot]) -> [String] {
         var out: [String] = []
         var lastConfirmed = "", lastUnconfirmed = ""
