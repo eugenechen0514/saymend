@@ -23,6 +23,12 @@ import Testing
         #expect(o.overlap == 6)
     }
 
+    /// 重疊有長有短時取最長的：「好」與「好好」都對得上，重解出來的是「好好」
+    @Test func theLongestOverlapWins() {
+        let o = resolve("好好的", after: "他說好好", witness: "的")
+        #expect(o == .init(text: "的", overlap: 2, trimmed: true))
+    }
+
     /// 整段都是重解出來的：裁完什麼都不剩
     @Test func anEntirelyRedecodedPieceBecomesEmpty() {
         let o = resolve("好的", after: "他說好好的", witness: "那我們")
