@@ -14,11 +14,26 @@ public final class DictationController {
     /// session 延續窗（規格 §3.4）：正常結束後 8 秒內再按＝同 session 延續
     public static let lingerWindow: TimeInterval = 8.0
 
-    /// 內部狀態機：finishing＝排空窗；lingering＝延續窗。兩者對外皆等同 idle。
+    /// issue #85：排空中按下熱鍵時先錄下來的音訊，等上一段的辨識跑完才交給辨識器。
+    ///
+    /// 排空中按下以前是「捨棄排空、立刻開新 session」（#83／#84），還沒送達的定稿就此消失——
+    /// 批次引擎（Whisper 遠端）的排空就是在等整段話的上傳結果，會整段遺失。現在改成先錄、後接手：
+    /// 舊串流照常跑完（定稿上屏、潤飾），之後的接手與「排空跑完才按」走同一條路（延續窗續聽或開新 session）。
+    /// 辨識器同一時間只跑一條串流——本機 WhisperKit 的兩條串流會共用同一份 CoreML 模型，不能並行。
+    private struct QueuedCapture {
+        /// 排隊期間每次按下各錄一條；放開後、排空還沒結束又按，就再錄一條。接手時依序串成一條交給辨識器。
+        var segments: [AsyncStream<AudioChunk>]
+        /// 還在錄的話是哪種模式；nil＝已放開，最後一條已經收完
+        var mode: ListeningMode?
+    }
+
+    /// 內部狀態機：finishing＝排空窗；queued＝排空窗中又按了熱鍵（issue #85）；lingering＝延續窗。
+    /// 對外：finishing、lingering 等同 idle；queued 在錄音時等同 listening。
     private enum InternalPhase {
         case idle
         case listening(ListeningMode)
         case finishing
+        case queued(QueuedCapture)
         case lingering(until: TimeInterval)
     }
     private var internalPhase: InternalPhase = .idle
@@ -27,7 +42,20 @@ public final class DictationController {
         switch internalPhase {
         case .idle, .finishing, .lingering: return .idle
         case .listening(let mode): return .listening(mode)
+        case .queued(let q): return q.mode.map { .listening($0) } ?? .idle
         }
+    }
+
+    /// 麥克風是否正在為使用者錄音（`.listening`，或 issue #85 排隊中且還沒放開）。焦點監看只在這段期間有意義。
+    private var isRecording: Bool {
+        if case .listening = internalPhase { return true }
+        return isRecordingQueued
+    }
+
+    /// issue #85：排隊中且還沒放開——錄的是新的一段，辨識器上跑的卻還是上一段的串流
+    private var isRecordingQueued: Bool {
+        if case .queued(let q) = internalPhase { return q.mode != nil }
+        return false
     }
 
     /// 是否在 8 秒延續窗內（HUD 與測試用）
@@ -147,13 +175,15 @@ public final class DictationController {
     private(set) var volatileGateStats = VolatileGateStats()
     /// 最近一次輸出到 log 的那份量測（測試觀察用：os.Logger 本身沒有可觀察的 seam）
     private(set) var lastFlushedVolatileGateStats: VolatileGateStats?
-    /// issue #70：本段錄音的焦點監看 handle。只在 `.listening` 期間非 nil——每條離開 `.listening` 的路徑
-    /// （`endListening`、`archiveSession`、`asrStreamEnded`）都會呼叫 `stopFocusWatch()`，那是唯一的歸還點。
+    /// issue #70：本段錄音的焦點監看 handle。只在錄音期間（`.listening`，或 issue #85 排隊中還沒放開）非 nil——
+    /// 每條結束錄音的路徑（`endListening`、`endQueuedCapture`、`archiveSession`、`asrStreamEnded`）都會呼叫
+    /// `stopFocusWatch()`，那是唯一的歸還點。
     private var focusWatch: (any FocusWatch)?
     /// 監看世代：每次開始、停止都遞增。callback 帶著開始當下的世代，對不上就是舊 watch 的遲到通知——
     /// controller 自己認得，不依賴 App 端「observer 移除後就不會再送」。
     private var focusWatchEpoch = 0
     private static let hudLog = Logger(subsystem: "io.saymend.app", category: "hud")
+    private static let sessionLog = Logger(subsystem: "io.saymend.app", category: "session")
 
     public init(audio: any AudioCaptureService,
                 asr: any ASREngine,
@@ -189,11 +219,18 @@ public final class DictationController {
 
     public func hotkeyPressed(at t: TimeInterval) {
         switch internalPhase {
-        case .idle, .finishing, .lingering:
-            // finishing：上一 session 排空中按下＝先封存舊 session、再立刻開新 session（跳號過濾舊事件，issue #83）。
+        case .idle, .lingering:
             // lingering：延續窗內按下＝同 session 續聽（帳本延續，規格 §3.4）。
             pressedAt = t
             startListening(mode: .hold, at: t)
+        case .finishing:
+            // 上一段排空中按下＝先錄、等排空跑完再接手（issue #85，見 `QueuedCapture`）
+            pressedAt = t
+            queueCapture()
+        case .queued(let q):
+            pressedAt = t
+            // 還在錄：同 `.listening`。已放開、排空仍沒結束又按：再錄一條，接手時接在後面
+            if q.mode == nil { queueCapture() }
         case .listening:
             pressedAt = t   // 鎖定模式的潛在「結束 tap」；hold 下的 key repeat 只更新時間
         }
@@ -212,6 +249,22 @@ public final class DictationController {
             }
         case .listening(.locked):
             if isTap { endListening(at: t) }
+        case .queued(var q):
+            // 與 `.listening` 同一套 tap／長按規則，只是放開時辨識還沒開始，只收音
+            switch q.mode {
+            case .hold?:
+                if isTap {
+                    q.mode = .locked
+                    internalPhase = .queued(q)
+                    presentListening(mode: .locked, volatile: "")
+                } else {
+                    endQueuedCapture(q)
+                }
+            case .locked?:
+                if isTap { endQueuedCapture(q) }
+            case nil:
+                break
+            }
         case .idle, .finishing, .lingering:
             break
         }
@@ -243,13 +296,18 @@ public final class DictationController {
             archiveSession()                // 延續窗中按 Esc＝提前定稿（吞掉 Esc 由熱鍵層處理）
             return
         }
-        if case .finishing = internalPhase {
-            // 排空窗中按 Esc＝中止排空並定稿——否則 Esc 被熱鍵層吞掉又無作用，整顆蒸發
+        switch internalPhase {
+        case .finishing, .queued:
+            // 排空窗中按 Esc＝中止排空並定稿——否則 Esc 被熱鍵層吞掉又無作用，整顆蒸發。
+            // 排隊中（issue #85）同樣中止排空；排隊的錄音由 archiveSession 停掉並丟棄（還沒辨識，沒有字要退）。
             asr.cancel()
             archiveSession()
             return
+        case .listening:
+            break
+        case .idle, .lingering:
+            return
         }
-        guard case .listening = internalPhase else { return }
         segmenter.hardReset()
         asr.cancel()
         audio.stop()
@@ -307,7 +365,7 @@ public final class DictationController {
     /// 聽寫中＝凍結（文字定稿、不再改寫，錄音照常）；延續窗中＝立即封存（設計裁決 2）。
     public func userActivityDetected(at t: TimeInterval) {
         switch internalPhase {
-        case .listening, .finishing:
+        case .listening, .finishing, .queued:
             guard ledger.isActive, !ledger.frozen else { return }
             ledger.freeze()
             feedback?.sessionFrozen()
@@ -324,7 +382,7 @@ public final class DictationController {
         switch internalPhase {
         case .idle:
             return                              // 沒有 session：按鈕不該出現，防禦性忽略
-        case .listening, .finishing, .lingering:
+        case .listening, .finishing, .queued, .lingering:
             break
         }
         guard ledger.isActive, !ledger.frozen else { return }
@@ -355,6 +413,10 @@ public final class DictationController {
             focusWatch?.resync()
             guard case .listening = internalPhase else { return }
             process(actions: segmenter.onTick(at: t))
+        case .queued:
+            // issue #85：排隊中還在錄的話，監看同樣要跟著焦點所屬的行程（放開後已停，resync 是 no-op）。
+            // 斷句器不動：它此刻屬於還在排空的舊串流，排空窗本來就不 tick。
+            focusWatch?.resync()
         case .lingering(let until):
             if t >= until { archiveSession() }
         case .idle, .finishing:
@@ -367,8 +429,8 @@ public final class DictationController {
         case .idle, .lingering:
             recordFinalizedDroppedByPhase(event)   // 照舊丟掉，但不再零紀錄（issue #20）
             return
-        case .listening, .finishing:
-            break   // finishing（排空窗）的尾端 finalized 仍須處理，不能丟
+        case .listening, .finishing, .queued:
+            break   // finishing（排空窗）的尾端 finalized 仍須處理，不能丟；queued 時排空中的仍是同一條串流（issue #85）
         }
         // **示警不進斷句器**（issue #18）：斷句器對任何辨識事件都會重置靜音計時，
         // 而本事件與「有沒有人在講話」無關。放進去會讓靜音間隔延後到期、話語晚閉合，
@@ -569,11 +631,14 @@ public final class DictationController {
                 }
             }
         case .transcribing:
-            hud.present(.transcribing)          // 批次引擎等待結果中；不動 ledger、不動欄位
+            // 批次引擎等待結果中；不動 ledger、不動欄位。
+            // issue #85：排隊中還在錄的話，這是**上一段**串流的狀態——畫面屬於使用者正在說的這段，不得蓋掉它。
+            if !isRecordingQueued { hud.present(.transcribing) }
         case .loadingModel:
-            hud.present(.loadingModel)          // 本機模型載入中（首次較久）；同樣不動 ledger、不動欄位
+            // 本機模型載入中（首次較久）；同樣不動 ledger、不動欄位。排隊中錄音時同上。
+            if !isRecordingQueued { hud.present(.loadingModel) }
         case .failed(let reason):
-            handleASRFailure(reason: reason)
+            handleASRFailure(reason: reason, at: t)
         case .noSpeechDetected:
             break   // 前方已提前 return（刻意不進 segmenter），此處不可達；列出僅為窮盡性
         }
@@ -619,8 +684,8 @@ public final class DictationController {
         case .lingering:
             phase = "lingering"
             droppedFrom = historySessionID
-        case .listening, .finishing:
-            return                              // 這兩個相位不會丟，呼叫端也不會在這時呼叫
+        case .listening, .finishing, .queued:
+            return                              // 這幾個相位不會丟，呼叫端也不會在這時呼叫
         }
         recordHistoryEvent(sessionID: droppedFrom, kind: "finalizedDropped", classification: phase,
                            utteranceText: "", detail: "chars:\(text.count)")
@@ -691,14 +756,22 @@ public final class DictationController {
     public func asrStreamEnded(at t: TimeInterval) {
         // 相位守衛＝冪等：Esc 已直達 idle、或 readerTask 與測試直呼造成的重複 stream-end，
         // 一律忽略——避免第二次進入把 lingering 重新上膛或重複 flush。
+        // issue #85：排隊中結束的是**上一段**的串流。先把排隊的錄音取出來、相位退回排空窗，
+        // 下面照一般的排空結束收尾舊 session（archiveSession 看到的是 `.finishing`，不會停掉排隊的錄音），
+        // 收完才接手。
+        var queued: QueuedCapture?
         switch internalPhase {
         case .idle, .lingering:
             return
         case .listening, .finishing:
             break
+        case .queued(let q):
+            queued = q
+            internalPhase = .finishing
         }
         // issue #70：錄音中 ASR 串流自己結束（沒先送 `.failed`，例如麥克風斷線）會從 `.listening` 直接進延續窗，
         // 不經 `endListening`。不再收音，監看到此為止；finishing 進來時早已停過，這裡是 no-op。
+        // 排隊中還在錄的話這裡會停掉它的監看——接手的 `startListening` 在同一個 MainActor turn 內重新掛上並補查一次。
         stopFocusWatch()
         process(actions: segmenter.flush())
         // issue #18：整段沒偵測到語音且確實一個字都沒產出——發提示**取代**延續窗。
@@ -710,18 +783,22 @@ public final class DictationController {
         // 「一個字都沒產出」同時**就是示警的解除機制**——使用者在示警之後才開口時文字會產出，
         // 這裡自然不發，不需要另一個解除事件。notice 必須排在 archiveSession 之後，
         // 否則會被它發的 .hidden 蓋掉。
+        var notice: String?
         if sawNoSpeechWarning, !sawTextThisSession {
             archiveAfterDrain = false
             archiveSession()
-            hud.present(.notice(Self.noSpeechNotice))
-            return
-        }
-        if archiveAfterDrain || ledger.frozen || !ledger.isActive {
+            notice = Self.noSpeechNotice
+        } else if archiveAfterDrain || ledger.frozen || !ledger.isActive {
             archiveAfterDrain = false
             archiveSession()
         } else {
             internalPhase = .lingering(until: t + Self.lingerWindow)
-            hud.present(.lingering)
+            if queued == nil { hud.present(.lingering) }   // 馬上就要接手，不閃一下「可修正」
+        }
+        if let queued {
+            resumeQueued(queued, at: t, oldSessionNotice: notice)
+        } else if let notice {
+            hud.present(.notice(notice))
         }
     }
 
@@ -738,30 +815,21 @@ public final class DictationController {
 
     // MARK: - 內部
 
-    private func startListening(mode: ListeningMode, at t: TimeInterval) {
+    /// 進入 `.listening` 的唯一入口。`recorded`＝issue #85 排隊時已錄好的音訊（由 `resumeQueued` 傳入）：
+    /// 不再開麥克風，直接交給辨識器；其餘與當下按下熱鍵完全相同（密碼欄拒絕、續聽或開新 session、監看與補查）。
+    /// 進來時的相位只會是 idle 或 lingering——排空窗中按下走 `queueCapture`，不經這裡。
+    private func startListening(mode: ListeningMode, at t: TimeInterval, recorded: QueuedCapture? = nil) {
         // 密碼欄位拒絕（規格 §5.3）：不錄音、不送 LLM、不開 session
         let field = fieldReader?.snapshot() ?? FieldContext()
         if field.isSecure {
             // 延續窗中改在密碼欄按下：封存前一 session（含清除 session 級語系覆蓋，設計裁決 4）。
             // hud.present 須在 archiveSession（會發 .hidden）之後，否則 notice 被蓋掉。
+            // issue #85：排隊的錄音接手時焦點已在密碼欄——錄好的音訊一個字都不辨識，還在錄的話停掉。
             releaseFieldLease(field.fieldIdentity)   // 不開 session：token 不採用
+            if recorded?.mode != nil { audio.stop() }
             archiveSession()
             hud.present(.notice("密碼欄位不聽寫"))
             return
-        }
-        // 排空中按下＝開新 session（issue #83）：舊 session 必須先封存乾淨，比照排空中按 Esc。
-        // 以前直接往下走到 `ledger.begin` 覆寫舊 session、完全不經 `archiveSession()`：舊 session 永遠不
-        // `finishSession`（歷史沒定稿），起始欄位的 lease 也漏還（#43）。
-        //
-        // 下面的 `readerTask?.cancel()` 會終止舊的辨識串流（`AsyncStream` 的 `onTermination` 連帶取消引擎的
-        // pump），還沒送達的定稿就此捨棄——那是「立刻開新 session」的既有取捨，本處不改（保住它是行為變更）。
-        // 至少在**舊** session 的歷史留一列，不再零痕跡。內容不知道（根本沒送達），`utteranceText` 留空。
-        // **必須先記再封存**：archive 會把 `historySessionID` 清成 nil，沒有 hid 的列會整筆靜默丟掉。
-        //
-        // 只限 `.finishing`：`.lingering` 是同 session 續聽（下面的 `resuming`），`.idle` 早已封存過。
-        if case .finishing = internalPhase {
-            recordInsertEvent(kind: "drainAbandoned", classification: "newSession", utteranceText: "")
-            archiveSession()
         }
         do {
             readerTask?.cancel()
@@ -820,7 +888,7 @@ public final class DictationController {
             }
             sessionID &+= 1
             let sid = sessionID
-            let audioStream = try audio.start()
+            let audioStream = try recorded.map { Self.concatenate($0.segments) } ?? audio.start()
             let events = asr.start(audio: audioStream, localeIdentifier: settings.asrLocaleIdentifier)
             internalPhase = .listening(mode)
             // issue #70：錄音從這裡開始，焦點監看也從這裡開始。
@@ -856,6 +924,90 @@ public final class DictationController {
         hud.present(.hidden)
     }
 
+    // MARK: - issue #85：排空中按下＝先錄、等排空跑完再接手
+
+    /// 排空窗中（或排隊中已放開又）按下熱鍵：開麥克風錄進新的一條，辨識等排空結束才接手（`resumeQueued`）。
+    ///
+    /// 密碼欄比照 `startListening`：按下當下焦點在密碼欄（含問不出來的 `.secureUnknown`，#59 fail closed）就不錄，
+    /// 並照舊封存舊 session——之後才送達的舊定稿在 idle 被相位守衛丟掉、只留字數（#20／#10）。
+    /// 用輕量閘門而不 snapshot：接手時 `startListening` 會再 snapshot 一次，那時的游標才是續聽或新 session 的
+    /// 正確起點（舊串流剩下的定稿還會把游標往後推），這裡先 snapshot 只會多付一次 AX IPC。
+    /// 錄音開始後的焦點移動由監看負責，與 `.listening` 相同。
+    private func queueCapture() {
+        switch fieldReader?.fieldGate(sessionIdentity: ledger.fieldIdentity) {
+        case .secure?, .secureUnknown?:
+            archiveSession()
+            hud.present(.notice("密碼欄位不聽寫"))
+            return
+        case .same?, .different?, .unknown?, nil:
+            break
+        }
+        var queued = QueuedCapture(segments: [], mode: nil)
+        if case .queued(let q) = internalPhase { queued = q }
+        do {
+            queued.segments.append(try audio.start())
+        } catch {
+            // 麥克風開不起來：排空照常跑完（舊 session 的字不受影響），只是這次按下沒有錄到東西
+            hud.present(.notice("無法啟動麥克風"))
+            return
+        }
+        queued.mode = .hold
+        internalPhase = .queued(queued)
+        startFocusWatch()
+        if abortIfFocusMovedBeforeWatching() { return }
+        presentListening(mode: .hold, volatile: "")
+    }
+
+    /// 排隊中放開熱鍵（issue #85）：這一條錄完了，比照 `endListening` 停麥克風與監看；辨識照舊等排空結束才接手。
+    /// 畫面顯示「辨識中…」：使用者已經說完，在等的就是辨識（先是上一段的排空，接著才是這一段）。
+    private func endQueuedCapture(_ q: QueuedCapture) {
+        var q = q
+        audio.stop()
+        stopFocusWatch()
+        q.mode = nil
+        internalPhase = .queued(q)
+        hud.present(.transcribing)
+    }
+
+    /// 上一段的串流結束（或失敗），接手排隊的錄音（issue #85）。呼叫端已把舊 session 收尾成延續窗（同 session 續聽）
+    /// 或 idle（舊 session 已封存，開新 session）——與「排空跑完才按下」走同一條 `startListening`，
+    /// 密碼欄拒絕、續聽／開新 session、監看與補查全部一樣。
+    ///
+    /// `oldSessionNotice`：舊 session 收尾時要告訴使用者的事（辨識失敗、沒偵測到語音）。接手會立刻把畫面換成錄音中，
+    /// 一般 notice 會被蓋掉，所以走救援提示的通道（`HUDArbiter` 保證至少停留 2 秒，期間的狀態延後重播），
+    /// 而且必須在接手**之前**送出，接手發的狀態才會被延後。
+    private func resumeQueued(_ q: QueuedCapture, at t: TimeInterval, oldSessionNotice: String?) {
+        if let oldSessionNotice { hud.presentRescueNotice(oldSessionNotice) }
+        let resuming = isLingering && ledger.isActive      // 只供 log：與 startListening 的判斷同一式
+        startListening(mode: q.mode ?? .hold, at: t, recorded: q)
+        let started: Bool
+        if case .listening = internalPhase { started = true } else { started = false }
+        // 已經放開：錄音早就收完，直接進排空（與放開熱鍵同一個 `endListening`）
+        if started, q.mode == nil { endListening(at: t) }
+        // 只記數字與分類（#10）。真實使用中多常排隊、等多久，日後回頭看靠的就是這一行。
+        // **這行沒有測試覆蓋**：os_log 的輸出無法在單元測試裡攔截。
+        Self.sessionLog.notice("""
+            排空中按下的錄音已接手：\(q.segments.count, privacy: .public) 條，\
+            \(started ? (resuming ? "同 session 續聽" : "開新 session") : "未接手（已封存）", privacy: .public)，\
+            \(q.mode == nil ? "已放開" : "仍在錄", privacy: .public)
+            """)
+    }
+
+    /// 依序串接排隊期間錄的每一條音訊（issue #85）。只有一條時原樣交出，不多一層轉送。
+    /// 消費端取消（Esc、硬停）時轉送的 Task 跟著取消。
+    nonisolated static func concatenate(_ streams: [AsyncStream<AudioChunk>]) -> AsyncStream<AudioChunk> {
+        if streams.count == 1 { return streams[0] }
+        return AsyncStream { continuation in
+            let task = Task {
+                for stream in streams {
+                    for await chunk in stream { continuation.yield(chunk) }
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     /// issue #65 量測輸出（裁定 Q7）：**只有數字與旗標**，以 debug 等級輸出（Release 預設不落地）。
     /// 事件數為 0 不輸出。輸出後歸零，下一段從頭算。
     /// 判讀：多段 log 彙整出「事件/秒 p95 × 閘門耗時 p95」，超過 20ms/s 再開節流 follow-up。
@@ -879,7 +1031,8 @@ public final class DictationController {
         endListening(at: t)
     }
 
-    /// issue #70：開始本段錄音的焦點監看。只從 `startListening` 進入 `.listening` 的那一點呼叫。
+    /// issue #70：開始本段錄音的焦點監看。只從開始錄音的兩個點呼叫：`startListening` 進入 `.listening`、
+    /// `queueCapture` 進入排隊錄音（issue #85）。
     /// 理論上進來時不會有殘留的 watch（每條離開錄音的路徑都會停）；萬一有，先停掉舊的再開，
     /// 寧可多停一次也不讓兩個 observer 並存。
     private func startFocusWatch() {
@@ -935,7 +1088,7 @@ public final class DictationController {
     ///
     /// 世代對不上（舊 watch 的遲到通知）或已不在錄音中：一律忽略。
     private func focusChanged(to security: FocusedFieldSecurity, epoch: Int) {
-        guard epoch == focusWatchEpoch, case .listening = internalPhase else { return }
+        guard epoch == focusWatchEpoch, isRecording else { return }
         switch security {
         case .notSecure:
             return
@@ -958,6 +1111,10 @@ public final class DictationController {
     }
 
     private func archiveSession() {
+        // issue #85：排隊中封存（Esc、密碼欄硬停、在密碼欄又按下）＝排隊的錄音一併丟棄，還在錄的話停掉麥克風
+        // （`audio.stop()` 冪等，硬停路徑先停過一次也無妨）。要保住它的路徑（舊串流結束或失敗）
+        // 會先把它取出來、相位退回 `.finishing` 才呼叫這裡。
+        if case .queued(let q) = internalPhase, q.mode != nil { audio.stop() }
         archivedHistorySessionID = historySessionID   // 無條件覆寫（含 nil），理由見宣告處（issue #20）
         // 定稿入史（規格 §4.9）：ledger.archive() 會清空 sessionText，故先抓最終全文。
         if let hid = historySessionID {
@@ -1008,12 +1165,23 @@ public final class DictationController {
     /// ② 不 audio.stop() → archiveSession 把 phase 設 idle 後，hotkeyReleased 會落入
     ///    `case .idle, .finishing, .lingering: break`，endListening 的 stop 永不執行＝麥克風漏開；
     /// ③ notice 早於 archiveSession → 被其發出的 .hidden 蓋掉（HUDWindowController 開頭 hideTask.cancel）。
-    private func handleASRFailure(reason: String) {
+    ///
+    /// issue #85：排隊中失敗的是**上一段**——排隊的錄音還沒交給辨識器，不是失敗的那一段。
+    /// 錄音不停、先取出來，舊 session 照常封存，再接手成新 session；失敗提示交給 `resumeQueued` 走救援提示通道，
+    /// 否則接手的錄音畫面會立刻蓋掉它（批次引擎的上傳失敗＝整段話沒了，這則提示是使用者唯一的線索）。
+    private func handleASRFailure(reason: String, at t: TimeInterval) {
         segmenter.hardReset()
         asr.cancel()
+        let notice = "辨識失敗（\(reason)）"
+        if case .queued(let q) = internalPhase {
+            internalPhase = .finishing
+            archiveSession()
+            resumeQueued(q, at: t, oldSessionNotice: notice)
+            return
+        }
         audio.stop()
         archiveSession()
-        hud.present(.notice("辨識失敗（\(reason)）"))
+        hud.present(.notice(notice))
     }
 
     private func process(actions: [UtteranceSegmenter.Action]) {
