@@ -224,6 +224,13 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
             // issue #18：整段零語音的示警狀態。邊緣觸發——一個 session 最多發一次。
             var warnedNoSpeech = false
             var lastStats: (voiced: Int, seconds: Double) = (0, 0)
+            // issue #19：邊界重複的記帳（見 `StreamBoundaryOverlap`）。`emitted` 是已送出定稿的尾端。
+            // 證人＝讓邊界前進的那一趟留下的暫時文字。套件轉正片段時先把它們接上定稿、**緊接著**才把
+            // 那一趟剩下的片段寫進未定稿，兩次各觸發一次回呼：定稿變更那一則帶的暫時文字還是上一趟的，
+            // 下一則才是那一趟的。
+            var emitted = ""
+            var witness: String?
+            var awaitingWitness = false
             for try await element in progress {
                 if Task.isCancelled { continuation.finish(); return }
 
@@ -254,13 +261,21 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
                     let delta = Self.newlyConfirmed(previous: lastConfirmed, current: step.confirmed)
                     let deltaQuality = Self.newlyConfirmedQuality(previousCount: confirmedQualityCount,
                                                                   current: step.confirmedQuality)
+                    // 套件重寫了已定稿的內容時整段重送（寧可重覆），那不是邊界，不做邊界重複的判斷
+                    let crossesBoundary = step.confirmed.hasPrefix(lastConfirmed)
                     lastConfirmed = step.confirmed
                     confirmedQualityCount = step.confirmedQuality.count
-                    let trimmed = delta.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !trimmed.isEmpty {
-                        continuation.yield(.finalized(trimmed,
+                    let text = Self.resolveBoundary(delta, emitted: &emitted,
+                                                    witness: crossesBoundary ? witness : nil)
+                    if !text.isEmpty {
+                        continuation.yield(.finalized(text,
                                                       quality: TranscriptQuality(segments: deltaQuality)))
                     }
+                    witness = nil
+                    awaitingWitness = true
+                } else if awaitingWitness {
+                    witness = step.unconfirmed
+                    awaitingWitness = false
                 }
                 // 未定稿的品質**每一步都留存**，不跟著文字去重。去重紀律是為了不亂發事件，
                 // 而這只是更新一個本地變數；跟著去重的話，套件重新解碼出同樣文字但不同信心度時，
@@ -272,7 +287,8 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
                 }
             }
             if Task.isCancelled { continuation.finish(); return }
-            flushTail(lastUnconfirmed, quality: TranscriptQuality(segments: lastUnconfirmedQuality),
+            flushTail(Self.resolveBoundary(lastUnconfirmed, emitted: &emitted, witness: witness),
+                      quality: TranscriptQuality(segments: lastUnconfirmedQuality),
                       into: continuation)
             // 1.5–3.0 秒的零語音 session 在聽寫中不夠格示警，收尾才補——
             // 少了這一關，短嘗試會完全靜默，正是本票要消滅的失敗模式。
@@ -306,6 +322,24 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
                            into continuation: AsyncStream<TranscriptEvent>.Continuation) {
         let trimmed = tail.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { continuation.yield(.finalized(trimmed, quality: quality)) }
+    }
+
+    /// 送出前處理邊界重複（issue #19，見 `StreamBoundaryOverlap`），並把送出的文字記進 `emitted`。
+    /// 回傳已去掉前後空白的文字，空字串＝什麼都不送。
+    ///
+    /// Log 只記字數與判定，不記任何文字。重疊但保留的情況也記：合法的重複與證人漏抓的重複都在這裡，
+    /// 日後要回頭看真實使用中這條規則多常出手、多常放手，靠的就是這兩種紀錄的比例。
+    static func resolveBoundary(_ text: String, emitted: inout String, witness: String?) -> String {
+        let outcome = StreamBoundaryOverlap.resolve(text, after: emitted, witness: witness)
+        if outcome.overlap > 0 {
+            log.notice("""
+                邊界重疊 \(outcome.overlap, privacy: .public) 字：\
+                \(outcome.trimmed ? "證人不支持，判定重複、已裁掉" : "證人缺席或支持，保留", privacy: .public)
+                """)
+        }
+        let result = outcome.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        emitted = String((emitted + result).suffix(StreamBoundaryOverlap.maxOverlap * 4))
+        return result
     }
 
     /// 定稿文字只增不減，故新增部分＝去掉共同前綴。萬一不是前綴關係（套件重寫了已定稿

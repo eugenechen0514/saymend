@@ -779,3 +779,124 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         #expect(!evs.contains(.finalized("遲到結果")))
     }
 }
+
+/// issue #19：串流定稿的邊界重複。
+///
+/// 進度序列照套件真實的回呼順序排：一趟轉正片段時先把它們接上定稿（這一則帶的暫時文字還是
+/// **上一趟**的），緊接著才把那一趟剩下的片段寫進未定稿（這一則才是**證人**）。
+@Suite struct WhisperKitEngineBoundaryTests {
+    /// issue #19 的原始案例：第二趟轉正「今天天氣不錯」、剩下「我想」；第三趟從邊界重解成
+    /// 「不錯我想出去走走」，收尾補發時裁掉重解出來的「不錯」
+    @Test func theRedecodedOverlapIsTrimmedFromTheTailFlush() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "", unconfirmed: "今天天氣不錯"),
+            .init(confirmed: "今天天氣不錯", unconfirmed: "今天天氣不錯"),
+            .init(confirmed: "今天天氣不錯", unconfirmed: "我想"),
+            .init(confirmed: "今天天氣不錯", unconfirmed: "不錯我想出去走走"),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["今天天氣不錯", "我想出去走走"])
+    }
+
+    /// 重解出來的字被下一趟轉正（而不是留到收尾）時，同樣裁掉
+    @Test func theRedecodedOverlapIsTrimmedFromAConfirmedDelta() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "今天天氣不錯，", unconfirmed: "今天天氣不錯"),
+            .init(confirmed: "今天天氣不錯，", unconfirmed: "我想"),
+            .init(confirmed: "今天天氣不錯，不錯我想出去走走。", unconfirmed: "我想"),
+            .init(confirmed: "今天天氣不錯，不錯我想出去走走。", unconfirmed: "順便買水果"),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["今天天氣不錯，", "我想出去走走。", "順便買水果"])
+    }
+
+    /// 合法的跨句重複：讓邊界前進的那一趟也聽到邊界之後是「不錯」，保留
+    @Test func aRepeatTheWitnessAlsoHeardIsKept() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "這家餐廳的菜色不錯。", unconfirmed: "這家餐廳的菜色不錯"),
+            .init(confirmed: "這家餐廳的菜色不錯。", unconfirmed: "不錯的地方"),
+            .init(confirmed: "這家餐廳的菜色不錯。", unconfirmed: "不錯的地方是價格也很合理"),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["這家餐廳的菜色不錯。", "不錯的地方是價格也很合理"])
+    }
+
+    /// 證人取自定稿變更的**下一則**。定稿變更那一則帶的是上一趟的暫時文字，
+    /// 拿它當證人會判反：這裡它以「不錯」開頭（會誤判成合法而保留），真正的證人是「我想」。
+    @Test func theWitnessIsTheStepAfterTheConfirmationNotTheConfirmationItself() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "今天天氣不錯", unconfirmed: "不錯我"),
+            .init(confirmed: "今天天氣不錯", unconfirmed: "我想"),
+            .init(confirmed: "今天天氣不錯", unconfirmed: "不錯我想出去走走"),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["今天天氣不錯", "我想出去走走"])
+    }
+
+    /// 反方向：定稿變更那一則的暫時文字會支持裁切，真正的證人卻說邊界之後就是「不錯」——保留
+    @Test func aStaleUnconfirmedOnTheConfirmationStepDoesNotTrimALegitRepeat() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "菜色不錯。", unconfirmed: "價格"),
+            .init(confirmed: "菜色不錯。", unconfirmed: "不錯的地方"),
+            .init(confirmed: "菜色不錯。", unconfirmed: "不錯的地方是價格"),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["菜色不錯。", "不錯的地方是價格"])
+    }
+
+    /// 證人只算一次：之後的暫時文字（已經是從邊界重解的結果，自己也可能含重複）不得蓋掉它
+    @Test func laterUnconfirmedTextDoesNotReplaceTheWitness() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "今天天氣不錯", unconfirmed: "今天天氣不錯"),
+            .init(confirmed: "今天天氣不錯", unconfirmed: "我想"),
+            .init(confirmed: "今天天氣不錯", unconfirmed: "不錯我想"),
+            .init(confirmed: "今天天氣不錯", unconfirmed: "不錯我想出去走走"),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["今天天氣不錯", "我想出去走走"])
+    }
+
+    /// 證人只屬於它那個邊界。連續兩次轉正之間沒有新的證人（真的套件不會這樣，但要 fail closed）：
+    /// 不得沿用上一個邊界的證人。這裡上一個證人「嗯」會支持裁切，沿用就會吃掉「我想去」。
+    @Test func aWitnessIsNotReusedForTheNextBoundary() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "今天天氣不錯", unconfirmed: "今天天氣不錯"),
+            .init(confirmed: "今天天氣不錯", unconfirmed: "嗯"),
+            .init(confirmed: "今天天氣不錯，我想去", unconfirmed: ""),
+            .init(confirmed: "今天天氣不錯，我想去我想去公園", unconfirmed: ""),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["今天天氣不錯", "，我想去", "我想去公園"])
+    }
+
+    /// 套件重寫了已定稿的內容（不是前綴關係）時整段重送，那不是邊界，不得拿舊證人去裁
+    @Test func aRewrittenConfirmedTextIsNotTreatedAsABoundary() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "今天不錯", unconfirmed: "今天不錯"),
+            .init(confirmed: "今天不錯", unconfirmed: "天氣"),
+            .init(confirmed: "不錯天氣", unconfirmed: ""),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["今天不錯", "不錯天氣"])
+    }
+
+    /// 同一段裡的疊字不受影響（「好好好」「對對對」「不錯不錯」）
+    @Test func repeatsInsideOnePieceAreUntouched() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "好好好，", unconfirmed: "好好好"),
+            .init(confirmed: "好好好，", unconfirmed: "隨便"),
+            .init(confirmed: "好好好，對對對，不錯不錯。", unconfirmed: "隨便"),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["好好好，", "對對對，不錯不錯。", "隨便"])
+    }
+}
