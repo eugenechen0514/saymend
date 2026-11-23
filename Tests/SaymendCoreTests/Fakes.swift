@@ -25,9 +25,12 @@ final class FakeAudio: AudioCaptureService {
 final class FakeASR: ASREngine {
     private(set) var startCount = 0
     private(set) var cancelCount = 0
+    /// 每次 `start` 收到的音訊流（issue #85：驗證排隊的錄音確實交給了辨識器、而且依序串接）
+    private(set) var audioStreams: [AsyncStream<AudioChunk>] = []
     var continuation: AsyncStream<TranscriptEvent>.Continuation?
     func start(audio: AsyncStream<AudioChunk>, localeIdentifier: String) -> AsyncStream<TranscriptEvent> {
         startCount += 1
+        audioStreams.append(audio)
         let (stream, cont) = AsyncStream.makeStream(of: TranscriptEvent.self)
         continuation = cont
         return stream
@@ -510,9 +513,9 @@ func makeStatefulController(
     history: FakeHistory? = nil,
     feedback: FakeFeedback? = nil,
     wrapHUD: (FakeHUD) -> any HUDPresenting = { $0 },
-    focusWatcher: (any FocusChangeWatching)? = nil
+    focusWatcher: (any FocusChangeWatching)? = nil,
+    audio: FakeAudio = FakeAudio()
 ) -> (DictationController, FakeASR, FakeHUD) {
-    let audio = FakeAudio()
     let asr = FakeASR()
     let hud = FakeHUD()
     let suite = "test-\(UUID().uuidString)"

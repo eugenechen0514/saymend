@@ -233,8 +233,8 @@ import Testing
         let (c, asr, _) = makeStatefulController(env: env, focusWatcher: env)
         c.hotkeyPressed(at: 10.0)
         c.hotkeyReleased(at: 11.0)                         // 第一段停止監看，進排空窗
-        c.hotkeyPressed(at: 11.5)                          // 排空中按下＝立刻開新 session
-        #expect(env.watchStarts == 2 && env.activeWatchCount == 1, "前提：新 session 有自己的監看")
+        c.hotkeyPressed(at: 11.5)                          // 排空中按下＝排隊錄音（issue #85），同樣開始監看
+        #expect(env.watchStarts == 2 && env.activeWatchCount == 1, "前提：排隊的錄音有自己的監看")
 
         env.deliverToStoppedWatches(.secure)
 

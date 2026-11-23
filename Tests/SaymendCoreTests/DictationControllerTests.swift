@@ -744,7 +744,8 @@ import Testing
     c.receiveTranscript(.finalized("甲"), session: a, at: 10.5)      // 當前 session → 上屏
     #expect(key.ops.contains(.insert("甲")))
     c.hotkeyReleased(at: 11.0)                                       // 進排空窗
-    c.hotkeyPressed(at: 12.0)                                        // 排空窗內開 session B（跳號＋reset）
+    c.escapePressed()                                                // 中止排空（A 的串流可能還有在途事件）
+    c.hotkeyPressed(at: 12.0)                                        // 開 session B（跳號＋reset）
     let b = c.sessionID
     #expect(b != a)
     c.receiveTranscript(.finalized("污染"), session: a, at: 12.5)     // A 的殘留 → 必須丟棄
@@ -761,6 +762,7 @@ import Testing
     c.hotkeyPressed(at: 10.0)                                        // session A
     let a = c.sessionID
     c.hotkeyReleased(at: 11.0)                                       // 進排空窗
+    c.escapePressed()                                                // 中止排空（A 的 stream-end 仍可能遲到）
     c.hotkeyPressed(at: 12.0)                                        // 開 session B
     c.receiveTranscript(.finalized("半句"), session: c.sessionID, at: 12.5)  // B 的半句進 buffer
     c.receiveStreamEnd(session: a, at: 12.6)                         // A 的 stale stream-end → 忽略
