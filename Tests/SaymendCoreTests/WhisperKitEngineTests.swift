@@ -491,6 +491,33 @@ private func volatileTexts(_ evs: [TranscriptEvent]) -> [String] {
         #expect(finalizedQualities(evs) == [nil])
     }
 
+    // MARK: - 字幕罐頭語（issue #10）
+
+    /// 串流定稿的那個出口：真的文字照常定稿，接在後面的罐頭語改走另一個事件
+    @Test func aCaptionInTheConfirmedStreamIsNotFinalized() async {
+        let f = FakeStreamTranscriber()
+        f.steps = [
+            .init(confirmed: "今天天氣不錯。", unconfirmed: ""),
+            .init(confirmed: "今天天氣不錯。(字幕製作:貝爾)", unconfirmed: ""),
+        ]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs) == ["今天天氣不錯。"])
+        #expect(evs.contains(.captionHallucination("(字幕製作:貝爾)", quality: nil)))
+    }
+
+    /// 收尾補發的那個出口——罐頭語最常走這條：靜音時解出來的通常是只有一段的短句，套件不會把它轉正。
+    /// 品質資料一併帶過去，被抓到的幻覺的分數正是日後訂門檻要的樣本。
+    @Test func aCaptionInTheTailFlushIsNotFinalized() async {
+        let q = TranscriptSegmentQuality(avgLogprob: -0.875, compressionRatio: 1.0)
+        let f = FakeStreamTranscriber()
+        f.steps = [.init(confirmed: "", unconfirmed: "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目",
+                         unconfirmedQuality: [q])]
+        let evs = await drive(engine(f))
+        #expect(finalizedTexts(evs).isEmpty)
+        #expect(evs.contains(.captionHallucination("请不吝点赞 订阅 转发 打赏支持明镜与点点栏目",
+                                                    quality: TranscriptQuality(segments: [q]))))
+    }
+
     // MARK: - 失敗路徑
 
     @Test func failsWhenNoModel() async {

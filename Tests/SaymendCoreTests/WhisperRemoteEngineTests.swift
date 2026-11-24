@@ -99,6 +99,13 @@ struct WhisperRemoteEngineTests {
         #expect(events == [.transcribing, .finalized("今天天氣很好。")])
     }
 
+    /// 遠端 Whisper 同樣會把靜音解成字幕罐頭語（issue #10）：改走另一個事件，不是定稿
+    @Test func aCaptionResponseIsNotFinalized() async {
+        ok(#"{"text":"(字幕製作:貝爾)"}"#)
+        let events = await run(makeEngine())
+        #expect(events == [.transcribing, .captionHallucination("(字幕製作:貝爾)", quality: nil)])
+    }
+
     @Test func httpErrorYieldsFailedWithSharedVocabulary() async {
         WhisperStubURLProtocol.handler = { req in
             (HTTPURLResponse(url: req.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!, Data())

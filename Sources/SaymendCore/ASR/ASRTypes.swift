@@ -87,6 +87,13 @@ public enum TranscriptEvent: Equatable, Sendable {
     ///
     /// 目前僅本機串流引擎會發；其他引擎不發，對它們是可選資訊。
     case noSpeechDetected
+    /// issue #10：Whisper 在沒有人聲時解出來的字幕罐頭語（整句比對 `CaptionHallucination`）。
+    /// 引擎**用它取代**那一筆 `.finalized`，所以它不是定稿文字：不上屏、不進斷句器、不送潤飾。
+    /// 控制器記一列歷史與辨識品質診斷，收尾時提示使用者。`quality` 與 `.finalized` 同義。
+    ///
+    /// 只有 Whisper 家族的引擎會發（經 `TranscriptEvent.whisperFinalized`）——
+    /// 系統內建引擎辨識出同樣的字，就是使用者真的說了。
+    case captionHallucination(String, quality: TranscriptQuality?)
 
     /// 不帶診斷資料的定稿文字。**這是與 case 同名的靜態便利方法，不是另一個 case。**
     /// Swift 的 enum case 不能有預設值，而 `quality` 對三個引擎中的兩個永遠是 nil；

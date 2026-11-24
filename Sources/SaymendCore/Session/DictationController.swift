@@ -110,6 +110,12 @@ public final class DictationController {
     private var sawNoSpeechWarning = false
     /// issue #18：本 session 是否辨識出過任何文字。示警的解除訊號。
     private var sawTextThisSession = false
+    /// issue #10：本 session 是否略過過字幕罐頭語。收尾時據此提示。
+    private var sawCaptionHallucination = false
+
+    /// 略過字幕罐頭語的提示（issue #10）。不提「原文在歷史裡」：歷史可以關掉，關了那句話就不成立。
+    public static let captionHallucinationNotice =
+        "略過了疑似字幕幻覺的辨識結果（沒人說話時 Whisper 常見）"
 
     /// 收尾時的提示文案。兩條出路都給：物理上的（靠近麥克風）與設定上的（調低門檻）。
     /// 只寫「沒偵測到語音」而不給方向的話，使用者只會重試一次同樣的動作然後放棄。
@@ -442,6 +448,21 @@ public final class DictationController {
             }
             return
         }
+        // **字幕罐頭語不是定稿文字**（issue #10）：引擎用它取代了那一筆定稿。
+        // - 不進斷句器：不送潤飾，也不重置靜音計時——背景影片一直在播時，它不得讓話語晚閉合、
+        //   讓 60 秒靜音逾時一直延後。
+        // - 不解除「沒偵測到語音」示警：它不是使用者開口的證據。
+        // - 文字照記（歷史與辨識品質診斷）：誤殺時使用者要查得到那句話去了哪裡，
+        //   被抓到的幻覺的分數也正是日後訂門檻要的樣本。不先問密碼欄閘門：會走到這裡的文字整句都是
+        //   罐頭語的形狀（製作名單的名字最多 12 個字），不會是使用者在密碼欄說的話；
+        //   而且焦點一進密碼欄，焦點監看（#70）早就硬停了整個 session。
+        if case .captionHallucination(let text, let quality) = event {
+            sawCaptionHallucination = true
+            recordInsertEvent(kind: "insertSkipped", classification: "captionHallucination",
+                              utteranceText: text)
+            recordASRDiagnostic(text: text, quality: quality)
+            return
+        }
         releaseNoSpeechWarningIfTextArrived(event)
         segmenter.onTranscript(event, at: t)
         switch event {
@@ -639,7 +660,7 @@ public final class DictationController {
             if !isRecordingQueued { hud.present(.loadingModel) }
         case .failed(let reason):
             handleASRFailure(reason: reason, at: t)
-        case .noSpeechDetected:
+        case .noSpeechDetected, .captionHallucination:
             break   // 前方已提前 return（刻意不進 segmenter），此處不可達；列出僅為窮盡性
         }
     }
@@ -783,17 +804,27 @@ public final class DictationController {
         // 「一個字都沒產出」同時**就是示警的解除機制**——使用者在示警之後才開口時文字會產出，
         // 這裡自然不發，不需要另一個解除事件。notice 必須排在 archiveSession 之後，
         // 否則會被它發的 .hidden 蓋掉。
+        //
+        // issue #10：只略過了字幕罐頭語、沒有任何真的文字，同樣沒有東西可修正——比照上面取代延續窗。
+        // 有真的文字時照常進延續窗，提示疊在上面（notice 過期後畫面回到「可修正」）：
+        // 略過的那句若其實是使用者說的，不提示就會無聲消失。
         var notice: String?
-        if sawNoSpeechWarning, !sawTextThisSession {
+        if !sawTextThisSession, sawNoSpeechWarning || sawCaptionHallucination {
             archiveAfterDrain = false
             archiveSession()
-            notice = Self.noSpeechNotice
         } else if archiveAfterDrain || ledger.frozen || !ledger.isActive {
             archiveAfterDrain = false
             archiveSession()
         } else {
             internalPhase = .lingering(until: t + Self.lingerWindow)
             if queued == nil { hud.present(.lingering) }   // 馬上就要接手，不閃一下「可修正」
+        }
+        // 兩者都有時講罐頭語：示警之後辨識器解出了東西，代表後來確實有聲音進來，
+        // 「麥克風可能太遠」反而會讓使用者往錯的方向調。
+        if sawCaptionHallucination {
+            notice = Self.captionHallucinationNotice
+        } else if sawNoSpeechWarning, !sawTextThisSession {
+            notice = Self.noSpeechNotice
         }
         if let queued {
             resumeQueued(queued, at: t, oldSessionNotice: notice)
@@ -843,6 +874,7 @@ public final class DictationController {
             archiveAfterDrain = false
             sawNoSpeechWarning = false
             sawTextThisSession = false
+            sawCaptionHallucination = false
             // issue #65：遮罩是「本段」的。走到這裡代表上面的密碼欄拒絕沒觸發——人還在密碼欄時不會重置。
             volatileMasked = false
             capturedContextBefore = field.contextBefore
