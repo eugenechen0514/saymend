@@ -268,8 +268,10 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
                     let text = Self.resolveBoundary(delta, emitted: &emitted,
                                                     witness: crossesBoundary ? witness : nil)
                     if !text.isEmpty {
-                        continuation.yield(.finalized(text,
-                                                      quality: TranscriptQuality(segments: deltaQuality)))
+                        // 字幕罐頭語（#10）照樣記進 `emitted`：它確實是辨識器吐出的上一段，
+                        // 下一段開頭若與它重疊，證人規則一樣適用。
+                        continuation.yield(.whisperFinalized(text,
+                                                             quality: TranscriptQuality(segments: deltaQuality)))
                     }
                     witness = nil
                     awaitingWitness = true
@@ -321,7 +323,8 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
     private func flushTail(_ tail: String, quality: TranscriptQuality?,
                            into continuation: AsyncStream<TranscriptEvent>.Continuation) {
         let trimmed = tail.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty { continuation.yield(.finalized(trimmed, quality: quality)) }
+        // 字幕罐頭語（#10）最常走這條：靜音時解出來的通常是只有一段的短句，套件不會把它轉正
+        if !trimmed.isEmpty { continuation.yield(.whisperFinalized(trimmed, quality: quality)) }
     }
 
     /// 送出前處理邊界重複（issue #19，見 `StreamBoundaryOverlap`），並把送出的文字記進 `emitted`。

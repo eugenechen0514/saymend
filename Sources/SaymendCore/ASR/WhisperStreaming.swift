@@ -47,9 +47,11 @@ public struct WhisperStreamingOptions: Equatable, Sendable {
     public var relativeEnergyWindow: Int
     /// 壓縮比檢查窗口。偵測重複退化的輸出。
     public var compressionCheckWindow: Int
-    /// 平均對數機率下限，低於視為失敗。nil＝用套件預設。
+    /// 平均對數機率下限。nil＝用套件預設。
+    /// 低於它的那一趟解碼會**換更高的取樣溫度重解**，最後一次的結果照樣輸出——它不會丟掉結果，
+    /// 所以擋不住幻覺（issue #10，見 ADR 0004）。
     public var logProbThreshold: Float?
-    /// 壓縮比上限，高於視為重複退化。nil＝用套件預設。
+    /// 壓縮比上限，高於視為重複退化。nil＝用套件預設。超過時的處理同上：重解，不是丟掉。
     public var compressionRatioThreshold: Float?
 
     public init(requiredSegmentsForConfirmation: Int = 2,

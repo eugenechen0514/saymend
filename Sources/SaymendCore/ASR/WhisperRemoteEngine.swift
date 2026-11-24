@@ -120,7 +120,8 @@ public final class WhisperRemoteEngine: ASREngine, ContextBiasable, @unchecked S
                 continuation.finish()
                 return
             }
-            continuation.yield(.finalized(text))
+            // 遠端 Whisper 同樣會把靜音解成字幕罐頭語（#10）；它只回傳文字，沒有品質資料
+            continuation.yield(.whisperFinalized(text, quality: nil))
             continuation.finish()
         } catch is CancellationError {
             continuation.finish()

@@ -403,21 +403,21 @@ struct GeneralSettingsTab: View {
         paramNote("往回看幾個字判斷是不是在鬼打牆重複。調小＝更早喊停重複輸出，代價是正常的重複語句也更容易被誤殺。")
     }
 
-    /// 解碼品質 2 項：低於／高於門檻的辨識結果被視為失敗。
+    /// 解碼品質 2 項：低於／高於門檻的那一趟解碼會換更高的取樣溫度重解——不是丟掉結果（issue #10，ADR 0004）。
     @ViewBuilder private var streamDecodingControls: some View {
         Stepper(value: $streamLogProb,
                 in: Self.doubleRange(WhisperStreamingOptions.logProbThresholdRange), step: 0.1) {
             Text(String(format: "對數機率門檻：%.1f（套件預設 %.1f）", streamLogProb,
                         Double(WhisperStreamingOptions.packageLogProbThreshold)))
         }
-        paramNote("辨識信心低於此值就把該段當成失敗。往 0 調＝更嚴格，寧可少出字；往負值調＝寧可出錯字也不要沒字。")
+        paramNote("辨識信心低於此值就提高取樣溫度重解（最多 5 次），最後一次的結果照樣輸出，不會因此少出字，也擋不住幻覺。往 0 調＝更常重解、辨識更慢；往負值調＝少重解。")
 
         Stepper(value: $streamCompressionRatio,
                 in: Self.doubleRange(WhisperStreamingOptions.compressionRatioThresholdRange), step: 0.1) {
             Text(String(format: "壓縮比門檻：%.1f（套件預設 %.1f）", streamCompressionRatio,
                         Double(WhisperStreamingOptions.packageCompressionRatioThreshold)))
         }
-        paramNote("文字重複到這個壓縮比就視為壞掉的輸出。調低＝更早判定重複退化，代價是正常的排比句也可能被判掉。")
+        paramNote("文字重複到這個壓縮比就提高取樣溫度重解，通常能打斷鬼打牆的複讀；重解的方式同上。調低＝更早判定重複退化，代價是正常的排比句也可能被重解成別的字。")
     }
 
     @ViewBuilder private func paramNote(_ text: String) -> some View {
