@@ -41,7 +41,7 @@ Packaging also puts the `saymend` CLI into `Saymend.app/Contents/Helpers/` and c
 
 ## Voice loop with Claude Code (saymend-voice)
 
-Saymend can serve as voice input for Claude Code: paired with macOS `say` reading the replies aloud, it forms a "speak → send to Claude Code → hear the reply" loop, built on Saymend's local control interface and the `saymend` CLI (see the contract in [docs/control-interface.md](docs/control-interface.md)). For the Claude Code mod, how to install it, and full details, see [`saymend-voice`](https://github.com/eugenechen0514/claude-code-mods/tree/main/mods/saymend-voice) (that repository is currently private; only invited people can access it).
+Saymend can serve as voice input for Claude Code: paired with macOS `say` reading the replies aloud, it forms a "speak → send to Claude Code → hear the reply" loop, built on Saymend's local control interface and the `saymend` CLI (see the contract in [docs/control-interface.md](docs/control-interface.md)). For the Claude Code mod, how to install it, and full details, see [`saymend-voice`](https://github.com/eugenechen0514/claude-code-mods/tree/main/mods/saymend-voice).
 
 ## Core modes and safety boundaries
 
