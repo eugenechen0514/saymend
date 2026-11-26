@@ -1,6 +1,9 @@
 import AppKit
 import ApplicationServices
+import AVFoundation
+import OSLog
 import SwiftUI
+import SaymendControl
 import SaymendCore
 
 @main
@@ -40,6 +43,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @Published private(set) var recentRescues: [ClipboardChannel.RecentRescue] = []
 
     private(set) var controller: DictationController!
+    /// CLI 來源的聽寫（`saymend dictate`）與本機控制介面（docs/control-interface.md）
+    private var cliDictation: CLIDictationController!
+    private var controlService: ControlService!
+    private var controlServer: ControlServer?
+    private static let controlLog = Logger(subsystem: "io.saymend.app", category: "control")
     private let hud = HUDWindowController()
     private let overlay = OverlayWindowController()
     private var feedbackCoordinator: FeedbackCoordinator!
@@ -263,6 +271,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             },
             focusWatcher: focusWatcher
         )
+        // 本機控制介面（`saymend` CLI）。CLI 聽寫與熱鍵聽寫共用麥克風、辨識引擎與 HUD——兩者互斥，
+        // 由 `yieldForExternalCapture` 與下方熱鍵／Esc 的分流保證。結果只回給呼叫端，不經 InsertionCoordinator。
+        startControlInterface(asr: asrEngine, hud: arbitratedHUD, intentService: intentService,
+                              traditionalize: traditionalize)
+
         // 插入層備援診斷（issue #1）：主 inserter 失敗、備援救回時補一筆歷史事件。
         // 插入一律發生在 controller 的 MainActor 上，故直接轉呼叫。
         coordinator.onInserterFallback = { [weak self] kind in
@@ -279,8 +292,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             hotkey: { [settings] in settings.hotkey },
             isCapturing: { [weak self] in
                 guard let self else { return false }
-                // isEngaged 涵蓋排空窗（finishing）：該窗內的手動打字也必須觸發凍結
-                return self.controller.isEngaged
+                // isEngaged 涵蓋排空窗（finishing）：該窗內的手動打字也必須觸發凍結。
+                // CLI 聽寫進行中同樣算擷取中：Esc 要被吞掉並取消它（與熱鍵聽寫中按 Esc 一致）。
+                return self.controller.isEngaged || self.cliDictation.isActive
             }
         )
         // 落在自家 HUD 上的滑鼠點擊交給 HUD 復原按鈕，不算使用者活動（規格 §3.3 HUD 常駐復原）
@@ -289,8 +303,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         hotkeyMonitor.onPress = { [weak self] t in
             Task { @MainActor in
-                self?.controller.hotkeyPressed(at: t)
-                self?.refreshStatus()
+                guard let self else { return }
+                // CLI 聽寫進行中：熱鍵＝結束錄音並定稿（同鎖定聽寫時點一下熱鍵），不開始熱鍵聽寫——
+                // 麥克風與辨識引擎正被 CLI 那一段使用。放開熱鍵時 controller 沒有記到按下，自然 no-op。
+                if self.cliDictation.isActive {
+                    self.cliDictation.hotkeyPressed()
+                } else {
+                    self.controller.hotkeyPressed(at: t)
+                }
+                self.refreshStatus()
             }
         }
         hotkeyMonitor.onRelease = { [weak self] t in
@@ -301,8 +322,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         hotkeyMonitor.onEscape = { [weak self] in
             Task { @MainActor in
-                self?.controller.escapePressed()
-                self?.refreshStatus()
+                guard let self else { return }
+                // CLI 聽寫進行中：Esc＝丟棄這一段（等待中的 dictate 以 exit 5 結束），同熱鍵聽寫中按 Esc 取消
+                if self.cliDictation.isActive {
+                    self.cliDictation.cancel(source: "Esc")
+                } else {
+                    self.controller.escapePressed()
+                }
+                self.refreshStatus()
             }
         }
         hotkeyMonitor.onUserActivity = { [weak self] t in
@@ -338,14 +365,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 try? await Task.sleep(for: .milliseconds(250))
                 await MainActor.run {
                     self?.controller.tick(at: Date().timeIntervalSinceReferenceDate)
+                    self?.cliDictation.tick()        // 音訊樣本停了也要能判 --max-seconds 與辨識逾時
                     self?.refreshStatus()
                 }
             }
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        // 先停 CLI 聽寫（關麥克風），再關 socket：等待中的 dictate 收到「已取消」、events 串流收到 EOF（exit 3）
+        cliDictation?.cancel(source: "app 結束")
+        controlServer?.stop()
+    }
+
+    /// 本機控制介面：CLI 聽寫控制器＋請求處理器＋unix socket server。
+    /// server 起不來（例如另一個 Saymend 已在使用同一個 socket）只記 log，熱鍵聽寫照常。
+    private func startControlInterface(asr: ASREngineRouter, hud: any HUDPresenting,
+                                       intentService: IntentService, traditionalize: TraditionalizeGuard?) {
+        let cli = CLIDictationController(
+            audio: audio,
+            asr: asr,
+            hud: hud,
+            settings: settings,
+            history: historyStore,
+            // 每次聽寫現取：設定與詞彙表即時生效。CLI 沒有目標 App，簡繁只看全域輸出語系。
+            postProcess: { [settings, vocabStore] in
+                let convert: ((String) -> String)? = settings.outputLanguage == .zhTW
+                    ? traditionalize.map { guardian in { guardian.apply($0, language: .zhTW) } }
+                    : nil
+                return TranscriptPostProcessor(vocab: vocabStore.all(), traditionalize: convert).apply
+            },
+            // `--polish`：走設定中的 provider（與熱鍵聽寫同一個 IntentService）。CLI 沒有可修正的目標，
+            // 目標文字留空＝只會是新內容；失敗降級回本機後處理過的原文。
+            polish: { [intentService] raw in
+                await intentService.process(utteranceRaw: raw, context: IntentContext())
+            },
+            microphoneAccess: {
+                switch AVCaptureDevice.authorizationStatus(for: .audio) {
+                case .authorized:
+                    return .granted
+                case .notDetermined:
+                    AVCaptureDevice.requestAccess(for: .audio) { _ in }
+                    return .undetermined
+                default:
+                    return .denied
+                }
+            },
+            hotkeyGate: { [weak self] in self?.controller.yieldForExternalCapture() ?? false },
+            // 錄音結束後等辨識結果的上限：涵蓋 Whisper 遠端的上傳時限與本機模型的等待上限
+            drainTimeout: { [settings] in 180 + settings.whisperModelWaitTimeout })
+        cliDictation = cli
+
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+        let service = ControlService(
+            cli: cli,
+            hotkeyActivity: { [weak self] in self?.controller.activity ?? .idle },
+            modelReady: { [settings, whisperLocalEngine] in
+                // 只有本機 WhisperKit 有「模型還沒載入」這回事；系統內建與遠端引擎一律就緒
+                guard settings.asrEngineKind == .whisperLocal else { return true }
+                return await whisperLocalEngine.state() == .loaded
+            },
+            appVersion: appVersion)
+        controlService = service
+        controller.onActivityChange = { [weak service] in service?.activityChanged() }
+        cli.onPhaseChange = { [weak self, weak service] in
+            service?.activityChanged()
+            self?.refreshStatus()
+        }
+
+        let server = ControlServer(socketPath: ControlProtocol.resolvedSocketPath(), handler: service)
+        do {
+            try server.start()
+            controlServer = server
+        } catch {
+            Self.controlLog.error("控制介面啟動失敗：\(String(describing: error), privacy: .public)")
+        }
+    }
+
     private func refreshStatus() {
         let next: String
+        if let cli = cliDictation, cli.isActive {
+            switch cli.phase {
+            case .recording: next = "CLI 聽寫中"
+            case .transcribing: next = "CLI 聽寫辨識中"
+            case .polishing: next = "CLI 聽寫潤飾中"
+            case .idle: next = "待機"
+            }
+            if statusLine != next { statusLine = next }
+            return
+        }
         switch controller.phase {
         case .idle:
             next = controller.isLingering ? "可修正（延續窗）" : "待機"

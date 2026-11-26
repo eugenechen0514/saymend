@@ -83,6 +83,9 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
     /// HUD 呈現為「辨識失敗（…）」——要讓人知道是換了模型、得再說一次，而不是模型壞了。
     static let reselectedWhileWaiting = "等模型期間已換選模型，請再說一次"
 
+    /// 沒選本機模型時的失敗原因。CLI 聽寫據此把它歸類成「模型未就緒」（exit 7）而不是一般辨識失敗。
+    public static let noModelSelectedReason = "未選擇本機模型"
+
     public init(transcriber: any WhisperTranscribing,
                 configProvider: @escaping () -> WhisperLocalConfig,
                 optionsProvider: @escaping () -> WhisperStreamingOptions = { WhisperStreamingOptions() }) {
@@ -154,7 +157,7 @@ public final class WhisperKitEngine: ASREngine, ContextBiasable, @unchecked Send
                       continuation: AsyncStream<TranscriptEvent>.Continuation) async {
         // fail-closed：未選模型不得進辨識
         guard let modelPath = configProvider().selectedModelPath else {
-            continuation.yield(.failed(reason: "未選擇本機模型"))
+            continuation.yield(.failed(reason: Self.noModelSelectedReason))
             continuation.finish()
             return
         }

@@ -93,7 +93,8 @@ public final class HUDArbiter: HUDPresenting {
     /// 不寫 `default`：日後新增 `HUDState` case，編譯器會逼著回來歸類。
     static func isPersistent(_ state: HUDState) -> Bool {
         switch state {
-        case .hidden, .listening, .selectionListening, .lingering, .transcribing, .loadingModel, .noSpeechDetected:
+        case .hidden, .listening, .selectionListening, .lingering, .transcribing, .loadingModel, .noSpeechDetected,
+             .cliListening:
             return true
         case .notice, .diff:
             return false

@@ -18,6 +18,9 @@ public enum HUDState: Equatable, Sendable {
     /// issue #18：聽寫中但整段都沒偵測到語音（麥克風可能太遠）。
     /// 與 `.listening` 並列而非取代其語意——聽寫階段仍在進行，那個事實不能從畫面上消失。
     case noSpeechDetected(mode: ListeningMode)
+    /// `saymend dictate` 發起的聽寫正在錄音（CLI 來源）。錄音一定要看得見：介面能從別的行程開麥克風，
+    /// 不能靜默開麥。結果不上屏，所以沒有復原鈕；`loadingModel`＝本機模型還在載入（錄音照常進行）。
+    case cliListening(volatile: String, loadingModel: Bool)
     case notice(String)
     /// 最近異動的 inline diff（規格 §3.5 降級）：overlay 不可用時在 HUD 呈現
     case diff([DiffWindow])
