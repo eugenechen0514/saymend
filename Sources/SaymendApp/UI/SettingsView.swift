@@ -312,7 +312,9 @@ struct GeneralSettingsTab: View {
             Picker("引擎", selection: $asrEngineKind) {
                 ForEach(ASREngineKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
             }
-            .pickerStyle(.segmented)
+            // 用直式 radioGroup 而非 segmented：三個引擎名稱都很長（含括號說明），
+            // segmented 會把整排擠出表單寬度、左右被截掉（「pple SpeechAnalyzer）」）。
+            .pickerStyle(.radioGroup)
         }
         if asrEngineKind == .whisperRemote {
             Section("Whisper 遠端") {
