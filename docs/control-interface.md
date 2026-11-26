@@ -1,37 +1,39 @@
-# 本機控制介面與 `saymend` CLI（契約 v1）
+# Local control interface and the `saymend` CLI (contract v1)
 
-讓別的程式（例如 Claude Code 的 mod）把 Saymend 當成語音輸入來源：請執行中的 Saymend.app 錄一段話，辨識結果**只回給呼叫端**，不上屏、不碰剪貼簿。
+English | [繁體中文](control-interface_tw.md)
+
+Lets other programs (for example a Claude Code mod) use Saymend as a voice input source: they ask the running Saymend.app to record an utterance, and the recognition result goes **only back to the caller** — it is not inserted into any field and doesn't touch the clipboard.
 
 ```
-mod ──(執行)──▶ saymend CLI ──(unix socket, NDJSON v1)──▶ Saymend.app ──▶ 麥克風／辨識引擎
+mod ──(runs)──▶ saymend CLI ──(unix socket, NDJSON v1)──▶ Saymend.app ──▶ microphone / recognition engine
 ```
 
-- `saymend` 是薄 client：不錄音、不載模型，只把請求送給**正在執行的** app。app 沒在跑就回 exit 3。
-- mod 只依賴本文件的 **CLI 輸出契約**（第 1 節）。app ⇄ CLI 之間的**線上協定**（第 2 節）是內部實作，可以各自演進。
-- 位置：`Saymend.app/Contents/Helpers/saymend`（不放 `Contents/MacOS/`：檔案系統不分大小寫，會和主程式 `Saymend` 撞名）。`Scripts/make-app.sh` 打包時一併簽章，並建立 `~/.local/bin/saymend` symlink 指向這次打包的 bundle（`SAYMEND_SKIP_CLI_LINK=1` 可略過；同名的一般檔案不會被覆蓋）。
+- `saymend` is a thin client: it doesn't record and doesn't load models; it only forwards requests to the **running** app. If the app isn't running, it exits with code 3.
+- A mod depends only on this document's **CLI output contract** (section 1). The **wire protocol** between the app and the CLI (section 2) is an internal implementation detail, and the two can evolve independently.
+- Location: `Saymend.app/Contents/Helpers/saymend` (not `Contents/MacOS/`: the file system is case-insensitive, so it would collide with the main executable `Saymend`). `Scripts/make-app.sh` signs it during packaging and creates the symlink `~/.local/bin/saymend` pointing into the bundle it just built (`SAYMEND_SKIP_CLI_LINK=1` skips this; a regular file with the same name is never overwritten).
 
-## 1. CLI 輸出契約（mod 依賴這一節）
+## 1. CLI output contract (mods depend on this section)
 
-所有 `--json` 輸出都是 NDJSON：一行一個 JSON 物件、寫完立刻 flush、每個物件第一個欄位是 `"v":1`。字串一律跳脫控制字元，所以輸出裡不會出現真正的換行。人讀的訊息一律走 stderr（`saymend: …`）。
+Every `--json` output is NDJSON: one JSON object per line, flushed immediately after each line, and the first field of every object is `"v":1`. Control characters in strings are always escaped, so the output never contains a literal newline inside an object. Human-readable messages always go to stderr (`saymend: …`).
 
 ### `saymend status --json`
 
-輸出一行後結束：
+Prints one line and exits:
 
 ```json
 {"v":1,"app":"running","state":"idle","source":null,"modelReady":true}
 ```
 
-- `state`：`idle`｜`recording`（麥克風開著）｜`transcribing`（麥克風已關、辨識引擎還在處理）｜`polishing`（語言模型潤飾在途）
-- `source`：`hotkey`｜`cli`｜`null`（閒置時）。CLI 聽寫進行中以 CLI 為準。
-- `modelReady`：只有本機 WhisperKit 引擎有「模型還沒載入」的狀態；系統內建（SpeechAnalyzer）與 Whisper 遠端一律 `true`。
-- 熱鍵聽寫結束後的 8 秒延續窗對外算 `idle`（麥克風是關的）。
-- app 沒在跑：輸出 `{"v":1,"app":"not_running"}`，exit 3。
-- 不加 `--json`：印一行人讀的狀態。
+- `state`: `idle` | `recording` (microphone on) | `transcribing` (microphone off, recognition engine still working) | `polishing` (language-model polishing in flight)
+- `source`: `hotkey` | `cli` | `null` (when idle). While a CLI dictation is in progress, the CLI takes precedence.
+- `modelReady`: only the local WhisperKit engine has a "model not loaded yet" state; the built-in engine (SpeechAnalyzer) and Whisper remote always report `true`.
+- The 8-second continuation window after a hotkey dictation counts as `idle` externally (the microphone is off).
+- App not running: prints `{"v":1,"app":"not_running"}` and exits 3.
+- Without `--json`: prints one human-readable status line.
 
 ### `saymend dictate --json [--max-seconds N] [--silence-ms N] [--no-speech-seconds N] [--polish]`
 
-請 app 開始一段 **CLI 來源**的聽寫，阻塞到結束。
+Asks the app to start a **CLI-sourced** dictation and blocks until it ends.
 
 ```json
 {"v":1,"type":"started"}
@@ -40,67 +42,67 @@ mod ──(執行)──▶ saymend CLI ──(unix socket, NDJSON v1)──▶ 
 {"v":1,"type":"final","text":"今天天氣很好。","raw":"今天天气很好。","durationMs":4210}
 ```
 
-- `started`：麥克風已開。開始不了（忙碌、權限）時不會有 `started`，直接是 error。
-- `partial`（可選，0～多則）：**到目前為止的全文**（已定稿＋暫時文字），只在內容改變時送。暫時文字可能被辨識器改寫，所以後一則不保證是前一則加長。
-- `final`：
-  - `raw`：辨識引擎的原文。
-  - `text`：給呼叫端用的文字＝`raw` 經過本機確定性後處理（見下）；加了 `--polish` 則是潤飾結果再經同一套後處理。潤飾失敗（逾時、格式不合）時降級成本機後處理過的原文，不報錯。
-  - `durationMs`：**錄音長度**（開麥到關麥），不含錄音結束後等辨識、等潤飾的時間。
-- 參數：
+- `started`: the microphone is on. If the dictation can't start (busy, permission), there is no `started` — the output is an error right away.
+- `partial` (optional, zero or more): **the full text so far** (finalized + tentative text), sent only when it changes. The recognizer may revise tentative text, so a later `partial` is not guaranteed to extend the previous one.
+- `final`:
+  - `raw`: the recognition engine's original text.
+  - `text`: the text for the caller = `raw` after on-device deterministic post-processing (see below); with `--polish`, it is the polished result run through the same post-processing. If polishing fails (timeout, malformed response), it degrades to the post-processed raw text without reporting an error.
+  - `durationMs`: **the recording length** (microphone on to microphone off), excluding the time spent waiting for recognition or polishing after the recording ends.
+- Options:
 
-  | 參數 | 預設 | 說明 |
+  | Option | Default | Description |
   |---|---|---|
-  | `--max-seconds N` | 120 | 達到即正常定稿（不是錯誤）。0 < N ≤ 3600，可帶小數。 |
-  | `--silence-ms N` | 0（不啟用） | **偵測到說話之後**連續靜音達 N 毫秒即定稿。還沒開口前不會因為靜音而結束。0 ≤ N ≤ 600000。 |
-  | `--no-speech-seconds N` | 0（不啟用） | 開始後 N 秒內完全沒偵測到說話 → 放棄（exit 6）。0 ≤ N ≤ 3600。 |
-  | `--polish` | 關 | 走設定中的語言模型 provider 潤飾（**可能上雲**，取決於設定）。預設不潤飾、全本機。 |
+  | `--max-seconds N` | 120 | Finalizes normally when reached (not an error). 0 < N ≤ 3600; decimals allowed. |
+  | `--silence-ms N` | 0 (disabled) | Finalizes once N milliseconds of continuous silence follow **detected speech**. Silence before you start speaking never ends the dictation. 0 ≤ N ≤ 600000. |
+  | `--no-speech-seconds N` | 0 (disabled) | Gives up if no speech at all is detected within N seconds of the start (exit 6). 0 ≤ N ≤ 3600. |
+  | `--polish` | off | Polishes with the language-model provider configured in Settings (**may go to the cloud**, depending on your settings). By default there is no polishing and everything stays on-device. |
 
-  兩種寫法都收：`--silence-ms 1200` 與 `--silence-ms=1200`。
-- 結束條件（任一）：另一個行程執行 `saymend stop`；`--silence-ms`；`--max-seconds`；`--no-speech-seconds`（exit 6）；使用者按熱鍵（＝定稿）或 Esc（＝取消，exit 5）；`saymend cancel`（exit 5）。
-- 不加 `--json`：stdout **只印最終文字**一行；錯誤只寫 stderr。
-- **SIGINT／SIGTERM**：CLI 在同一條連線上請 app 取消這一段並丟棄，exit 5（app 2 秒內沒確認也照樣 exit 5）。已送出取消之後才到的 `final` 不會印出。
-- **CLI 被 kill（含 `kill -9`）**：連線一斷，app 自己取消這一段，麥克風立刻關閉。
+  Both forms are accepted: `--silence-ms 1200` and `--silence-ms=1200`.
+- End conditions (any of): another process runs `saymend stop`; `--silence-ms`; `--max-seconds`; `--no-speech-seconds` (exit 6); the user presses the hotkey (= finalize) or Esc (= cancel, exit 5); `saymend cancel` (exit 5).
+- Without `--json`: stdout prints **only the final text**, on one line; errors go to stderr only.
+- **SIGINT / SIGTERM**: the CLI asks the app, on the same connection, to cancel and discard this dictation, and exits 5 (it still exits 5 if the app doesn't confirm within 2 seconds). A `final` that arrives after the cancel was sent is not printed.
+- **CLI killed (including `kill -9`)**: as soon as the connection drops, the app cancels the dictation by itself and closes the microphone immediately.
 
-#### 本機確定性後處理（不潤飾時的全部處理）
+#### On-device deterministic post-processing (everything that happens without polishing)
 
-不碰網路、不碰語言模型，同樣的輸入永遠得到同樣的輸出：
+No network, no language model; the same input always produces the same output:
 
-1. **簡轉繁**：全域「輸出語系」是 zh-TW 才轉（與潤飾後的簡繁保險絲同一個轉換器：OpenCC traditionalize＋twStandard＋twIdiom）。CLI 聽寫沒有目標 App，所以不看 per-app 固定語系、也不看熱鍵 session 的臨時覆蓋。
-2. **詞彙表誤轉寫替換**：設定頁「詞彙表」登記的「常見誤轉寫」換成正確詞彙。長的先換；英數開頭／結尾的誤轉寫要求字邊界（`ai` 不會吃掉 `said` 裡的字）、不分大小寫；中文照字面比對。
+1. **Simplified → Traditional Chinese**: converted only when the global "output language" is zh-TW (the same converter as the post-polish Traditional Chinese guard: OpenCC traditionalize + twStandard + twIdiom). A CLI dictation has no target app, so it ignores per-app fixed languages and the hotkey session's temporary override.
+2. **Vocabulary mis-transcription replacement**: the "common mis-transcriptions" registered in the Vocabulary tab of Settings are replaced with the correct term. Longer ones are replaced first; mis-transcriptions that start or end with a Latin letter or digit require a word boundary (`ai` won't eat the letters inside `said`) and are case-insensitive; Chinese is matched literally.
 
-這兩步只用在 CLI 聽寫；熱鍵聽寫的行為不變。
+These two steps apply only to CLI dictation; hotkey dictation behaves as before.
 
-#### 端點判斷（`--silence-ms`／`--no-speech-seconds`）
+#### Endpoint detection (`--silence-ms` / `--no-speech-seconds`)
 
-以麥克風的音量位準為主（刻度與 HUD 音量條相同：`min(1, RMS × 20)`）：
+Based mainly on the microphone's level (same scale as the HUD level bar: `min(1, RMS × 20)`):
 
-- **開口**：位準連續高於門檻 0.25 秒（擋掉咳嗽、敲桌一下）；或辨識器吐出**變長的**文字。
-- **說完**：開口之後，位準低於門檻、且辨識文字沒有變長，連續達 `--silence-ms`。
-- **門檻**：`max(0.08, 噪音底線 × 2.5)`。噪音底線從第一個樣本起算、往下立即跟；低於門檻的樣本正常往上拉，高於門檻的樣本只能極慢地推（一口氣講十秒不會被自己的聲音抬高門檻）。吵雜環境（風扇、冷氣）不會一開麥就算開口。
+- **Speech started**: the level stays above the threshold for 0.25 s in a row (filters out a cough or a tap on the desk), or the recognizer emits text that **grows**.
+- **Speech finished**: after speech started, the level stays below the threshold and the recognized text doesn't grow, continuously for `--silence-ms`.
+- **Threshold**: `max(0.08, noise floor × 2.5)`. The noise floor starts from the first sample and follows drops immediately; samples below the threshold pull it up normally, while samples above the threshold can only push it up very slowly (talking for ten seconds straight doesn't raise the threshold with your own voice). A noisy environment (fan, air conditioner) doesn't count as speech the moment the microphone opens.
 
-每段 CLI 聽寫結束時，app 會在系統 log 記一行只有數字的摘要（`io.saymend.app`／`cli`：「CLI 端點摘要：開口=… 最大位準=… 底線=… 門檻=…」），供日後校準。
+When each CLI dictation ends, the app writes a numbers-only summary line to the system log (`io.saymend.app` / `cli`: "CLI 端點摘要：開口=… 最大位準=… 底線=… 門檻=…", i.e. endpoint summary: speech started=… max level=… floor=… threshold=…) for later calibration.
 
 ### `saymend stop [--json]`
 
-結束目前**錄音中**的 CLI 聽寫並定稿，文字交給正在等待的 `dictate`。成功 exit 0（`--json` 輸出 `{"v":1,"type":"ok"}`）。沒有錄音中的 CLI 聽寫（含已經在辨識中）→ exit 4，`code` 為 `nothing_to_stop`。
+Ends the CLI dictation that is currently **recording** and finalizes it; the text goes to the waiting `dictate`. On success it exits 0 (`--json` prints `{"v":1,"type":"ok"}`). If no CLI dictation is recording (including one that is already transcribing) → exit 4 with `code` `nothing_to_stop`.
 
 ### `saymend cancel [--json]`
 
-丟棄目前的 CLI 聽寫（任何階段：錄音、辨識、潤飾），等待中的 `dictate` 以 exit 5 結束。不影響熱鍵聽寫。成功 exit 0（`--json` 輸出 `{"v":1,"type":"ok"}`）；沒有 CLI 聽寫 → exit 4（`nothing_to_stop`）。
+Discards the current CLI dictation (at any stage: recording, transcribing, polishing); the waiting `dictate` exits 5. It doesn't affect hotkey dictation. On success it exits 0 (`--json` prints `{"v":1,"type":"ok"}`); if there is no CLI dictation → exit 4 (`nothing_to_stop`).
 
 ### `saymend events --json`
 
-長駐串流，涵蓋**所有來源**（熱鍵與 CLI）的狀態變化：
+A long-running stream of state changes from **all sources** (hotkey and CLI):
 
 ```json
 {"v":1,"type":"state","state":"idle","source":null,"at":"2026-11-26T14:30:37.469Z"}
 {"v":1,"type":"state","state":"recording","source":"hotkey","at":"2026-11-26T14:35:57.731Z"}
 ```
 
-- 連上後第一行是當下快照，之後每次變化一行。`state`／`source` 同 `status`；`at` 為 ISO 8601（UTC、毫秒）。
-- 同一瞬間連跳的狀態會合併，只送最後的結果；值沒變不送。
-- app 結束 → 串流結束：`--json` 時先輸出一行 `{"v":1,"type":"error","code":"not_running",…}`，exit 3。
-- 不加 `--json`：每行 `<at> <state> <source|->`。
+- The first line after connecting is a snapshot of the current state, followed by one line per change. `state` / `source` are the same as in `status`; `at` is ISO 8601 (UTC, milliseconds).
+- Several state changes within the same instant are coalesced and only the final result is sent; unchanged values are not sent.
+- When the app quits, the stream ends: with `--json` it first prints one `{"v":1,"type":"error","code":"not_running",…}` line, then exits 3.
+- Without `--json`: each line is `<at> <state> <source|->`.
 
 ### `saymend --version [--json]`
 
@@ -110,78 +112,78 @@ Saymend.app 0.1.0
 protocol v1
 ```
 
-`--json`：`{"v":1,"cli":"0.1.0","app":"0.1.0","protocol":1}`。CLI 版本從它所在的 app bundle 的 Info.plist 讀（與 app 同一份）。app 沒在跑時 `app` 為 `null`（文字版印「（未執行）」），仍 exit 0。
+`--json`: `{"v":1,"cli":"0.1.0","app":"0.1.0","protocol":1}`. The CLI version is read from the Info.plist of the app bundle it lives in (the same one as the app). When the app isn't running, `app` is `null` (the text form prints "（未執行）", i.e. not running), and it still exits 0.
 
 ### Exit codes
 
-| code | 意義 | 對應的 error `code` |
+| code | Meaning | Corresponding error `code` |
 |---|---|---|
-| 0 | 成功 | — |
-| 1 | 一般錯誤 | `error`、`unsupported_version`、`microphone_unavailable`（麥克風開不起來，非權限）、`asr_failed`（辨識引擎報錯）、`no_response`（app 10 秒內沒回應） |
-| 2 | 用法錯誤 | `usage` |
-| 3 | app 未執行（或中途結束） | `not_running` |
-| 4 | 忙碌，或沒有可停／可取消的 CLI 聽寫 | `busy`、`nothing_to_stop` |
-| 5 | 已取消 | `cancelled` |
-| 6 | 沒偵測到說話／結果為空 | `no_speech`（從頭到尾沒判定開口）、`empty_result`（有開口但辨識不出字） |
-| 7 | 模型未就緒或逾時 | `model_not_ready`（等本機模型時失敗、或沒選模型）、`timeout`（錄音結束後等辨識結果超過上限） |
-| 8 | 權限不足 | `permission_denied`（麥克風權限被拒；尚未詢問過時會順手跳出系統授權視窗，這一次仍回 8） |
+| 0 | Success | — |
+| 1 | General error | `error`, `unsupported_version`, `microphone_unavailable` (the microphone couldn't start, not a permission issue), `asr_failed` (the recognition engine reported an error), `no_response` (the app didn't respond within 10 seconds) |
+| 2 | Usage error | `usage` |
+| 3 | App not running (or quit midway) | `not_running` |
+| 4 | Busy, or no CLI dictation to stop / cancel | `busy`, `nothing_to_stop` |
+| 5 | Cancelled | `cancelled` |
+| 6 | No speech detected / empty result | `no_speech` (speech was never detected), `empty_result` (speech was detected but nothing was recognized) |
+| 7 | Model not ready, or timeout | `model_not_ready` (failed while waiting for the local model, or no model selected), `timeout` (waiting for the recognition result after the recording ended exceeded the limit) |
+| 8 | Insufficient permission | `permission_denied` (microphone permission denied; if it was never asked, the system permission prompt is shown, and this attempt still returns 8) |
 
-錯誤時若有 `--json`，另輸出一行 `{"v":1,"type":"error","code":"…","message":"…"}`（`message` 是給人看的中文說明，不要拿來比對）。
+On error with `--json`, one extra line `{"v":1,"type":"error","code":"…","message":"…"}` is printed (`message` is a human-readable explanation in Chinese — don't match on it).
 
-## 2. 線上協定 v1（app ⇄ CLI，內部實作）
+## 2. Wire protocol v1 (app ⇄ CLI, internal implementation)
 
-- socket：`~/Library/Application Support/Saymend/control.sock`（環境變數 `SAYMEND_CONTROL_SOCKET` 可覆寫，app 與 CLI 用同一個解析）。
-- 框架：NDJSON，UTF-8，`\n` 分行，一行上限 64 KiB。每個物件帶 `"v":1`；**版本先驗**，不符一律回 `unsupported_version` 並關閉連線。
-- 一條連線一個請求（第一行）。`dictate` 連線之後可以再送 `{"v":1,"cmd":"cancel"}`（CLI 收到 SIGINT／SIGTERM 時送），其他後續行一律忽略。CLI 一定先寫出 `dictate` 才可能送這個 `cancel`——第一行的 `cancel` 是獨立的 `saymend cancel`，會取消**任何**進行中的 CLI 聽寫。
-- 請求：`{"v":1,"cmd":"status|version|stop|cancel|events"}`；`{"v":1,"cmd":"dictate","maxSeconds":120,"silenceMs":0,"noSpeechSeconds":0,"polish":false}`（欄位可省略＝預設值；不合法回 `usage`）。
-- 回覆：`status`（`{"v":1,"type":"status","state":…,"source":…,"modelReady":…}`）、`version`（`{"v":1,"type":"version","app":"0.1.0","protocol":1}`）、`started`、`partial`、`final`、`state`、`ok`、`error`。`status`／`version`／`ok`／`final`／`error` 之後 app 關閉連線；`events` 不關。
+- Socket: `~/Library/Application Support/Saymend/control.sock` (the environment variable `SAYMEND_CONTROL_SOCKET` overrides it; the app and the CLI use the same resolution).
+- Framing: NDJSON, UTF-8, lines separated by `\n`, 64 KiB per line at most. Every object carries `"v":1`; **the version is checked first**, and any mismatch is answered with `unsupported_version` and the connection is closed.
+- One request per connection (the first line). After `dictate`, the connection may also send `{"v":1,"cmd":"cancel"}` (sent by the CLI when it receives SIGINT / SIGTERM); any other follow-up line is ignored. The CLI always writes `dictate` before it can send this `cancel` — a `cancel` as the first line is a standalone `saymend cancel`, which cancels **any** CLI dictation in progress.
+- Requests: `{"v":1,"cmd":"status|version|stop|cancel|events"}`; `{"v":1,"cmd":"dictate","maxSeconds":120,"silenceMs":0,"noSpeechSeconds":0,"polish":false}` (fields may be omitted = default value; invalid values get `usage`).
+- Replies: `status` (`{"v":1,"type":"status","state":…,"source":…,"modelReady":…}`), `version` (`{"v":1,"type":"version","app":"0.1.0","protocol":1}`), `started`, `partial`, `final`, `state`, `ok`, `error`. After `status` / `version` / `ok` / `final` / `error`, the app closes the connection; `events` stays open.
 
-### 安全邊界
+### Security boundaries
 
-這個介面能從別的行程開麥克風，所以：
+This interface can turn on the microphone from another process, so:
 
-1. socket 檔權限 **0600**。
-2. 所在目錄 **0700**，且必須是目前使用者擁有，否則 app 拒絕啟動控制介面。預設路徑的目錄原本較寬鬆時，啟動時收緊成 0700；用 `SAYMEND_CONTROL_SOCKET` 覆寫的路徑**不替使用者改既有目錄的權限**（可能是家目錄），比 0700 寬就拒絕啟動。
-3. 每條連線 accept 之後立刻 `getpeereid`，uid 不同就直接關閉，一個位元組都不回。CLI 端也驗 server 的 uid（縱深防禦）。
-4. 路徑上若是**死掉的** socket（app 當掉留下的）就清掉重建；有人在 listen（另一個 Saymend 在跑）就不搶、只記 log；不是 socket 的檔案一律不刪。
-5. **錄音一定看得見**：CLI 聽寫錄音時 HUD 顯示紅色麥克風＋音量條＋「CLI 聽寫中｜Esc 取消」，與熱鍵聽寫同一個浮條。
+1. The socket file's permissions are **0600**.
+2. Its directory is **0700** and must be owned by the current user; otherwise the app refuses to start the control interface. If the directory at the default path is looser, it is tightened to 0700 at startup; for a path overridden with `SAYMEND_CONTROL_SOCKET`, the app **does not change the permissions of an existing directory on your behalf** (it might be your home directory) and refuses to start if they are looser than 0700.
+3. Every connection is checked with `getpeereid` right after accept; if the uid differs, the connection is closed immediately without sending a single byte. The CLI also verifies the server's uid (defense in depth).
+4. A **dead** socket at the path (left behind by a crashed app) is removed and recreated; if someone is listening (another Saymend is running), the app doesn't take it over and only logs it; a file that isn't a socket is never deleted.
+5. **Recording is always visible**: while a CLI dictation is recording, the HUD shows a red microphone + level bar + "CLI 聽寫中｜Esc 取消" (CLI dictation in progress | Esc to cancel), in the same floating bar as hotkey dictation.
 
-## 3. 與熱鍵聽寫的關係
+## 3. Relationship with hotkey dictation
 
-CLI 聽寫與熱鍵聽寫共用同一組麥克風、辨識引擎與 HUD（辨識引擎同一時間只能跑一條串流），所以**互斥**：
+CLI dictation and hotkey dictation share the same microphone, recognition engine, and HUD (the recognition engine can run only one stream at a time), so they are **mutually exclusive**:
 
-| 情境 | 行為 |
+| Situation | Behavior |
 |---|---|
-| 熱鍵聽寫錄音中、排空中、排隊中，或上一句潤飾還在途 | `dictate` → exit 4（`busy`） |
-| 熱鍵聽寫結束後的 8 秒延續窗（沒有在途潤飾） | `dictate` 照常開始，並**封存延續窗**（同使用者活動）：CLI 的文字不會進那個欄位，不是延續；不封存的話延續窗到期會把 CLI 錄音中的 HUD 一起收掉 |
-| CLI 錄音中按熱鍵 | **結束錄音並定稿**（同鎖定聽寫時點一下熱鍵），文字交給等待中的 `dictate`；**不**開始熱鍵聽寫 |
-| CLI 辨識／潤飾中按熱鍵 | 只提示「CLI 聽寫處理中」，不開始熱鍵聽寫 |
-| CLI 聽寫任何階段按 Esc | **取消並丟棄**（`dictate` exit 5）。Esc 被吞掉、不傳給前景 App——與熱鍵聽寫中按 Esc 一致 |
-| CLI 聽寫中打字、點滑鼠、切 App | 不影響（CLI 的文字不上屏，沒有東西要凍結） |
+| Hotkey dictation is recording, draining, or queued, or the previous sentence's polishing is still in flight | `dictate` → exit 4 (`busy`) |
+| The 8-second continuation window after a hotkey dictation (no polishing in flight) | `dictate` starts normally and **archives the continuation window** (same as user activity): the CLI's text won't go into that field, so it isn't a continuation; without archiving, the window's expiry would also take down the HUD of the recording CLI dictation |
+| Hotkey pressed while the CLI is recording | **Ends the recording and finalizes** (like tapping the hotkey during locked dictation); the text goes to the waiting `dictate`; hotkey dictation does **not** start |
+| Hotkey pressed while the CLI is transcribing / polishing | Only shows the notice "CLI 聽寫處理中" (CLI dictation is processing); hotkey dictation doesn't start |
+| Esc at any stage of a CLI dictation | **Cancels and discards** (`dictate` exits 5). Esc is swallowed and not passed to the frontmost app — the same as pressing Esc during hotkey dictation |
+| Typing, clicking, or switching apps during a CLI dictation | No effect (CLI text isn't inserted, so there is nothing to freeze) |
 
-熱鍵聽寫、口頭修正、密碼欄位硬規則的行為都沒有改變。
+The behavior of hotkey dictation, spoken corrections, and the password-field hard rule is unchanged.
 
-### 密碼欄位規則（規格 §5.3）不適用於 CLI 聽寫
+### The password-field rule (spec §5.3) doesn't apply to CLI dictation
 
-§5.3 的觸發條件是「聽寫的**目標**是聚焦中的密碼欄」：拒絕的理由是文字會被打進那個欄位，所以「不錄音、不送 LLM、不留歷史」。CLI 聽寫沒有目標欄位——結果在構造上就到不了任何欄位（這條路上根本沒有 inserter、不碰剪貼簿），焦點在哪裡和使用者說的話要去哪裡無關。套用它只會讓免手動迴圈在焦點剛好停在某個密碼欄（例如 1Password 解鎖框）時隨機失敗，換不到任何保護。詳見 ADR 0005。
+§5.3 is triggered when "the **target** of the dictation is the focused password field": the reason for refusing is that the text would be typed into that field, hence "don't record, don't send to the LLM, don't keep history". A CLI dictation has no target field — by construction its result can't reach any field (this path has no inserter at all and doesn't touch the clipboard), so where the focus is has nothing to do with where the user's words are going. Applying the rule would only make the hands-free loop fail at random whenever focus happens to sit in some password field (for example a 1Password unlock box), without buying any protection. See ADR 0005 for details.
 
-### 歷史紀錄
+### History
 
-照現有的「記錄聽寫歷史」設定記錄，歷史分頁的 App 欄顯示 **「CLI（saymend）」**（`history_session.targetKind = "cli"`）。
+Recorded according to the existing "記錄聽寫歷史" (record dictation history) setting; the App column of the History tab shows **"CLI（saymend）"** (`history_session.targetKind = "cli"`).
 
-- 正常定稿：一列 `cliRaw`（不潤飾）或潤飾的結果類別（`newContent`／`degraded`…），session 的最終文字＝回給呼叫端的 `text`。
-- 取消、失敗但已辨識出文字：一列 `outcomeDropped`，說明 `cli:<code>`。
-- **沒有任何內容的嘗試（沒人說話就放棄）不開 session**：免手動迴圈會反覆開這種聽寫，每次一筆空白紀錄會把歷史洗掉。
-- 字幕幻覺（Whisper 在沒人聲時解出的罐頭語）與熱鍵聽寫同樣不算進結果，記一列 `insertSkipped`／`captionHallucination`。
+- Normal finalization: one `cliRaw` row (without polishing) or the polishing result kind (`newContent` / `degraded` …); the session's final text = the `text` returned to the caller.
+- Cancelled or failed after text was recognized: one `outcomeDropped` row, described as `cli:<code>`.
+- **Attempts with no content at all (gave up because nobody spoke) don't create a session**: a hands-free loop opens such dictations over and over, and one blank record each time would flood the history.
+- Caption hallucinations (canned subtitle phrases Whisper produces when there is no voice) are excluded from the result just as in hotkey dictation, and recorded as one `insertSkipped` / `captionHallucination` row.
 
-## 4. 驗證紀錄（2026-11-26，`feat/control-cli`）
+## 4. Verification record (2026-11-26, `feat/control-cli`)
 
-- 單元測試：`swift test` 全綠（SaymendCore 1005 項，含 1 項預設跳過的實音訊 harness；SaymendControl 41 項；SaymendApp 167 項）。新邏輯的測試在 `Tests/SaymendControlTests/`（協定字面形狀、參數、真 socket 的 server／client／權限／uid 拒絕／CLI exit code）與 `Tests/SaymendCoreTests/{EndpointDetector,CLIDictationController,ControlService}Tests.swift`。
-- 實音訊 harness（預設跳過，`CLIDictationLiveHarness`）：`say -v Meijia` 合成的 7.2 秒中文語音，以即時速度、前後墊環境噪音餵進真的 WhisperKit（small）引擎，`--silence-ms 1200`：句中停頓沒被切斷，說完後約 0.5 秒（門檻＋tick）自動定稿；`raw` 簡體、`text` 經 OpenCC 轉繁。
-- 實機（執行中的 Saymend.app、系統內建辨識引擎、真麥克風）：`status`、`events`（熱鍵與 CLI 兩種來源）、`--version`、`dictate` 的 `--max-seconds`／`--no-speech-seconds`、另一行程 `stop`／`cancel`、SIGINT、SIGTERM、`kill -9` CLI；熱鍵錄音中與排空中 `dictate` 回 4、延續窗中 `dictate` 照常開始、CLI 錄音中按熱鍵定稿、按 Esc 取消；socket 0600／目錄 0700。麥克風開關以 CoreAudio 的 per-process 屬性（`kAudioProcessPropertyIsRunningInput`）確認：每一種結束方式（含 `kill -9`）之後 Saymend 都不再收音。
-- 真人實機（Eugene 本人，經 Claude Code 的 mod；系統內建辨識引擎、外接耳機麥克風、`--silence-ms 1500`，部分帶 `--no-speech-seconds 10` 的免手動迴圈）：說話 → 靜音自動結束 → 文字回到 CLI 的完整路徑。以下只取自歷史資料庫與 app log 的 metadata，不含說話內容：
-  - 2026-11-26 14:52～15:19（UTC）共 10 段 CLI 聽寫（`history_session.targetKind = cli`），每一段都有最終文字（`cliRaw`）。
-  - 10 段的錄音結束原因全部是 `silence`（靜音自動結束），錄音長度 5.9～32.1 秒；最長那段 32 秒的話沒有在句中被切斷。
-  - 人聲最大位準 1.0（頂到上限）；環境噪音底線 0.066～0.113，自適應門檻 0.165～0.282。
-  - 同一期間另有一次由 `saymend cancel` 取消的聽寫（端點判斷尚未判定開口就被取消，不計入上面的 10 段）。
-- **沒驗的**：`--polish` 沒有在實機上驗過，只有單元測試。
+- Unit tests: `swift test` all green (SaymendCore 1005 tests, including 1 real-audio harness that is skipped by default; SaymendControl 41; SaymendApp 167). Tests for the new logic are in `Tests/SaymendControlTests/` (literal protocol shapes, options, real-socket server / client / permissions / uid rejection / CLI exit codes) and `Tests/SaymendCoreTests/{EndpointDetector,CLIDictationController,ControlService}Tests.swift`.
+- Real-audio harness (skipped by default, `CLIDictationLiveHarness`): 7.2 seconds of Chinese speech synthesized with `say -v Meijia`, fed in real time with ambient noise padding before and after into the real WhisperKit (small) engine, with `--silence-ms 1200`: pauses within the sentence weren't cut off, and it finalized automatically about 0.5 s after the speech ended (threshold + tick); `raw` is Simplified Chinese, and `text` was converted to Traditional Chinese by OpenCC.
+- On the real machine (running Saymend.app, built-in recognition engine, real microphone): `status`, `events` (both hotkey and CLI sources), `--version`, `dictate` with `--max-seconds` / `--no-speech-seconds`, `stop` / `cancel` from another process, SIGINT, SIGTERM, `kill -9` of the CLI; `dictate` returns 4 while the hotkey is recording or draining, starts normally during the continuation window, the hotkey finalizes a recording CLI dictation, and Esc cancels it; socket 0600 / directory 0700. Whether the microphone was on was confirmed with CoreAudio's per-process property (`kAudioProcessPropertyIsRunningInput`): after every way of ending (including `kill -9`), Saymend stopped capturing audio.
+- Real person on the real machine (Eugene in person, through the Claude Code mod; built-in recognition engine, external headset microphone, `--silence-ms 1500`, part of it in the hands-free loop with `--no-speech-seconds 10`): the complete path of speaking → automatic end on silence → text back to the CLI. The following is taken only from the history database and app log metadata, without any spoken content:
+  - 2026-11-26 14:52–15:19 (UTC), 10 CLI dictations in total (`history_session.targetKind = cli`), each with final text (`cliRaw`).
+  - All 10 recordings ended because of `silence` (automatic end on silence), with recording lengths of 5.9–32.1 seconds; the longest, 32-second one wasn't cut off mid-sentence.
+  - Maximum voice level 1.0 (hit the ceiling); ambient noise floor 0.066–0.113, adaptive threshold 0.165–0.282.
+  - In the same period there was one more dictation cancelled by `saymend cancel` (cancelled before endpoint detection had detected speech; not counted among the 10 above).
+- **Not verified**: `--polish` has not been verified on the real machine; it has unit tests only.
