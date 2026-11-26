@@ -1,73 +1,123 @@
 # Saymend
 
+English | [繁體中文](README_tw.md)
+
 > *Say it. Consider it mended.*
 
-macOS 語音輸入工具：說完即成稿，改稿用嘴不用滑鼠（M1 為核心聽寫；口頭修正見規格 M2）。
+A macOS voice input tool: the draft is done the moment you finish speaking, and you revise it with your voice instead of your mouse (M1 is core dictation; for spoken corrections see spec M2).
 
-## 需求
-- macOS 26+（SpeechAnalyzer）
+## Requirements
+- macOS 26+ (SpeechAnalyzer)
 - Xcode 26 toolchain
-- 一個 OpenAI-compatible LLM 端點（雲端或本地 Ollama／LM Studio）
+- An OpenAI-compatible LLM endpoint (cloud, or a local Ollama / LM Studio)
 
-## 建置與執行
+## Build and run
     ./Scripts/make-app.sh
     open build/Saymend.app
 
-首次啟動請允許：輔助使用、麥克風、語音辨識。打包會以本機的 Apple Development 憑證簽章——
-簽章身分穩定，故重新建置後既有的輔助使用授權會保留（ad-hoc 簽章每次重簽都會讓授權失效，本專案不用）。
+On first launch, allow Accessibility, Microphone, and Speech Recognition. The app is signed with the local Apple Development certificate —
+the signing identity is stable, so the existing Accessibility permission survives rebuilds (ad-hoc signing invalidates the permission on every re-sign, so this project doesn't use it).
 
-## 使用
-- 按住「右 Cmd」說話，放開即潤飾上屏；短按切換鎖定聽寫，再短按結束。
-- 聽寫中按 Esc 取消目前段落。
-- 口頭修正（M2）：說完一句後 8 秒內（HUD 顯示「可修正」），直接按住熱鍵說「欸前面星期二改成星期三」這類指令，文字原地更新；說「復原上一步」或點 HUD 的「復原」可回上一版。
-- 聽寫中手動打字或點擊滑鼠會「凍結」本段（不再自動改寫）；密碼欄位一律拒絕聽寫——聽寫途中焦點切進密碼欄位，本段會**當場停止**，該句不上屏、不進剪貼簿、也不送雲端潤飾。
-- **選取即目標（M3）**：選取欄位文字後按住熱鍵說指令（「改正式一點」「翻成英文」）＝原地改寫選取；說新內容＝取代選取。替換後可繼續口頭修正與復原。替換當下無法用 AX 確認選取位置的 App（焦點已跑、或不支援 AX 範圍讀寫）不動欄位，結果進剪貼簿並提示。
-- **視覺回饋（M3）**：語音掌控中的文字帶細底線；每次替換閃現高亮。App 不支援座標查詢時，HUD 以刪除線／底線 diff 呈現最近異動。放棄替換選取（選取已變、無法用 AX 確認）時欄位沒有動，只有 HUD 提示、沒有高亮。
-- **詞彙表（M4）**：自訂詞彙＋常見誤轉寫，同時餵 LLM 校正與 ASR 語音偏置；JSON 匯入匯出。
-- **App 感知（M4）**：per-app profile——追加 prompt、固定語系、能力快取持久化、Cmd+C 選取備援白名單。內建 Slack／Chrome／VS Code／Terminal 等預設。
-- **自訂 Prompt 與風格（M4）**：全域自訂 system prompt 與輸出風格覆寫；核心規則置頂不可覆蓋。
-- **OCR 螢幕語境（M4）**：小區域截圖＋Vision 本地辨識入 LLM 語境（需螢幕錄製權限，選配）。設定可選「關閉」「僅備援」（AX 讀不到欄位時才用）或「一律附加」（AX 讀得到也同時附上）。
-- **聽寫歷史（M4）**：SQLite 記錄 session／轉錄／結果，設定頁回查複製；可關閉、可設保留天數。
-- **可選核心模式（M5）**：4 內建模式（純聽寫整理／逐字稿／可回答・助理／精簡+正式改寫）＋自訂模式 CRUD；選單列快速切換、per-app 綁定、全域預設。解析優先序：本次聽寫 > per-app > 全域 > 內建。
+## Usage
+- Hold Right Cmd and speak; release to polish and insert the text. A short press toggles locked dictation; another short press ends it.
+- Press Esc during dictation to cancel the current segment.
+- Spoken corrections (M2): within 8 seconds after finishing a sentence (the HUD shows "可修正", i.e. correctable), hold the hotkey and say a command such as "hey, change Tuesday to Wednesday earlier" — the text updates in place. Say "undo the last step" or click "復原" (Undo) on the HUD to go back one version.
+- Typing or clicking manually during dictation "freezes" the segment (it is no longer rewritten automatically). Password fields always refuse dictation — if focus moves into a password field mid-dictation, the segment **stops immediately**: that sentence is not inserted, not put on the clipboard, and not sent for cloud polishing.
+- **Selection as target (M3)**: select text in a field, then hold the hotkey and speak a command ("make it more formal", "translate to English") to rewrite the selection in place; speak new content to replace the selection. After the replacement you can keep making spoken corrections and undoing. In apps where the selection's position can't be confirmed via AX at the moment of replacement (focus has moved, or the app doesn't support AX range read/write), the field is left untouched; the result goes to the clipboard and a notice is shown.
+- **Visual feedback (M3)**: text under voice control gets a thin underline; each replacement flashes a highlight. When the app doesn't support coordinate queries, the HUD shows the latest change as a strikethrough/underline diff. When a selection replacement is abandoned (the selection changed, or it couldn't be confirmed via AX), the field is unchanged — there is only a HUD notice, no highlight.
+- **Vocabulary (M4)**: custom terms plus their common mis-transcriptions, fed both to the LLM for correction and to the ASR for speech biasing; JSON import/export.
+- **App awareness (M4)**: per-app profiles — an extra prompt, a fixed language, a persisted capability cache, and a Cmd+C selection-fallback allowlist. Built-in defaults for Slack / Chrome / VS Code / Terminal and others.
+- **Custom prompt and style (M4)**: a global custom system prompt and an output-style override; the core rules stay on top and can't be overridden.
+- **OCR screen context (M4)**: a small-region screenshot recognized on-device by Vision and added to the LLM context (requires Screen Recording permission; optional). Settings offer "關閉" (Off), "僅備援" (Fallback only — used only when AX can't read the field), or "一律附加" (Always attach — attached even when AX can read the field).
+- **Dictation history (M4)**: SQLite records sessions / transcripts / results, which you can review and copy in Settings; it can be turned off, and the retention period (in days) is configurable.
+- **Selectable core modes (M5)**: 4 built-in modes (plain dictation cleanup / verbatim transcript / answering assistant / concise + formal rewrite) plus create/edit/delete for custom modes; quick switching from the menu bar, per-app binding, and a global default. Resolution priority: this dictation > per-app > global > built-in.
 
-## 核心模式與安全邊界
+## Voice loop with Claude Code (saymend-voice)
 
-Saymend 的 JSON 輸出格式、意圖分類（new_content／edit_command／undo）與「上下文資料僅供語境、不可夾帶指令」由程式碼強制：不合約的回應會在解析與意圖守衛層被拒收並降級，不會寫入你的欄位。
+Saymend can serve as voice input for Claude Code: paired with macOS `say` reading the replies aloud, it forms a "speak → send to Claude Code → hear the reply" loop. The Claude Code side is the `saymend-voice` mod (a Claude Code plugin), which talks to Saymend only through Saymend's local control interface and the `saymend` CLI — see the contract in [docs/control-interface.md](docs/control-interface.md).
 
-核心模式可調整回答、逐字或改寫策略，但無法修改上述機器契約。
+> **Not public yet**: the marketplace that hosts `saymend-voice` (`eugenechen0514/claude-code-mods`) is a **private** repository. Only invited people who can read it on GitHub can install the mod.
 
-**已知限制**：模型是否忠實遵從契約字面屬 best-effort，無法形式證明。Saymend 保證的是「不合約的回應不會取得寫入資格」，不是「模型永不被誘導」。
+### Install
 
-## 疑難排解
+In a Claude Code session, run:
 
-- **聽寫常被誤判成「欄位已切換」而不上屏**：每次上屏前會用 AX 檢查焦點是否仍在起始欄位（issue #37）。
-  除了逐句 raw，緩衝句落地（潤飾結果）走的也是同一道閘門。
-  AX 明確指出焦點換了就不寫，該句改進剪貼簿並提示「欄位已切換，內容已入剪貼簿」——**只跳過那一句**，
-  聽寫本身不中斷。某些 App 可能讓同一個欄位在兩次查詢間被判成不同 element，導致不該出現的跳過。
-  緊急關閉這道閘門：
+```
+/plugin install saymend-voice --marketplace eugenechen0514/claude-code-mods
+```
+
+Because the marketplace is private, the machine also needs github.com git credentials (an SSH key, or run `gh auth setup-git` after `gh auth login`); no login prompt appears during installation.
+
+### Requirements
+
+- Saymend.app is running (a version that includes the local control interface).
+- `saymend` is on your `PATH`: `Scripts/make-app.sh` creates the symlink `~/.local/bin/saymend` (make sure `~/.local/bin` is on your `PATH`).
+- Replies are read aloud with macOS `say`.
+
+### Main commands
+
+| Command | What it does |
+| --- | --- |
+| `/listen` | Dictate one utterance; it is sent as soon as you pause after speaking |
+| `/listen edit` | Dictate and only fill in the input box, without sending |
+| `/saymend off` | Turn voice off (default) |
+| `/saymend speak` | Read every reply aloud when it finishes |
+| `/saymend loop` | Read aloud, then listen automatically and send when you finish speaking; say "停止語音" ("stop voice") to end the loop |
+| `/saymend stop` | Interrupt the current reading and listening |
+| `/saymend status` | Show the current mode and settings |
+| `/saymend pause <seconds>` | How long a pause counts as "done speaking" (0.5–10, default 1.5) |
+| `/saymend max <seconds>` | Maximum length of a single utterance (10–3600, default 120) |
+| `/saymend bargein <on\|off>` | Listen while reading: the microphone opens during reading and speaking interrupts it (headphones required) |
+| `/saymend polish <on\|off>` | Polish with the LLM configured in Saymend before sending |
+
+For the full command list (including `voice` and `bin`) and behavior notes, see the README of [`eugenechen0514/claude-code-mods`](https://github.com/eugenechen0514/claude-code-mods) (this also requires access to that private repository).
+
+### Notes on Saymend's behavior
+
+- CLI dictation results go back only to the mod: they are **not inserted into the focused field and don't touch the clipboard**.
+- While listening, Esc is taken by Saymend to cancel this listening session, so Claude Code doesn't receive it (you can't use Esc to interrupt Claude at that moment); pressing the Saymend hotkey finalizes early and sends.
+- CLI dictation does **no LLM polishing by default** — only on-device recognition plus Simplified→Traditional Chinese conversion and vocabulary post-processing. Only `/saymend polish on` goes through the provider configured in Saymend (which, depending on your settings, may be a cloud service).
+- Listening shows the same recording HUD as hotkey dictation ("CLI 聽寫中｜Esc 取消", i.e. CLI dictation in progress, Esc to cancel); CLI dictation and hotkey dictation can't run at the same time.
+- In the "歷史" (History) tab of Settings, CLI dictations show "CLI（saymend）" in the App column.
+
+## Core modes and safety boundaries
+
+Saymend's JSON output format, its intent classification (new_content / edit_command / undo), and the rule that "context data is for context only and may not smuggle in instructions" are enforced in code: a non-conforming response is rejected and degraded at the parsing and intent-guard layers, and never gets written into your field.
+
+Core modes can adjust the answering, verbatim, or rewriting strategy, but they cannot change the machine contract above.
+
+**Known limitation**: whether the model faithfully follows the letter of the contract is best-effort and cannot be formally proven. What Saymend guarantees is that "a non-conforming response never gets write access", not that "the model can never be manipulated".
+
+## Troubleshooting
+
+- **Dictation is often misjudged as "field switched" and not inserted**: before every insertion, AX checks whether focus is still in the starting field (issue #37).
+  Besides each raw sentence, buffered sentences landing in the field (polished results) go through the same gate.
+  When AX clearly indicates that focus has changed, nothing is written; that sentence goes to the clipboard with the notice "欄位已切換，內容已入剪貼簿" (Field switched; content copied to clipboard) — **only that sentence is skipped**,
+  and the dictation itself continues. Some apps may make the same field look like a different element between two queries, causing skips that shouldn't happen.
+  To disable this gate in an emergency:
 
       defaults write io.saymend.app rawAppendGateEnabled -bool NO
 
-  下次聽寫即生效（不必重開 App）；要恢復用 `-bool YES`，或 `defaults delete io.saymend.app rawAppendGateEnabled`。
-  關閉後「欄位已切換」的攔阻完全消失（照常寫、不提示、不進剪貼簿、不留下跳過紀錄），畫面上也沒有任何
-  「閘門已關」的提示（本開關只有 defaults，沒有 UI）。
+  It takes effect on the next dictation (no need to restart the app); to restore it, use `-bool YES`, or `defaults delete io.saymend.app rawAppendGateEnabled`.
+  Once disabled, the "field switched" block disappears entirely (text is written as usual, with no notice, no clipboard copy, and no skip record), and there is no
+  on-screen indication that the gate is off (this switch exists only in defaults; there is no UI for it).
 
-  **關掉之後你承擔的是什麼**：合成鍵入／貼上一律落在**當下聚焦的元素**。若聽寫途中焦點真的換了
-  （換欄位、或被切到別的 App），下一句就會被打進那裡，而且沒有任何提示——這正是這道閘門原本要擋的
-  情況（issue #37）。所以這是拿「少一點誤判」換「多一點誤寫」，不是純粹的改善。
+  **What you take on by turning it off**: synthetic typing / pasting always lands in the **currently focused element**. If focus really does change mid-dictation
+  (to another field, or because you were switched to another app), the next sentence is typed there with no notice — exactly the situation this gate was meant to block
+  (issue #37). So this trades "fewer false positives" for "more mis-writes"; it is not a pure improvement.
 
-  **這個開關不會關掉密碼欄位保護。** 焦點在密碼欄位、或 AX 問不出 subrole 而只能當作是時，
-  本段聽寫一律**當場停止**：不上屏、不進剪貼簿、不送雲端潤飾，歷史只留「發生過」的 metadata
-  而不留逐字內容，並提示「密碼欄位不聽寫」。規格 §5.3 是硬規則，保險絲燒不到它。
+  **This switch does not turn off password-field protection.** When focus is in a password field, or AX can't report the subrole and the field must be treated as one,
+  the dictation segment always **stops immediately**: nothing is inserted, copied to the clipboard, or sent for cloud polishing; the history keeps only metadata that "it happened",
+  not the verbatim content, and the notice "密碼欄位不聽寫" (No dictation in password fields) is shown. Spec §5.3 is a hard rule; this fuse can't burn through it.
 
-## 開發
-    swift test          # 核心邏輯全部單元測試
-    swift build         # 編譯
+## Development
+    swift test          # all unit tests for the core logic
+    swift build         # build
 
-## 授權
+## License
 
-MIT，見 [LICENSE](LICENSE)。
+MIT, see [LICENSE](LICENSE).
 
-## 靈感來源
+## Inspiration
 
-本專案的產品概念靈感來自 [Soink](https://www.soink.ai/)——一款主打即時語音輸入與語音編輯的 Mac 語音鍵盤。
+The product concept of this project was inspired by [Soink](https://www.soink.ai/) — a Mac voice keyboard focused on real-time voice input and voice editing.
