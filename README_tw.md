@@ -41,7 +41,7 @@ macOS 語音輸入工具：說完即成稿，改稿用嘴不用滑鼠（M1 為�
 
 ## 搭配 Claude Code：語音迴圈（saymend-voice）
 
-Saymend 可以當 Claude Code 的語音輸入：搭配 macOS 的 `say` 朗讀回覆，組成「說話 → 送進 Claude Code → 回覆唸出來」的迴圈，靠的是 Saymend 的本機控制介面與 `saymend` CLI（契約見 [docs/control-interface.md](docs/control-interface.md)）。Claude Code 那一側的 mod、安裝方式與完整說明請見 [`saymend-voice`](https://github.com/eugenechen0514/claude-code-mods/tree/main/mods/saymend-voice)（該 repository 目前是 private，只有被邀請的人能存取）。
+Saymend 可以當 Claude Code 的語音輸入：搭配 macOS 的 `say` 朗讀回覆，組成「說話 → 送進 Claude Code → 回覆唸出來」的迴圈，靠的是 Saymend 的本機控制介面與 `saymend` CLI（契約見 [docs/control-interface_tw.md](docs/control-interface_tw.md)）。Claude Code 那一側的 mod、安裝方式與完整說明請見 [`saymend-voice`](https://github.com/eugenechen0514/claude-code-mods/tree/main/mods/saymend-voice)（該 repository 目前是 private，只有被邀請的人能存取）。
 
 ## 核心模式與安全邊界
 
