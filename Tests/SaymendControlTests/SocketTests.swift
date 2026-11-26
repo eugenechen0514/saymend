@@ -76,7 +76,7 @@ func waitUntil(_ timeout: Double = 5, _ condition: () -> Bool) async -> Bool {
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o755])
         defer { try? FileManager.default.removeItem(atPath: dir) }
-        let server = ControlServer(socketPath: path, handler: ScriptedHandler())
+        let server = ControlServer(socketPath: path, tightenExistingDirectory: true, handler: ScriptedHandler())
         try server.start()
         defer { server.stop() }
         var st = stat()
@@ -187,7 +187,8 @@ func waitUntil(_ timeout: Double = 5, _ condition: () -> Bool) async -> Bool {
     @Test func refusesToDeleteSomethingThatIsNotASocket() throws {
         let (dir, path) = makeSocketPath()
         defer { try? FileManager.default.removeItem(atPath: dir) }
-        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
         try Data("keep me".utf8).write(to: URL(fileURLWithPath: path))
         let server = ControlServer(socketPath: path, handler: ScriptedHandler())
         #expect(throws: UnixSocketError.notASocket(path)) { try server.start() }
@@ -209,6 +210,38 @@ func waitUntil(_ timeout: Double = 5, _ condition: () -> Bool) async -> Bool {
         #expect(received.count == 1, "串流在 server 停止時以 EOF 結束")
         #expect(!FileManager.default.fileExists(atPath: path))
         #expect(throws: UnixSocketError.notRunning) { try UnixSocket.connect(path: path) }
+    }
+
+    /// `SAYMEND_CONTROL_SOCKET` 覆寫的路徑：既有目錄可能是任何地方（例如家目錄），不得替使用者改權限
+    @Test func overridePathNeverChmodsAnExistingLooseDirectory() throws {
+        let (dir, path) = makeSocketPath()
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o755])
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let server = ControlServer(socketPath: path, handler: ScriptedHandler())   // 非預設路徑：預設不收緊
+        #expect(throws: UnixSocketError.insecureDirectory(dir)) { try server.start() }
+        var st = stat()
+        #expect(stat(dir, &st) == 0)
+        #expect(st.st_mode & 0o777 == 0o755, "權限原封不動")
+        #expect(!FileManager.default.fileExists(atPath: path))
+    }
+
+    /// `stop()` 剛好落在 accept 與 `start()` 之間：連線已被關閉才要建 read source——fd 要關掉、不得空轉
+    @Test func connectionClosedBeforeStartStillClosesItsDescriptor() async throws {
+        var fds: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        defer { close(fds[1]) }
+        let handler = ScriptedHandler()
+        var removed = 0
+        let conn = ControlConnection(fd: fds[0], handler: handler) { _ in removed += 1 }
+        conn.close()
+        conn.start()
+        #expect(await waitUntil { handler.closedCount == 1 && removed == 1 })
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(fcntl(fds[0], F_GETFD) == -1, "fd 已關閉")
+        // 對端看到 EOF
+        var byte: UInt8 = 0
+        #expect(read(fds[1], &byte, 1) == 0)
     }
 
     @Test func pathsLongerThanSunPathAreRejected() {

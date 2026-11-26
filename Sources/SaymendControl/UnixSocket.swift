@@ -22,7 +22,7 @@ public enum UnixSocketError: Error, Equatable, CustomStringConvertible {
         case .notRunning: return "Saymend.app 未執行"
         case .alreadyInUse(let p): return "已有另一個 Saymend 在使用 \(p)"
         case .notASocket(let p): return "路徑上已有非 socket 的檔案：\(p)"
-        case .insecureDirectory(let p): return "socket 所在目錄不屬於目前使用者：\(p)"
+        case .insecureDirectory(let p): return "socket 所在目錄不屬於目前使用者，或權限比 0700 寬：\(p)"
         case .peerRejected(let uid): return "拒絕不同使用者的連線（uid \(uid)）"
         case .syscall(let name, let err): return "\(name) 失敗：\(String(cString: strerror(err)))（errno \(err)）"
         }
@@ -125,9 +125,12 @@ public enum UnixSocket {
 
     /// 建 listen socket。檔案權限 0600、所在目錄 0700；路徑上若是**死掉的** socket（沒人 listen）就清掉重建，
     /// 若有人在 listen 就拒絕（不搶另一個執行中的 Saymend 的 socket）。
-    public static func listen(path: String, backlog: Int32 = 16) throws -> Int32 {
+    /// - Parameter tightenExistingDirectory: 既有目錄權限比 0700 寬時要不要收緊。只給預設路徑
+    ///   （`~/Library/Application Support/Saymend`）用；覆寫路徑（`SAYMEND_CONTROL_SOCKET`）的既有目錄
+    ///   可能是任何地方（例如家目錄），不能替使用者改權限——太寬就拒絕啟動。
+    public static func listen(path: String, backlog: Int32 = 16, tightenExistingDirectory: Bool = false) throws -> Int32 {
         var addr = try address(for: path)
-        try prepareDirectory(for: path)
+        try prepareDirectory(for: path, tightenExisting: tightenExistingDirectory)
         try removeStaleSocket(at: path)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -160,8 +163,8 @@ public enum UnixSocket {
         return fd
     }
 
-    /// 目錄不存在就以 0700 建立；存在就確認是本人擁有並收緊成 0700。
-    static func prepareDirectory(for path: String) throws {
+    /// 目錄不存在就以 0700 建立；存在就確認是本人擁有，權限比 0700 寬時收緊（`tightenExisting`）或拒絕。
+    static func prepareDirectory(for path: String, tightenExisting: Bool = true) throws {
         let dir = (path as NSString).deletingLastPathComponent
         var st = stat()
         if stat(dir, &st) != 0 {
@@ -175,7 +178,8 @@ public enum UnixSocket {
             guard stat(dir, &st) == 0 else { throw UnixSocketError.syscall("stat", errno) }
         }
         guard st.st_uid == getuid() else { throw UnixSocketError.insecureDirectory(dir) }
-        if st.st_mode & 0o777 != 0o700 {
+        if st.st_mode & 0o077 != 0 {
+            guard tightenExisting else { throw UnixSocketError.insecureDirectory(dir) }
             guard chmod(dir, 0o700) == 0 else { throw UnixSocketError.syscall("chmod", errno) }
         }
     }

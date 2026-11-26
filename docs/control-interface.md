@@ -132,7 +132,7 @@ protocol v1
 
 - socket：`~/Library/Application Support/Saymend/control.sock`（環境變數 `SAYMEND_CONTROL_SOCKET` 可覆寫，app 與 CLI 用同一個解析）。
 - 框架：NDJSON，UTF-8，`\n` 分行，一行上限 64 KiB。每個物件帶 `"v":1`；**版本先驗**，不符一律回 `unsupported_version` 並關閉連線。
-- 一條連線一個請求（第一行）。`dictate` 連線之後可以再送 `{"v":1,"cmd":"cancel"}`（CLI 收到 SIGINT／SIGTERM 時送），其他後續行一律忽略。
+- 一條連線一個請求（第一行）。`dictate` 連線之後可以再送 `{"v":1,"cmd":"cancel"}`（CLI 收到 SIGINT／SIGTERM 時送），其他後續行一律忽略。CLI 一定先寫出 `dictate` 才可能送這個 `cancel`——第一行的 `cancel` 是獨立的 `saymend cancel`，會取消**任何**進行中的 CLI 聽寫。
 - 請求：`{"v":1,"cmd":"status|version|stop|cancel|events"}`；`{"v":1,"cmd":"dictate","maxSeconds":120,"silenceMs":0,"noSpeechSeconds":0,"polish":false}`（欄位可省略＝預設值；不合法回 `usage`）。
 - 回覆：`status`（`{"v":1,"type":"status","state":…,"source":…,"modelReady":…}`）、`version`（`{"v":1,"type":"version","app":"0.1.0","protocol":1}`）、`started`、`partial`、`final`、`state`、`ok`、`error`。`status`／`version`／`ok`／`final`／`error` 之後 app 關閉連線；`events` 不關。
 
@@ -141,7 +141,7 @@ protocol v1
 這個介面能從別的行程開麥克風，所以：
 
 1. socket 檔權限 **0600**。
-2. 所在目錄 **0700**，且必須是目前使用者擁有，否則 app 拒絕啟動控制介面（目錄原本較寬鬆時，啟動時收緊）。
+2. 所在目錄 **0700**，且必須是目前使用者擁有，否則 app 拒絕啟動控制介面。預設路徑的目錄原本較寬鬆時，啟動時收緊成 0700；用 `SAYMEND_CONTROL_SOCKET` 覆寫的路徑**不替使用者改既有目錄的權限**（可能是家目錄），比 0700 寬就拒絕啟動。
 3. 每條連線 accept 之後立刻 `getpeereid`，uid 不同就直接關閉，一個位元組都不回。CLI 端也驗 server 的 uid（縱深防禦）。
 4. 路徑上若是**死掉的** socket（app 當掉留下的）就清掉重建；有人在 listen（另一個 Saymend 在跑）就不搶、只記 log；不是 socket 的檔案一律不刪。
 5. **錄音一定看得見**：CLI 聽寫錄音時 HUD 顯示紅色麥克風＋音量條＋「CLI 聽寫中｜Esc 取消」，與熱鍵聽寫同一個浮條。
@@ -176,7 +176,7 @@ CLI 聽寫與熱鍵聽寫共用同一組麥克風、辨識引擎與 HUD（辨識
 
 ## 4. 驗證紀錄（2026-11-26，`feat/control-cli`）
 
-- 單元測試：`swift test` 全綠（SaymendCore 1004 項＋SaymendControl 38 項＋SaymendApp 167 項）。新邏輯的測試在 `Tests/SaymendControlTests/`（協定字面形狀、參數、真 socket 的 server／client／權限／uid 拒絕／CLI exit code）與 `Tests/SaymendCoreTests/{EndpointDetector,CLIDictationController,ControlService}Tests.swift`。
+- 單元測試：`swift test` 全綠（SaymendCore 1005 項，含 1 項預設跳過的實音訊 harness；SaymendControl 41 項；SaymendApp 167 項）。新邏輯的測試在 `Tests/SaymendControlTests/`（協定字面形狀、參數、真 socket 的 server／client／權限／uid 拒絕／CLI exit code）與 `Tests/SaymendCoreTests/{EndpointDetector,CLIDictationController,ControlService}Tests.swift`。
 - 實音訊 harness（預設跳過，`CLIDictationLiveHarness`）：`say -v Meijia` 合成的 7.2 秒中文語音，以即時速度、前後墊環境噪音餵進真的 WhisperKit（small）引擎，`--silence-ms 1200`：句中停頓沒被切斷，說完後約 0.5 秒（門檻＋tick）自動定稿；`raw` 簡體、`text` 經 OpenCC 轉繁。
 - 實機（執行中的 Saymend.app、系統內建辨識引擎、真麥克風）：`status`、`events`（熱鍵與 CLI 兩種來源）、`--version`、`dictate` 的 `--max-seconds`／`--no-speech-seconds`、另一行程 `stop`／`cancel`、SIGINT、SIGTERM、`kill -9` CLI；熱鍵錄音中與排空中 `dictate` 回 4、延續窗中 `dictate` 照常開始、CLI 錄音中按熱鍵定稿、按 Esc 取消；socket 0600／目錄 0700。麥克風開關以 CoreAudio 的 per-process 屬性（`kAudioProcessPropertyIsRunningInput`）確認：每一種結束方式（含 `kill -9`）之後 Saymend 都不再收音。
 - **沒驗的**：真人對麥克風說話經 app 的完整路徑（說話 → 靜音自動結束 → 文字回到 CLI）；該路徑的端點判斷與辨識由上面的實音訊 harness 驗證，但麥克風增益、距離、房間迴響不在其中。`--polish` 只有單元測試。

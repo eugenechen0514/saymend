@@ -172,6 +172,23 @@ final class CapturedOutput: @unchecked Sendable {
         }
     }
 
+    /// 訊號落在「已連上、dictate 請求還沒送」：cancel 不得變成第一行（那會被當成獨立的 `saymend cancel`，
+    /// 取消掉別人正在進行的聽寫）。必須排在 dictate 之後、以後續行送出。
+    @Test func interruptBeforeTheRequestIsWrittenNeverBecomesAStandaloneCancel() async throws {
+        try await withServer({ _ in [.started] }) { path, handler in
+            let captured = CapturedOutput()
+            let runner = CLIRunner(socketPath: path, output: captured.output, cliVersion: "1",
+                                   terminate: { _ in }, interruptGrace: 30)
+            runner.beforeDictateRequest = { runner.interrupt() }
+            async let exit = background { runner.run(["dictate", "--json"]) }
+            #expect(await waitUntil { handler.followUps == [.cancel] })
+            #expect(handler.requests == [.dictate(DictateOptions())], "第一行必須是 dictate")
+            handler.peers[0].send(.error(code: .cancelled, message: "已取消"))
+            handler.peers[0].close()
+            #expect(await exit == 5)
+        }
+    }
+
     @Test func versionWorksWithAndWithoutTheApp() async throws {
         try await withServer({ _ in [.version(app: "0.1.0")] }) { path, _ in
             let (code, o) = await run(path, ["--version", "--json"])

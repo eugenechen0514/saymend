@@ -31,6 +31,8 @@ public final class CLIRunner {
     private var dictateFD: Int32?
     private var dictateJSON = false
     private var interrupted = false
+    /// 測試用：在送出 dictate 請求之前呼叫（用來把訊號釘在「已連上、請求還沒送」這個窗口）
+    var beforeDictateRequest: (() -> Void)?
 
     public init(socketPath: String, output: Output, cliVersion: String,
                 connect: @escaping (String) throws -> Int32 = { try UnixSocket.connect(path: $0) },
@@ -73,17 +75,18 @@ public final class CLIRunner {
     /// 其他時候：立刻以 exit 5 結束——只有 dictate 有「取消」的語意，其餘指令沒有東西要丟棄，照慣例結束即可。
     public func interrupt() {
         lock.lock()
-        let fd = dictateFD
-        let json = dictateJSON
         let first = !interrupted
         interrupted = true
+        let json = dictateJSON
+        let active = dictateFD != nil
+        // 持鎖寫：`runDictate` 收尾時先在鎖內清掉 dictateFD 才 close，這裡就不會寫到已關閉（或被重用）的 fd
+        if first, let fd = dictateFD { UnixSocket.writeLine(fd, ControlRequest.cancel.encoded()) }
         lock.unlock()
         guard first else { return }
-        guard let fd else {
+        guard active else {
             terminate(ControlExitCode.cancelled)
             return
         }
-        UnixSocket.writeLine(fd, ControlRequest.cancel.encoded())
         DispatchQueue.global().asyncAfter(deadline: .now() + interruptGrace) { [self] in
             guard dictateIsActive else { return }   // run 已經自己收尾了
             emitError(.cancelled, "已取消（app 未在時限內確認）", json: json)
@@ -204,21 +207,28 @@ public final class CLIRunner {
     private func runDictate(_ options: DictateOptions, json: Bool) -> Int32 {
         let fd: Int32
         do { fd = try connect(socketPath) } catch { return connectFailure(error, json: json) }
-        lock.lock()
-        dictateFD = fd
-        dictateJSON = json
-        let alreadyInterrupted = interrupted
-        lock.unlock()
         defer {
             lock.lock(); dictateFD = nil; lock.unlock()
             close(fd)
         }
-        // 連上之前就收到訊號：直接放棄，不開麥克風
+        lock.lock()
+        dictateJSON = json
+        let alreadyInterrupted = interrupted
+        lock.unlock()
+        // 送出請求之前就收到訊號：直接放棄，不開麥克風
         if alreadyInterrupted {
             emitError(.cancelled, "已取消", json: json)
             return ControlExitCode.cancelled
         }
+        beforeDictateRequest?()
         guard UnixSocket.writeLine(fd, ControlRequest.dictate(options).encoded()) else { return lostApp(json: json) }
+        // dictate 請求**寫出之後**才讓訊號處理器看得到這個 fd。若在寫出之前就給它，cancel 可能變成這條連線的
+        // 第一行——app 會把它當成獨立的 `saymend cancel`，取消掉別人正在進行的聽寫。
+        // 寫出前到寫出後之間收到的訊號，在這裡補送（此時它已是這條 dictate 連線的後續行）。
+        lock.lock()
+        dictateFD = fd
+        if interrupted { UnixSocket.writeLine(fd, ControlRequest.cancel.encoded()) }
+        lock.unlock()
         let reader = LineReader(fd: fd)
         while true {
             let line: String?

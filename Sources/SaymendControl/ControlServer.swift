@@ -29,6 +29,7 @@ public protocol ControlRequestHandler: AnyObject {
 public final class ControlServer {
     public let socketPath: String
     private let allowedUID: uid_t
+    private let tightenExistingDirectory: Bool
     private let handler: any ControlRequestHandler
     private let acceptQueue = DispatchQueue(label: "io.saymend.control.accept")
     private var listenFD: Int32 = -1
@@ -39,14 +40,17 @@ public final class ControlServer {
     private var connections: [ObjectIdentifier: ControlConnection] = [:]
     static let log = Logger(subsystem: "io.saymend.app", category: "control")
 
-    public init(socketPath: String, allowedUID: uid_t = getuid(), handler: any ControlRequestHandler) {
+    /// - Parameter tightenExistingDirectory: nil＝只有預設路徑才收緊既有目錄（見 `UnixSocket.listen`）
+    public init(socketPath: String, allowedUID: uid_t = getuid(), tightenExistingDirectory: Bool? = nil,
+                handler: any ControlRequestHandler) {
         self.socketPath = socketPath
         self.allowedUID = allowedUID
+        self.tightenExistingDirectory = tightenExistingDirectory ?? (socketPath == ControlProtocol.defaultSocketPath())
         self.handler = handler
     }
 
     public func start() throws {
-        let fd = try UnixSocket.listen(path: socketPath)
+        let fd = try UnixSocket.listen(path: socketPath, tightenExistingDirectory: tightenExistingDirectory)
         let flags = fcntl(fd, F_GETFL)
         _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)   // accept 不能在假喚醒時卡住佇列
         var st = stat()
@@ -132,13 +136,21 @@ final class ControlConnection: ControlPeer {
         self.onRemoved = onRemoved
     }
 
+    /// 在 I/O 佇列上建 read source（連線的狀態只在這個佇列上改）。
+    /// 建之前就已被關閉（`ControlServer.stop()` 剛好落在 accept 與 start 之間）：沒有 source 可 cancel，直接關 fd。
     func start() {
-        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: io)
-        source.setEventHandler { [weak self] in self?.readAvailable() }
-        let fd = self.fd
-        source.setCancelHandler { Darwin.close(fd) }   // fd 只在這裡關：cancel 之後 dispatch 不會再碰它
-        readSource = source
-        source.resume()
+        io.async {
+            let fd = self.fd
+            guard !self.closed else {
+                Darwin.close(fd)
+                return
+            }
+            let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: self.io)
+            source.setEventHandler { [weak self] in self?.readAvailable() }
+            source.setCancelHandler { Darwin.close(fd) }   // fd 只在這裡關：cancel 之後 dispatch 不會再碰它
+            self.readSource = source
+            source.resume()
+        }
     }
 
     func send(_ message: ControlMessage) {
