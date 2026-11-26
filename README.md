@@ -9,14 +9,21 @@ A macOS voice input tool: the draft is done the moment you finish speaking, and 
 ## Requirements
 - macOS 26+ (SpeechAnalyzer)
 - Xcode 26 toolchain
-- An OpenAI-compatible LLM endpoint (cloud, or a local Ollama / LM Studio)
+- A speech recognition engine (pick one of three in Settings; the default is the built-in one):
+  - Built-in (Apple SpeechAnalyzer): no extra setup; the recognition model for the language is managed by the system and downloaded automatically on first use.
+  - Local WhisperKit (offline): a WhisperKit CoreML model folder on disk (`~/Documents/huggingface/models/argmaxinc/whisperkit-coreml/` is scanned by default; you can also point Settings at another folder). If the model's tokenizer isn't cached locally yet, it is fetched once from Hugging Face on first use.
+  - Whisper remote: an OpenAI `audio/transcriptions`-compatible endpoint (the base URL is required; the default model is `whisper-1`; its API key is stored separately from the LLM's). A single recording is limited to 10 minutes.
+- A language model (optional; used for polishing, spoken corrections, and rewriting selections; pick one of two in Settings, OpenAI-compatible by default). Without a working language model, dictation still works but always keeps the raw transcript, and the HUD shows "未潤飾（reason）" (not polished, with the reason):
+  - An OpenAI-compatible endpoint (`chat/completions`): cloud, or a local Ollama / LM Studio; local endpoints can leave the API key empty.
+  - Claude CLI: the Claude Code `claude` command installed and logged in on this machine (2.1.216 or later); it reuses Claude Code's login, so no API key is needed. It is looked up automatically in common locations such as `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`, or you can set the path in Settings.
 
 ## Build and run
     ./Scripts/make-app.sh
     open build/Saymend.app
 
 On first launch, allow Accessibility, Microphone, and Speech Recognition. The app is signed with the local Apple Development certificate —
-the signing identity is stable, so the existing Accessibility permission survives rebuilds (ad-hoc signing invalidates the permission on every re-sign, so this project doesn't use it).
+the signing identity is stable, so the existing Accessibility permission survives rebuilds (only when no Apple Development certificate is found does it fall back to ad-hoc signing; ad-hoc signing invalidates the permission on every re-sign, so you have to grant it again).
+Packaging also puts the `saymend` CLI into `Saymend.app/Contents/Helpers/` and creates the symlink `~/.local/bin/saymend` (set `SAYMEND_SKIP_CLI_LINK=1` to skip it; see "Voice loop with Claude Code" below for what it's for).
 
 ## Usage
 - Hold Right Cmd and speak; release to polish and insert the text. A short press toggles locked dictation; another short press ends it.

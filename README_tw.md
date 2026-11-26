@@ -9,14 +9,21 @@ macOS 語音輸入工具：說完即成稿，改稿用嘴不用滑鼠（M1 為�
 ## 需求
 - macOS 26+（SpeechAnalyzer）
 - Xcode 26 toolchain
-- 一個 OpenAI-compatible LLM 端點（雲端或本地 Ollama／LM Studio）
+- 語音辨識引擎（設定頁三選一，預設「系統內建」）：
+  - 系統內建（Apple SpeechAnalyzer）：不需另外設定；該語系的辨識模型由系統管理，首次使用時自動下載。
+  - 本機 WhisperKit（離線）：磁碟上的 WhisperKit CoreML 模型資料夾（預設掃描 `~/Documents/huggingface/models/argmaxinc/whisperkit-coreml/`，也可在設定頁指定其他資料夾）。本機沒有該模型的 tokenizer 快取時，首次使用會向 Hugging Face 取一次。
+  - Whisper 遠端：一個 OpenAI `audio/transcriptions` 相容端點（base URL 必填，預設模型 `whisper-1`；API key 與 LLM 的分開存放）。單段錄音上限 10 分鐘。
+- 語言模型（選配，用於潤飾、口頭修正與改寫選取；設定頁二選一，預設 OpenAI-compatible）。沒有可用的語言模型時聽寫照常，只是一律保留原始轉錄，HUD 提示「未潤飾（原因）」：
+  - OpenAI-compatible 端點（`chat/completions`）：雲端，或本地 Ollama／LM Studio；本機端點可不填 API key。
+  - Claude CLI：本機已安裝並登入的 Claude Code `claude` 指令（2.1.216 以上），沿用 Claude Code 的登入、不需要 API key。自動在 `~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 等常見位置尋找，也可在設定頁指定路徑。
 
 ## 建置與執行
     ./Scripts/make-app.sh
     open build/Saymend.app
 
 首次啟動請允許：輔助使用、麥克風、語音辨識。打包會以本機的 Apple Development 憑證簽章——
-簽章身分穩定，故重新建置後既有的輔助使用授權會保留（ad-hoc 簽章每次重簽都會讓授權失效，本專案不用）。
+簽章身分穩定，故重新建置後既有的輔助使用授權會保留（找不到 Apple Development 憑證時才退回 ad-hoc 簽章；ad-hoc 每次重簽都會讓授權失效，需要重新勾選）。
+打包也會把 `saymend` CLI 放進 `Saymend.app/Contents/Helpers/`，並建立 `~/.local/bin/saymend` symlink（設 `SAYMEND_SKIP_CLI_LINK=1` 可略過；用途見下方「搭配 Claude Code」）。
 
 ## 使用
 - 按住「右 Cmd」說話，放開即潤飾上屏；短按切換鎖定聽寫，再短按結束。
