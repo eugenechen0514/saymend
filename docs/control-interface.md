@@ -179,4 +179,9 @@ CLI 聽寫與熱鍵聽寫共用同一組麥克風、辨識引擎與 HUD（辨識
 - 單元測試：`swift test` 全綠（SaymendCore 1005 項，含 1 項預設跳過的實音訊 harness；SaymendControl 41 項；SaymendApp 167 項）。新邏輯的測試在 `Tests/SaymendControlTests/`（協定字面形狀、參數、真 socket 的 server／client／權限／uid 拒絕／CLI exit code）與 `Tests/SaymendCoreTests/{EndpointDetector,CLIDictationController,ControlService}Tests.swift`。
 - 實音訊 harness（預設跳過，`CLIDictationLiveHarness`）：`say -v Meijia` 合成的 7.2 秒中文語音，以即時速度、前後墊環境噪音餵進真的 WhisperKit（small）引擎，`--silence-ms 1200`：句中停頓沒被切斷，說完後約 0.5 秒（門檻＋tick）自動定稿；`raw` 簡體、`text` 經 OpenCC 轉繁。
 - 實機（執行中的 Saymend.app、系統內建辨識引擎、真麥克風）：`status`、`events`（熱鍵與 CLI 兩種來源）、`--version`、`dictate` 的 `--max-seconds`／`--no-speech-seconds`、另一行程 `stop`／`cancel`、SIGINT、SIGTERM、`kill -9` CLI；熱鍵錄音中與排空中 `dictate` 回 4、延續窗中 `dictate` 照常開始、CLI 錄音中按熱鍵定稿、按 Esc 取消；socket 0600／目錄 0700。麥克風開關以 CoreAudio 的 per-process 屬性（`kAudioProcessPropertyIsRunningInput`）確認：每一種結束方式（含 `kill -9`）之後 Saymend 都不再收音。
-- **沒驗的**：真人對麥克風說話經 app 的完整路徑（說話 → 靜音自動結束 → 文字回到 CLI）；該路徑的端點判斷與辨識由上面的實音訊 harness 驗證，但麥克風增益、距離、房間迴響不在其中。`--polish` 只有單元測試。
+- 真人實機（Eugene 本人，經 Claude Code 的 mod；系統內建辨識引擎、外接耳機麥克風、`--silence-ms 1500`，部分帶 `--no-speech-seconds 10` 的免手動迴圈）：說話 → 靜音自動結束 → 文字回到 CLI 的完整路徑。以下只取自歷史資料庫與 app log 的 metadata，不含說話內容：
+  - 2026-11-26 14:52～15:19（UTC）共 10 段 CLI 聽寫（`history_session.targetKind = cli`），每一段都有最終文字（`cliRaw`）。
+  - 10 段的錄音結束原因全部是 `silence`（靜音自動結束），錄音長度 5.9～32.1 秒；最長那段 32 秒的話沒有在句中被切斷。
+  - 人聲最大位準 1.0（頂到上限）；環境噪音底線 0.066～0.113，自適應門檻 0.165～0.282。
+  - 同一期間另有一次由 `saymend cancel` 取消的聽寫（端點判斷尚未判定開口就被取消，不計入上面的 10 段）。
+- **沒驗的**：`--polish` 沒有在實機上驗過，只有單元測試。
