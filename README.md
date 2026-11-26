@@ -41,51 +41,7 @@ Packaging also puts the `saymend` CLI into `Saymend.app/Contents/Helpers/` and c
 
 ## Voice loop with Claude Code (saymend-voice)
 
-Saymend can serve as voice input for Claude Code: paired with macOS `say` reading the replies aloud, it forms a "speak → send to Claude Code → hear the reply" loop. The Claude Code side is the `saymend-voice` mod (a Claude Code plugin), which talks to Saymend only through Saymend's local control interface and the `saymend` CLI — see the contract in [docs/control-interface.md](docs/control-interface.md).
-
-> **Not public yet**: the marketplace that hosts `saymend-voice` (`eugenechen0514/claude-code-mods`) is a **private** repository. Only invited people who can read it on GitHub can install the mod.
-
-### Install
-
-In a Claude Code session, run:
-
-```
-/plugin install saymend-voice --marketplace eugenechen0514/claude-code-mods
-```
-
-Because the marketplace is private, the machine also needs github.com git credentials (an SSH key, or run `gh auth setup-git` after `gh auth login`); no login prompt appears during installation.
-
-### Requirements
-
-- Saymend.app is running (a version that includes the local control interface).
-- `saymend` is on your `PATH`: `Scripts/make-app.sh` creates the symlink `~/.local/bin/saymend` (make sure `~/.local/bin` is on your `PATH`).
-- Replies are read aloud with macOS `say`.
-
-### Main commands
-
-| Command | What it does |
-| --- | --- |
-| `/listen` | Dictate one utterance; it is sent as soon as you pause after speaking |
-| `/listen edit` | Dictate and only fill in the input box, without sending |
-| `/saymend off` | Turn voice off (default) |
-| `/saymend speak` | Read every reply aloud when it finishes |
-| `/saymend loop` | Read aloud, then listen automatically and send when you finish speaking; say "停止語音" ("stop voice") to end the loop |
-| `/saymend stop` | Interrupt the current reading and listening |
-| `/saymend status` | Show the current mode and settings |
-| `/saymend pause <seconds>` | How long a pause counts as "done speaking" (0.5–10, default 1.5) |
-| `/saymend max <seconds>` | Maximum length of a single utterance (10–3600, default 120) |
-| `/saymend bargein <on\|off>` | Listen while reading: the microphone opens during reading and speaking interrupts it (headphones required) |
-| `/saymend polish <on\|off>` | Polish with the LLM configured in Saymend before sending |
-
-For the full command list (including `voice` and `bin`) and behavior notes, see the README of [`eugenechen0514/claude-code-mods`](https://github.com/eugenechen0514/claude-code-mods) (this also requires access to that private repository).
-
-### Notes on Saymend's behavior
-
-- CLI dictation results go back only to the mod: they are **not inserted into the focused field and don't touch the clipboard**.
-- While listening, Esc is taken by Saymend to cancel this listening session, so Claude Code doesn't receive it (you can't use Esc to interrupt Claude at that moment); pressing the Saymend hotkey finalizes early and sends.
-- CLI dictation does **no LLM polishing by default** — only on-device recognition plus Simplified→Traditional Chinese conversion and vocabulary post-processing. Only `/saymend polish on` goes through the provider configured in Saymend (which, depending on your settings, may be a cloud service).
-- Listening shows the same recording HUD as hotkey dictation ("CLI 聽寫中｜Esc 取消", i.e. CLI dictation in progress, Esc to cancel); CLI dictation and hotkey dictation can't run at the same time.
-- In the "歷史" (History) tab of Settings, CLI dictations show "CLI（saymend）" in the App column.
+Saymend can serve as voice input for Claude Code: paired with macOS `say` reading the replies aloud, it forms a "speak → send to Claude Code → hear the reply" loop, built on Saymend's local control interface and the `saymend` CLI (see the contract in [docs/control-interface.md](docs/control-interface.md)). For the Claude Code mod, how to install it, and full details, see [`saymend-voice`](https://github.com/eugenechen0514/claude-code-mods/tree/main/mods/saymend-voice) (that repository is currently private; only invited people can access it).
 
 ## Core modes and safety boundaries
 

@@ -41,51 +41,7 @@ macOS 語音輸入工具：說完即成稿，改稿用嘴不用滑鼠（M1 為�
 
 ## 搭配 Claude Code：語音迴圈（saymend-voice）
 
-Saymend 可以當 Claude Code 的語音輸入：搭配 macOS 的 `say` 朗讀回覆，組成「說話 → 送進 Claude Code → 回覆唸出來」的迴圈。Claude Code 那一側是 `saymend-voice` mod（Claude Code plugin），它只透過 Saymend 的本機控制介面與 `saymend` CLI 互動，契約見 [docs/control-interface.md](docs/control-interface.md)。
-
-> **目前不公開**：`saymend-voice` 所在的 marketplace（`eugenechen0514/claude-code-mods`）是 **private** repository，只有被邀請、在 GitHub 上讀得到它的人才能安裝。
-
-### 安裝
-
-在 Claude Code session 輸入：
-
-```
-/plugin install saymend-voice --marketplace eugenechen0514/claude-code-mods
-```
-
-因為 marketplace 是 private，機器上還要有 github.com 的 git 憑證（SSH key，或 `gh auth login` 後執行 `gh auth setup-git`）；安裝過程不會跳出登入提示。
-
-### 需求
-
-- Saymend.app 正在執行（含本機控制介面的版本）。
-- `saymend` 在 `PATH` 上：`Scripts/make-app.sh` 會建立 `~/.local/bin/saymend` symlink（請確認 `~/.local/bin` 在 `PATH` 裡）。
-- 朗讀使用 macOS 的 `say`。
-
-### 主要指令
-
-| 指令 | 作用 |
-| --- | --- |
-| `/listen` | 聽寫一段話，說完停頓後直接送出 |
-| `/listen edit` | 聽寫後只填進輸入框，不送出 |
-| `/saymend off` | 關閉語音（預設） |
-| `/saymend speak` | 每次回覆結束後朗讀 |
-| `/saymend loop` | 朗讀後自動聆聽，說完自動送出；說「停止語音」可結束迴圈 |
-| `/saymend stop` | 中斷目前的朗讀與聆聽 |
-| `/saymend status` | 顯示目前的模式與設定 |
-| `/saymend pause <秒>` | 停頓多久視為說完（0.5–10，預設 1.5） |
-| `/saymend max <秒>` | 單段最長可以講多久（10–3600，預設 120） |
-| `/saymend bargein <on\|off>` | 邊唸邊聽：朗讀時就開麥，開口即打斷（需戴耳機） |
-| `/saymend polish <on\|off>` | 送出前先經 Saymend 設定的 LLM 潤飾 |
-
-完整指令（含 `voice`、`bin`）與行為說明見 [`eugenechen0514/claude-code-mods`](https://github.com/eugenechen0514/claude-code-mods) 的 README（同樣需要該 private repository 的存取權）。
-
-### 與 Saymend 行為相關的注意事項
-
-- CLI 聽寫的結果只回給 mod：**不上屏、不碰剪貼簿**。
-- 聆聽中按 Esc 會被 Saymend 接走，用來取消這次聆聽，Claude Code 收不到（那一刻無法用 Esc 中斷 Claude）；按 Saymend 熱鍵則是提早定稿送出。
-- CLI 聽寫預設**不做 LLM 潤飾**，只有本機辨識加上簡轉繁與詞彙表後處理；`/saymend polish on` 才走 Saymend 設定中的 provider（依設定可能上雲）。
-- 聆聽時 HUD 一樣顯示錄音狀態（「CLI 聽寫中｜Esc 取消」）；CLI 聽寫與熱鍵聽寫不能同時進行。
-- 設定頁「歷史」分頁中，CLI 聽寫的 App 欄顯示「CLI（saymend）」。
+Saymend 可以當 Claude Code 的語音輸入：搭配 macOS 的 `say` 朗讀回覆，組成「說話 → 送進 Claude Code → 回覆唸出來」的迴圈，靠的是 Saymend 的本機控制介面與 `saymend` CLI（契約見 [docs/control-interface.md](docs/control-interface.md)）。Claude Code 那一側的 mod、安裝方式與完整說明請見 [`saymend-voice`](https://github.com/eugenechen0514/claude-code-mods/tree/main/mods/saymend-voice)（該 repository 目前是 private，只有被邀請的人能存取）。
 
 ## 核心模式與安全邊界
 
