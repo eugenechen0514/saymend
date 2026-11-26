@@ -43,7 +43,8 @@ final class HUDWindowController: HUDPresenting {
             panel?.orderOut(nil)
         // noSpeechDetected 歸持久狀態而非 notice：聽寫階段還在進行，這個提示要一直掛著，
         // 不能 2.5 秒就淡掉——它是「現在正在發生的事」，不是一次性通報。
-        case .listening, .lingering, .selectionListening, .transcribing, .loadingModel, .noSpeechDetected:
+        case .listening, .lingering, .selectionListening, .transcribing, .loadingModel, .noSpeechDetected,
+             .cliListening:
             persistentState = state
             show()
         case .notice, .diff:

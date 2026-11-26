@@ -36,7 +36,43 @@ public final class DictationController {
         case queued(QueuedCapture)
         case lingering(until: TimeInterval)
     }
-    private var internalPhase: InternalPhase = .idle
+    private var internalPhase: InternalPhase = .idle {
+        didSet { onActivityChange?() }
+    }
+
+    /// 對外狀態（本機控制介面 `saymend status`／`events` 用）。錄音優先於其他狀態：
+    /// 錄音中即使上一句的潤飾還在途也報 recording——mod 要的是「麥克風開著」這件事。
+    public var activity: DictationActivity {
+        switch internalPhase {
+        case .listening: return .recording
+        case .queued(let q): return q.mode != nil ? .recording : .transcribing
+        case .finishing: return .transcribing
+        case .idle, .lingering: return pendingIntents > 0 ? .polishing : .idle
+        }
+    }
+
+    /// `activity` 可能變了（相位或在途潤飾數改變）。同一個 MainActor turn 內可能連續觸發多次，
+    /// 由接收端合併（`ControlService` 排到下一個 turn 才計算、且只在值真的變了才送出）。
+    public var onActivityChange: (() -> Void)?
+
+    /// CLI 來源的聽寫要開麥之前呼叫（本機控制介面）。回傳 false＝熱鍵聽寫正在用麥克風或辨識器
+    /// （錄音、排空、排隊），或上一段的潤飾還在途——此時不得開始 CLI 聽寫。
+    ///
+    /// 延續窗中且沒有在途潤飾：**視同使用者活動，立即封存**（同 `userActivityDetected` 在延續窗的語意）。
+    /// 延續窗是「接著說話修正剛才那段」，CLI 聽寫的文字不會進那個欄位，不是延續；不封存的話，
+    /// 延續窗到期時的 `archiveSession` 會發 `.hidden`，把 CLI 錄音中的 HUD 一起收掉（錄音就變成看不見）。
+    public func yieldForExternalCapture() -> Bool {
+        guard pendingIntents == 0 else { return false }
+        switch internalPhase {
+        case .idle:
+            return true
+        case .lingering:
+            archiveSession()
+            return true
+        case .listening, .finishing, .queued:
+            return false
+        }
+    }
 
     public var phase: Phase {
         switch internalPhase {
@@ -124,7 +160,9 @@ public final class DictationController {
     /// 遞增 session 序號：readerTask 事件過濾，避免跨 session 污染
     private(set) var sessionID = 0
     /// 在途（已派發、尚未 dispatch 完成）的意圖任務數：undo 按鈕的在途防護（測試經 @testable 檢視）
-    private(set) var pendingIntents = 0
+    private(set) var pendingIntents = 0 {
+        didSet { onActivityChange?() }
+    }
 
     /// 選取即目標（規格 §3.6，M3 設計裁決 1–3）。
     /// selectionPending＝已鎖定選取為替換目標、尚未落地：finalized 全部緩衝不上屏

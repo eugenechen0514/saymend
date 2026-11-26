@@ -65,6 +65,20 @@ struct HUDView: View {
                         .truncationMode(.head)
                         .frame(maxWidth: 360, alignment: .leading)
                 }
+            // CLI 來源（`saymend dictate`）：與熱鍵聽寫同樣的紅色麥克風＋音量條，標明是 CLI、Esc 可取消。
+            case .cliListening(let volatile, let loadingModel):
+                Image(systemName: "mic.fill")
+                    .foregroundStyle(.red)
+                LevelBar(level: model.level)
+                Text(loadingModel ? "CLI 聽寫中（載入模型中…）｜Esc 取消" : "CLI 聽寫中｜Esc 取消")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !volatile.isEmpty {
+                    Text(volatile)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                        .frame(maxWidth: 360, alignment: .leading)
+                }
             case .lingering:
                 Image(systemName: "clock.arrow.circlepath")
                     .foregroundStyle(.secondary)
