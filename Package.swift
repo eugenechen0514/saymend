@@ -41,6 +41,8 @@ let package = Package(
         .testTarget(
             name: "SaymendCoreTests",
             dependencies: ["SaymendCore"],
+            // 假的 ssh（遠端橋接測試以 #filePath 直接執行它，不當成 bundle 資源）
+            exclude: ["Fixtures/Remote"],
             resources: [
                 .copy("Fixtures/CoreMode/golden-default.follow-speech.json"),
                 .copy("Fixtures/CoreMode/golden-default.zh-TW.json"),

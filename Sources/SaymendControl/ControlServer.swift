@@ -8,6 +8,14 @@ import OSLog
 public protocol ControlPeer: AnyObject {
     func send(_ message: ControlMessage)
     func close()
+    /// 這條連線替誰發出請求。nil＝本機的 `saymend` CLI（經 socket 檔連進來的一律是 nil）；
+    /// 遠端橋接（docs/remote.md）以 `ControlServer.connectInProcess(origin:)` 建的連線才有值（主機名稱），
+    /// 外部行程無從偽造。
+    var origin: String? { get }
+}
+
+public extension ControlPeer {
+    var origin: String? { nil }
 }
 
 /// app 端的請求處理器。三個方法都在 main thread 上呼叫。
@@ -79,6 +87,25 @@ public final class ControlServer {
         for c in all { c.close() }
     }
 
+    /// app 內部的連線（遠端橋接用）：建一對 socketpair，一端當成一條已通過驗證的連線交給處理器、
+    /// 標上 `origin`，另一端回傳給呼叫端（例如在 app 內執行的 `CLIRunner`）。呼叫端負責關閉回傳的 fd。
+    /// 走的是和 socket 檔進來的連線同一套協定與處理器，只是不經 accept——uid 驗證不適用（兩端都在本行程）。
+    public func connectInProcess(origin: String) throws -> Int32 {
+        var fds: [Int32] = [0, 0]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else { throw UnixSocketError.syscall("socketpair", errno) }
+        let (serverEnd, clientEnd) = (fds[0], fds[1])
+        UnixSocket.disableSigPipe(serverEnd)
+        UnixSocket.disableSigPipe(clientEnd)
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        _ = setsockopt(serverEnd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let conn = ControlConnection(fd: serverEnd, handler: handler, origin: origin) { [weak self] c in self?.remove(c) }
+        lock.lock()
+        connections[ObjectIdentifier(conn)] = conn
+        lock.unlock()
+        conn.start()
+        return clientEnd
+    }
+
     /// 目前連線數（測試用）
     public var connectionCount: Int {
         lock.lock(); defer { lock.unlock() }
@@ -123,6 +150,7 @@ final class ControlConnection: ControlPeer {
 
     private let fd: Int32
     private let handler: any ControlRequestHandler
+    let origin: String?
     private let onRemoved: (ControlConnection) -> Void
     private let io = DispatchQueue(label: "io.saymend.control.connection")
     private var readSource: DispatchSourceRead?
@@ -130,9 +158,11 @@ final class ControlConnection: ControlPeer {
     private var closed = false
     private var receivedFirst = false
 
-    init(fd: Int32, handler: any ControlRequestHandler, onRemoved: @escaping (ControlConnection) -> Void) {
+    init(fd: Int32, handler: any ControlRequestHandler, origin: String? = nil,
+         onRemoved: @escaping (ControlConnection) -> Void) {
         self.fd = fd
         self.handler = handler
+        self.origin = origin
         self.onRemoved = onRemoved
     }
 

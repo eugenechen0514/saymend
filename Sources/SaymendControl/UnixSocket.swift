@@ -47,7 +47,7 @@ public enum UnixSocket {
     }
 
     /// 寫入 broken pipe 時回 EPIPE，而不是對整個行程送 SIGPIPE（app 不能因為 CLI 被 kill 而跟著死）。
-    static func disableSigPipe(_ fd: Int32) {
+    public static func disableSigPipe(_ fd: Int32) {
         var on: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
     }

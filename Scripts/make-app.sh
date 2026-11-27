@@ -16,6 +16,9 @@ cp .build/release/SaymendApp "$APP/Contents/MacOS/Saymend"
 # 檔案系統不分大小寫，Contents/MacOS/saymend 會跟主程式 Saymend 撞名。
 cp .build/release/SaymendCLI "$APP/Contents/Helpers/saymend"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+# 遠端橋接的 client（docs/remote.md）：app 用 ssh 把它裝到遠端的 ~/.saymend-remote/
+mkdir -p "$APP/Contents/Resources/remote"
+cp Resources/remote/saymend_remote.py "$APP/Contents/Resources/remote/saymend_remote.py"
 # SwiftyOpenCC 等資源 bundle（Bundle.module 會在 Contents/Resources 找）
 cp -R .build/release/*.bundle "$APP/Contents/Resources/" 2>/dev/null || true
 

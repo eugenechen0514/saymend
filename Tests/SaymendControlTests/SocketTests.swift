@@ -244,6 +244,34 @@ func waitUntil(_ timeout: Double = 5, _ condition: () -> Bool) async -> Bool {
         #expect(read(fds[1], &byte, 1) == 0)
     }
 
+    /// 遠端橋接用的 app 內連線帶著主機名稱；經 socket 檔連進來的一律沒有（外部行程無從偽造來源）
+    @Test func inProcessConnectionsCarryTheirOriginAndSocketFileOnesDoNot() async throws {
+        let (dir, path) = makeSocketPath()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let handler = ScriptedHandler()
+        handler.reply = { _ in [.ok] }
+        let server = ControlServer(socketPath: path, handler: handler)
+        try server.start()
+        defer { server.stop() }
+
+        let fd = try server.connectInProcess(origin: "devbox")
+        let reply = await background { () -> [String] in
+            defer { close(fd) }
+            UnixSocket.setReceiveTimeout(fd, seconds: 5)
+            UnixSocket.writeLine(fd, ControlRequest.stop.encoded())
+            let reader = LineReader(fd: fd)
+            var out: [String] = []
+            while let line = try? reader.next() { out.append(line) }
+            return out
+        }
+        #expect(reply == [#"{"v":1,"type":"ok"}"#])
+        _ = await exchange(path: path, send: [ControlRequest.stop.encoded()])
+        #expect(handler.peers.count == 2)
+        #expect(handler.peers.first?.origin == "devbox")
+        #expect(handler.peers.last?.origin == nil)
+        #expect(await waitUntil { handler.closedCount == 2 })
+    }
+
     @Test func pathsLongerThanSunPathAreRejected() {
         let long = "/tmp/" + String(repeating: "x", count: 120) + ".sock"
         #expect(throws: UnixSocketError.pathTooLong(long)) { try UnixSocket.connect(path: long) }

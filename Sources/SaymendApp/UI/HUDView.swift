@@ -13,6 +13,12 @@ final class HUDModel: ObservableObject {
 
 /// 螢幕下緣浮條（規格 §3.1）：模式、音量、volatile 預覽、通知
 struct HUDView: View {
+    /// CLI 來源聽寫的標籤。遠端橋接發起的寫出主機名稱，和本機 CLI 分得開。
+    static func cliListeningLabel(loadingModel: Bool, origin: String?) -> String {
+        let who = origin.map { "遠端 \($0) 聽寫中" } ?? "CLI 聽寫中"
+        return loadingModel ? "\(who)（載入模型中…）｜Esc 取消" : "\(who)｜Esc 取消"
+    }
+
     @ObservedObject var model: HUDModel
 
     var body: some View {
@@ -66,11 +72,12 @@ struct HUDView: View {
                         .frame(maxWidth: 360, alignment: .leading)
                 }
             // CLI 來源（`saymend dictate`）：與熱鍵聽寫同樣的紅色麥克風＋音量條，標明是 CLI、Esc 可取消。
-            case .cliListening(let volatile, let loadingModel):
-                Image(systemName: "mic.fill")
+            // 遠端橋接發起的（origin＝主機名稱）另外標出主機，和本機 CLI 分得開。
+            case .cliListening(let volatile, let loadingModel, let origin):
+                Image(systemName: "mic.fill")      // 錄音一律是紅色麥克風；來源寫在文字裡
                     .foregroundStyle(.red)
                 LevelBar(level: model.level)
-                Text(loadingModel ? "CLI 聽寫中（載入模型中…）｜Esc 取消" : "CLI 聽寫中｜Esc 取消")
+                Text(HUDView.cliListeningLabel(loadingModel: loadingModel, origin: origin))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if !volatile.isEmpty {

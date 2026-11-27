@@ -149,7 +149,8 @@ public final class ControlService: ControlRequestHandler {
             }
             let id = ObjectIdentifier(peer)
             dictatePeer = id
-            cli.start(options) { [weak self] event in
+            // origin：遠端橋接建的連線才有（主機名稱），HUD 與歷史據此標出來源
+            cli.start(options, origin: peer.origin) { [weak self] event in
                 switch event {
                 case .started:
                     peer.send(.started)

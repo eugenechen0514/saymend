@@ -9,6 +9,7 @@ mod ──(runs)──▶ saymend CLI ──(unix socket, NDJSON v1)──▶ Sa
 ```
 
 - `saymend` is a thin client: it doesn't record and doesn't load models; it only forwards requests to the **running** app. If the app isn't running, it exits with code 3.
+- When Claude Code runs on an SSH host, Saymend.app's **Settings › Remote** sets up a bridge, and the client on that host uses the same output contract through it; see [remote.md](remote.md).
 - A mod depends only on this document's **CLI output contract** (section 1). The **wire protocol** between the app and the CLI (section 2) is an internal implementation detail, and the two can evolve independently.
 - Location: `Saymend.app/Contents/Helpers/saymend` (not `Contents/MacOS/`: the file system is case-insensitive, so it would collide with the main executable `Saymend`). `Scripts/make-app.sh` signs it during packaging and creates the symlink `~/.local/bin/saymend` pointing into the bundle it just built (`SAYMEND_SKIP_CLI_LINK=1` skips this; a regular file with the same name is never overwritten).
 
@@ -161,7 +162,7 @@ This interface can turn on the microphone from another process, so:
 2. Its directory is **0700** and must be owned by the current user; otherwise the app refuses to start the control interface. If the directory at the default path is looser, it is tightened to 0700 at startup; for a path overridden with `SAYMEND_CONTROL_SOCKET`, the app **does not change the permissions of an existing directory on your behalf** (it might be your home directory) and refuses to start if they are looser than 0700.
 3. Every connection is checked with `getpeereid` right after accept; if the uid differs, the connection is closed immediately without sending a single byte. The CLI also verifies the server's uid (defense in depth).
 4. A **dead** socket at the path (left behind by a crashed app) is removed and recreated; if someone is listening (another Saymend is running), the app doesn't take it over and only logs it; a file that isn't a socket is never deleted.
-5. **Recording is always visible**: while a CLI dictation is recording, the HUD shows a red microphone + level bar + "CLI 聽寫中｜Esc 取消" (CLI dictation in progress | Esc to cancel), in the same floating bar as hotkey dictation.
+5. **Recording is always visible**: while a CLI dictation is recording, the HUD shows a red microphone + level bar + "CLI 聽寫中｜Esc 取消" (CLI dictation in progress | Esc to cancel), in the same floating bar as hotkey dictation. A dictation started by a remote host through the bridge shows "遠端 <host> 聽寫中｜Esc 取消" (remote <host> dictating | Esc to cancel) instead ([remote.md](remote.md)).
 
 ## 3. Relationship with hotkey dictation
 
@@ -184,7 +185,7 @@ The behavior of hotkey dictation, spoken corrections, and the password-field har
 
 ### History
 
-Recorded according to the existing "記錄聽寫歷史" (record dictation history) setting; the App column of the History tab shows **"CLI（saymend）"** (`history_session.targetKind = "cli"`).
+Recorded according to the existing "記錄聽寫歷史" (record dictation history) setting; the App column of the History tab shows **"CLI（saymend）"**, or **"遠端 <host>（saymend）"** for a dictation started by a remote host (`history_session.targetKind` is `"cli"` for both).
 
 - Normal finalization: one `cliRaw` row (without polishing) or the polishing result kind (`newContent` / `degraded` …); the session's final text = the `text` returned to the caller.
 - Cancelled or failed after text was recognized: one `outcomeDropped` row, described as `cli:<code>`.

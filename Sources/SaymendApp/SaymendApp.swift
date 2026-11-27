@@ -23,7 +23,8 @@ struct SaymendApp: App {
                         whisperLocalUnload: delegate.unloadWhisperLocal,
                         whisperLocalState: { await delegate.whisperLocalState() },
                         whisperLocalProgress: { await delegate.whisperLocalProgress() },
-                        whisperLocalLastLoad: { await delegate.whisperLocalLastLoad() })
+                        whisperLocalLastLoad: { await delegate.whisperLocalLastLoad() },
+                        remote: delegate.remoteManager)
         }
     }
 }
@@ -66,6 +67,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
+    /// 遠端橋接（docs/remote.md）。lazy：Settings scene 在啟動時就求值，要拿得到它；控制介面起來後才 attach。
+    /// 每台主機的本機 socket 放在 supportDir/remote/（0700），client 檔隨 app 發佈在 Resources/remote/。
+    private(set) lazy var remoteManager = RemoteBridgeManager(
+        settings: settings,
+        socketDirectory: AppDelegate.supportDir.appendingPathComponent("remote", isDirectory: true),
+        clientScriptURL: Bundle.main.url(forResource: "saymend_remote", withExtension: "py", subdirectory: "remote"),
+        appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
+        runner: SSHRunner(environment: SSHRunner.environmentForGUIApp()))
     let vocabStore = FileVocabStore(fileURL: AppDelegate.supportDir.appendingPathComponent("vocab.json"))
     let profileStore = FileAppProfileStore(fileURL: AppDelegate.supportDir.appendingPathComponent("profiles.json"))
     let historyStore = try? GRDBHistoryStore.onDisk(directory: AppDelegate.supportDir)
@@ -373,7 +382,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // 先停 CLI 聽寫（關麥克風），再關 socket：等待中的 dictate 收到「已取消」、events 串流收到 EOF（exit 3）
+        // 先收掉遠端的 ssh 與橋接（遠端請求跟著斷），再停 CLI 聽寫（關麥克風），最後關 socket：
+        // 等待中的 dictate 收到「已取消」、events 串流收到 EOF（exit 3）
+        remoteManager.shutdown()
         cliDictation?.cancel(source: "app 結束")
         controlServer?.stop()
     }
@@ -437,18 +448,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         do {
             try server.start()
             controlServer = server
+            // 遠端橋接：請求經 app 內的控制連線進來，連線標著主機名稱（HUD／歷史據此標出來源）
+            remoteManager.attach(
+                connectControl: { [server] origin in try server.connectInProcess(origin: origin) },
+                cancelDictation: { [weak cli] origin in
+                    guard let cli, cli.activeOrigin == origin else { return }
+                    cli.cancel(source: "遠端 \(origin) 已中斷")
+                })
         } catch {
             Self.controlLog.error("控制介面啟動失敗：\(String(describing: error), privacy: .public)")
         }
+        // 控制介面沒起來時照樣嘗試：連不上的主機會在設定頁顯示原因
+        remoteManager.startAutoConnect()
     }
 
     private func refreshStatus() {
         let next: String
         if let cli = cliDictation, cli.isActive {
+            // 遠端主機經橋接發起的標出主機名稱（docs/remote.md）
+            let who = cli.activeOrigin.map { "遠端 \($0) " } ?? "CLI "
             switch cli.phase {
-            case .recording: next = "CLI 聽寫中"
-            case .transcribing: next = "CLI 聽寫辨識中"
-            case .polishing: next = "CLI 聽寫潤飾中"
+            case .recording: next = "\(who)聽寫中"
+            case .transcribing: next = "\(who)聽寫辨識中"
+            case .polishing: next = "\(who)聽寫潤飾中"
             case .idle: next = "待機"
             }
             if statusLine != next { statusLine = next }

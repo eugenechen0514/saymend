@@ -93,6 +93,8 @@ public final class CLIDictationController {
     private final class Session {
         let id: Int
         let options: DictateOptions
+        /// 遠端橋接發起時是主機名稱；本機 CLI 是 nil（HUD 與歷史據此標出來源）
+        let origin: String?
         let sink: (Event) -> Void
         let startedAt: TimeInterval
         var detector: EndpointDetector
@@ -113,10 +115,11 @@ public final class CLIDictationController {
         var teeTask: Task<Void, Never>?
         var polishTask: Task<Void, Never>?
 
-        init(id: Int, options: DictateOptions, sink: @escaping (Event) -> Void, startedAt: TimeInterval,
-             detector: EndpointDetector) {
+        init(id: Int, options: DictateOptions, origin: String?, sink: @escaping (Event) -> Void,
+             startedAt: TimeInterval, detector: EndpointDetector) {
             self.id = id
             self.options = options
+            self.origin = origin
             self.sink = sink
             self.startedAt = startedAt
             self.detector = detector
@@ -131,6 +134,10 @@ public final class CLIDictationController {
 
     /// 歷史 session 的 App 欄位：歷史分頁的「App」欄直接顯示它，使用者一眼看得出這筆是 CLI 發起的。
     public static let historyAppName = "CLI（saymend）"
+    /// 遠端橋接發起的聽寫在歷史裡的 App 欄位
+    public static func historyAppName(origin: String?) -> String {
+        origin.map { "遠端 \($0)（saymend）" } ?? historyAppName
+    }
     /// 歷史 session 的 targetKind（熱鍵聽寫是 `tail`／`selection`）
     public static let historyTargetKind = "cli"
 
@@ -138,6 +145,8 @@ public final class CLIDictationController {
         didSet { if oldValue != phase { onPhaseChange?() } }
     }
     public var isActive: Bool { session != nil }
+    /// 進行中那一段的來源（遠端主機名稱）；沒有聽寫或本機 CLI 發起的是 nil
+    public var activeOrigin: String? { session?.origin }
     public var onPhaseChange: (() -> Void)?
 
     private let audio: any AudioCaptureService
@@ -196,7 +205,8 @@ public final class CLIDictationController {
 
     /// 開始一段 CLI 聽寫。`sink` 依序收到 `started` →（`partial`…）→ `finished` 或 `failed`，終局恰一次。
     /// 開始不了（忙碌、權限、麥克風）時 `sink` 當場收到 `failed`，不會先收到 `started`。
-    public func start(_ options: DictateOptions, sink: @escaping (Event) -> Void) {
+    /// `origin`：遠端橋接發起時是主機名稱（HUD 與歷史會標出來），本機 CLI 是 nil。
+    public func start(_ options: DictateOptions, origin: String? = nil, sink: @escaping (Event) -> Void) {
         guard session == nil else {
             sink(.failed(.busy("已有一段 CLI 聽寫進行中")))
             return
@@ -226,7 +236,7 @@ public final class CLIDictationController {
         nextSessionID &+= 1
         let sid = nextSessionID
         let startedAt = clock()
-        let s = Session(id: sid, options: options, sink: sink, startedAt: startedAt,
+        let s = Session(id: sid, options: options, origin: origin, sink: sink, startedAt: startedAt,
                         detector: EndpointDetector(startedAt: startedAt, config: detectorConfig))
         session = s
 
@@ -246,7 +256,7 @@ public final class CLIDictationController {
         phase = .recording
         presentRecordingHUD(s)
         if settings.historyEnabled, history != nil { s.historyStartedAt = now() }
-        Self.log.notice("CLI 聽寫開始：maxSeconds=\(options.maxSeconds, privacy: .public) silenceMs=\(options.silenceMs, privacy: .public) noSpeechSeconds=\(options.noSpeechSeconds, privacy: .public) polish=\(options.polish, privacy: .public)")
+        Self.log.notice("CLI 聽寫開始（\(origin.map { "遠端 \($0)" } ?? "本機", privacy: .public)）：maxSeconds=\(options.maxSeconds, privacy: .public) silenceMs=\(options.silenceMs, privacy: .public) noSpeechSeconds=\(options.noSpeechSeconds, privacy: .public) polish=\(options.polish, privacy: .public)")
         sink(.started)
         s.readerTask = Task { [weak self] in
             for await event in events {
@@ -429,7 +439,8 @@ public final class CLIDictationController {
     }
 
     private func presentRecordingHUD(_ s: Session) {
-        hud.present(.cliListening(volatile: s.finalized.joined() + s.volatile, loadingModel: s.loadingModel))
+        hud.present(.cliListening(volatile: s.finalized.joined() + s.volatile, loadingModel: s.loadingModel,
+                                  origin: s.origin))
     }
 
     private func emitPartialIfChanged(_ s: Session) {
@@ -502,7 +513,7 @@ public final class CLIDictationController {
         let hid = UUID().uuidString
         s.historyID = hid
         history.beginSession(.init(id: hid, startedAt: startedAt, appBundleID: nil,
-                                   appName: Self.historyAppName, targetKind: Self.historyTargetKind,
+                                   appName: Self.historyAppName(origin: s.origin), targetKind: Self.historyTargetKind,
                                    finalText: nil))
         return hid
     }
