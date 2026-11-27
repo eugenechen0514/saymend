@@ -1,8 +1,8 @@
 import Foundation
 import SaymendControl
 
-/// 遠端橋接的線上格式（docs/remote.md）。和 claude-code-mods 的 `saymend_remote.py` 同一份格式，
-/// 遠端的 Python client 不用改：
+/// 遠端橋接的線上格式（docs/remote.md）。另一端是遠端的 client（`Resources/remote/saymend_remote.py`），
+/// 改格式時兩邊要一起改：
 ///
 /// - 請求（第一行）：`{"v":1,"cmd":"saymend","args":[…]}` 或 `{"v":1,"cmd":"say","voice":"…","text":"…"}`
 /// - 回覆（多行）：`{"out":"…"}`、`{"err":"…"}`，最後一行 `{"exit":N}`
@@ -19,7 +19,7 @@ public enum RemoteBridgeProtocol {
     static let dictateValueFlags: Set<String> = ["--max-seconds", "--silence-ms", "--no-speech-seconds"]
 
     /// 檢查要交給 saymend CLI 的參數；不接受就回傳原因。
-    /// 白名單與參考實作相同，數字只收 ASCII（參考實作的 `\d` 也收其他文字的數字，這裡更嚴）。
+    /// 只放行 saymend-voice mod 會用到的子指令與參數；數字只收 ASCII（`١٢` 這類其他文字的數字一律拒絕）。
     public static func validateSaymendArgs(_ args: [String]) -> String? {
         guard let first = args.first, subcommands.contains(first) else {
             return "只接受這些子指令：\(subcommands.joined(separator: "、"))"
