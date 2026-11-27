@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import SaymendCore
 
-/// 設定殼：TabView 分頁（一般／核心模式／詞彙表／Prompt／歷史／隱私）。
+/// 設定殼：TabView 分頁（一般／核心模式／詞彙表／Prompt／歷史／隱私／遠端）。
 /// vocab／history／coreModes 由 App 注入（nil＝預覽態，分頁自行停用）。
 struct SettingsView: View {
     let settings: AppSettings
@@ -20,6 +20,8 @@ struct SettingsView: View {
     /// issue #17：載入階段進度／該模型上次的耗時。給不出來就 nil，UI 退回純碼表。
     let whisperLocalProgress: @MainActor () async -> ModelLoadProgress?
     let whisperLocalLastLoad: @MainActor () async -> CompletedLoad?
+    /// 遠端橋接（docs/remote.md）；nil＝預覽態，分頁顯示停用說明
+    let remote: RemoteBridgeManager?
 
     init(settings: AppSettings,
          vocab: (any VocabStore)? = nil,
@@ -32,8 +34,10 @@ struct SettingsView: View {
          whisperLocalUnload: @escaping () -> Void = {},
          whisperLocalState: @escaping @MainActor () async -> ModelLoadState = { .idle },
          whisperLocalProgress: @escaping @MainActor () async -> ModelLoadProgress? = { nil },
-         whisperLocalLastLoad: @escaping @MainActor () async -> CompletedLoad? = { nil }) {
+         whisperLocalLastLoad: @escaping @MainActor () async -> CompletedLoad? = { nil },
+         remote: RemoteBridgeManager? = nil) {
         self.settings = settings
+        self.remote = remote
         self.vocab = vocab
         self.history = history
         self.coreModes = coreModes
@@ -66,6 +70,8 @@ struct SettingsView: View {
                 .tabItem { Label("歷史", systemImage: "clock.arrow.circlepath") }
             PrivacySettingsTab(settings: settings)
                 .tabItem { Label("隱私", systemImage: "hand.raised") }
+            RemoteSettingsTab(manager: remote, clipboard: clipboard)
+                .tabItem { Label("遠端", systemImage: "network") }
         }
         .frame(width: 560, height: 460)
         .padding()

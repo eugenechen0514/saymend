@@ -107,11 +107,13 @@ struct HistorySettingsTab: View {
 struct HistoryCopyButton: View {
     let text: String
     let clipboard: ClipboardChannel
+    /// 按鈕文字（遠端分頁的「複製這兩行」也用這顆按鈕，同樣要先確認是否覆蓋救援內容）
+    var title: String = HistoryClipboardText.copyButton
     /// 等待使用者確認覆蓋救援內容；true 時顯示確認 alert。
     @State private var confirmingOverwrite = false
 
     var body: some View {
-        Button(HistoryClipboardText.copyButton) {
+        Button(title) {
             // 「（未定稿）」的 session 沒有最終文字：空字串不寫，更不能拿它洗掉救援。
             guard !text.isEmpty else { return }
             // 按下當下才查，不用快照：分頁開著時背景聽寫可能剛落了一份救援。

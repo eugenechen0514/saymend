@@ -83,6 +83,7 @@ public final class AppSettings: @unchecked Sendable {
         static let customSystemPrompt = "customSystemPrompt"
         static let styleRulesOverride = "styleRulesOverride"
         static let historyEnabled = "historyEnabled"
+        static let remoteHosts = "remoteHosts"
         static let historyRetentionDays = "historyRetentionDays"
         static let ocrContextMode = "ocrContextMode"
         // 舊版布林開關的 key：只讀不寫，用來把既有使用者的選擇遷移成 `ocrContextMode`。
@@ -523,5 +524,15 @@ public final class AppSettings: @unchecked Sendable {
 
     public func claudeCLIConfig() -> ClaudeCLIConfig {
         ClaudeCLIConfig(cliPathOverride: claudeCLIPathOverride, model: claudeCLIModel)
+    }
+
+    /// 設定頁「遠端」的主機清單（docs/remote.md）。只存連線參數，不存密碼或金鑰。
+    /// 解不開（例如格式被手動改壞）就當成空清單，不讓 app 起不來。
+    public var remoteHosts: [RemoteHost] {
+        get {
+            guard let data = defaults.data(forKey: K.remoteHosts) else { return [] }
+            return (try? JSONDecoder().decode([RemoteHost].self, from: data)) ?? []
+        }
+        set { defaults.set(try? JSONEncoder().encode(newValue), forKey: K.remoteHosts) }
     }
 }

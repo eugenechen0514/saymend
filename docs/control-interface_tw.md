@@ -9,6 +9,7 @@ mod ──(執行)──▶ saymend CLI ──(unix socket, NDJSON v1)──▶ 
 ```
 
 - `saymend` 是薄 client：不錄音、不載模型，只把請求送給**正在執行的** app。app 沒在跑就回 exit 3。
+- Claude Code 在 SSH 主機上時，由 Saymend.app 的「設定 › 遠端」建立橋接，遠端的 client 經它使用同一套輸出契約，見 [remote_tw.md](remote_tw.md)。
 - mod 只依賴本文件的 **CLI 輸出契約**（第 1 節）。app ⇄ CLI 之間的**線上協定**（第 2 節）是內部實作，可以各自演進。
 - 位置：`Saymend.app/Contents/Helpers/saymend`（不放 `Contents/MacOS/`：檔案系統不分大小寫，會和主程式 `Saymend` 撞名）。`Scripts/make-app.sh` 打包時一併簽章，並建立 `~/.local/bin/saymend` symlink 指向這次打包的 bundle（`SAYMEND_SKIP_CLI_LINK=1` 可略過；同名的一般檔案不會被覆蓋）。
 
@@ -161,7 +162,7 @@ protocol v1
 2. 所在目錄 **0700**，且必須是目前使用者擁有，否則 app 拒絕啟動控制介面。預設路徑的目錄原本較寬鬆時，啟動時收緊成 0700；用 `SAYMEND_CONTROL_SOCKET` 覆寫的路徑**不替使用者改既有目錄的權限**（可能是家目錄），比 0700 寬就拒絕啟動。
 3. 每條連線 accept 之後立刻 `getpeereid`，uid 不同就直接關閉，一個位元組都不回。CLI 端也驗 server 的 uid（縱深防禦）。
 4. 路徑上若是**死掉的** socket（app 當掉留下的）就清掉重建；有人在 listen（另一個 Saymend 在跑）就不搶、只記 log；不是 socket 的檔案一律不刪。
-5. **錄音一定看得見**：CLI 聽寫錄音時 HUD 顯示紅色麥克風＋音量條＋「CLI 聽寫中｜Esc 取消」，與熱鍵聽寫同一個浮條。
+5. **錄音一定看得見**：CLI 聽寫錄音時 HUD 顯示紅色麥克風＋音量條＋「CLI 聽寫中｜Esc 取消」，與熱鍵聽寫同一個浮條。遠端主機經橋接發起的聽寫改顯示「遠端 <主機> 聽寫中｜Esc 取消」（[remote_tw.md](remote_tw.md)）。
 
 ## 3. 與熱鍵聽寫的關係
 
@@ -184,7 +185,7 @@ CLI 聽寫與熱鍵聽寫共用同一組麥克風、辨識引擎與 HUD（辨識
 
 ### 歷史紀錄
 
-照現有的「記錄聽寫歷史」設定記錄，歷史分頁的 App 欄顯示 **「CLI（saymend）」**（`history_session.targetKind = "cli"`）。
+照現有的「記錄聽寫歷史」設定記錄，歷史分頁的 App 欄顯示 **「CLI（saymend）」**，遠端主機發起的顯示 **「遠端 <主機>（saymend）」**（兩者的 `history_session.targetKind` 都是 `"cli"`）。
 
 - 正常定稿：一列 `cliRaw`（不潤飾）或潤飾的結果類別（`newContent`／`degraded`…），session 的最終文字＝回給呼叫端的 `text`。
 - 取消、失敗但已辨識出文字：一列 `outcomeDropped`，說明 `cli:<code>`。
