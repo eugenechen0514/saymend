@@ -53,11 +53,11 @@ Mac    Saymend.app：每台主機一個橋接 socket ──▶ 控制介面（�
 - client 中途斷線（被 kill、SSH 中斷）＝取消：Mac 上對應的聽寫丟棄、麥克風關閉。
 - 白名單（見第 4 節）：只接受固定的請求，不替遠端執行其他東西。
 
-client 的原始檔是這個 repo 的 `Resources/remote/saymend_remote.py`，打包時放進 `Saymend.app/Contents/Resources/remote/`，連線時由 app 裝到遠端（每次連線都重裝，所以 app 更新後遠端的 client 會跟著更新）。這支檔案只有 client，Mac 那一側在 app 裡。
+client 的原始檔是這個 repo 的 `Resources/remote/saymend_remote.py`，打包時放進 `Saymend.app/Contents/Resources/remote/`，連線時由 app 裝到遠端（每次連線都重裝，所以 app 更新後遠端的 client 會跟著更新）。這支檔案只有 client，Mac 那一側在 app 裡。來歷見第 7 節。
 
 ## 3. 線上格式（遠端 client ⇄ 橋接）
 
-與 claude-code-mods 的 `saymend_remote.py` 相同，舊的 client 不用改：
+以這個 repo 為準：橋接端在 `Sources/SaymendCore/Remote/RemoteBridgeProtocol.swift`，client 端在 `Resources/remote/saymend_remote.py`。改格式時兩邊要一起改；app 每次連線都會重裝 client，所以兩邊不會長期不一致。
 
 - unix socket，NDJSON，UTF-8。一條連線一個請求（第一行）：
   - `{"v":1,"cmd":"saymend","args":["dictate","--json","--silence-ms","1500"]}`
@@ -69,14 +69,14 @@ client 的原始檔是這個 repo 的 `Resources/remote/saymend_remote.py`，打
 
 ## 4. 白名單
 
-與參考實作相同，數字只收 ASCII，比參考實作更嚴：
+以 `RemoteBridgeProtocol.validateSaymendArgs` 為準，只放行 saymend-voice mod 會用到的子指令與參數：
 
 | 請求 | 接受的參數 |
 |---|---|
 | `saymend status` | `--json` |
 | `saymend stop`／`cancel`／`--version` | `--json` |
 | `saymend events` | `--json`、`--presence <tag>`／`--presence=<tag>`（tag 為 `[a-z0-9_-]{1,32}`） |
-| `saymend dictate` | `--json`、`--polish`、`--max-seconds`／`--silence-ms`／`--no-speech-seconds` 後接數字（`N` 或 `N.N`，也可寫成 `--flag=N`） |
+| `saymend dictate` | `--json`、`--polish`、`--max-seconds`／`--silence-ms`／`--no-speech-seconds` 後接數字（只收 ASCII 數字，`N` 或 `N.N`，也可寫成 `--flag=N`） |
 | `say` | `voice`：字母、數字、底線、空白與 `.()-`，1～64 字，不能以 `-` 開頭；文字走 stdin |
 
 其他子指令或參數一律拒絕，不會碰到控制介面。
@@ -105,7 +105,7 @@ client 的原始檔是這個 repo 的 `Resources/remote/saymend_remote.py`，打
   4. 取消走同一條已驗證的路：client 斷線 → `CLIRunner.interrupt()`（dictate 會在同一條連線上請 app 取消，同 CLI 收到 SIGINT）→ 2 秒內沒確認就切斷控制連線，app 也會因斷線取消。
   - `say` 仍執行 `/usr/bin/say`（文字走 stdin），語音與行為和 macOS 的 `say` 完全一致。client 斷線時先 SIGTERM，3 秒後 SIGKILL。
 - **ssh 指令**（`<共同>` 是 `-o BatchMode=yes -o ConnectTimeout=15 -o ControlMaster=no`，手動主機再加 `-p`／`-l`）：
-  - 裝 client：`ssh <共同> -- <主機> "sh -c '<安裝步驟>'"`，client 檔從 stdin 送進去。安裝步驟與參考實作逐字相同：建 0700 資料夾、寫入 client、建兩個 symlink、清掉上次留下的 `bridge.sock`、回報 `$HOME` 或缺 python3。
+  - 裝 client：`ssh <共同> -- <主機> "sh -c '<安裝步驟>'"`，client 檔從 stdin 送進去。安裝步驟（`RemoteClientInstall.installScript`）：建 0700 資料夾、寫入 client、建兩個 symlink、清掉上次留下的 `bridge.sock`、回報 `$HOME` 或缺 python3。
   - 轉發：`ssh <共同> -o ControlPath=none -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -R <遠端家目錄>/.saymend-remote/bridge.sock:<本機 socket> -- <主機>`
   - 檢查：`ssh <共同> -- <主機> '<遠端家目錄>/.saymend-remote/bin/saymend' status --json`，最多 5 次、間隔 1 秒。
   - 移除：`ssh <共同> -- <主機> "sh -c '<移除步驟>'"`。資料夾裡還有別的檔案就保留資料夾。
@@ -121,17 +121,42 @@ client 的原始檔是這個 repo 的 `Resources/remote/saymend_remote.py`，打
 - 每次連線會開三條 SSH 連線（安裝、轉發、檢查）。安裝與檢查可以沿用你已經開著的 master，轉發一定是新連線。
 - 每台主機同時最多 16 個請求，超過的連線直接關掉，免得遠端失控時把 app 的 fd 用光。
 
-## 7. 和參考實作（`saymend_remote.py connect`）的差異
+## 7. 來歷：原本的 Python 橋接
 
-- Mac 這一側改由 app 負責，不再需要 python3 與終端機視窗。遠端 client 的線上格式、位置、行為都不變。
-- 每台主機各自一個本機 socket（參考實作是所有主機共用一個）。這樣遠端聽寫才標得出主機。
-- 所有 ssh 都加 `BatchMode=yes` 與 `ConnectTimeout=15`，目的地前加 `--`。
+這個功能收進 app 之前，Mac 這一側是一支 Python 腳本：claude-code-mods 的 `mods/saymend-voice/remote/saymend_remote.py`。同一個檔案也是遠端的 client；在 Mac 的終端機執行 `saymend_remote.py connect <主機>` 就是橋接，視窗要一直開著。
+
+收進 app 後，那份檔案與它的測試已經從 claude-code-mods 移除，最後存在於該 repo 的 commit `fdeb73d`；mod 的 README 改成指向這份文件。現在的線上格式、白名單與安裝步驟都以這個 repo 為準（第 3、4、6 節），不需要對照那份檔案。
+
+為了讓用過舊腳本的主機不必另外處理，下面這些刻意保持相容：
+
+- 遠端 client 的位置、檔名、兩個 symlink 不變，線上格式不變。舊腳本裝過的主機，app 連線時會原地覆蓋。
+- `saymend`／`say` 的行為、連不上時的 exit 碼與 JSON 形狀不變。
+
+用過舊腳本的人會注意到的不同：
+
+- Mac 這一側不再需要 python3 與終端機視窗。
+- 每台主機各自一個本機 socket（舊腳本是所有主機共用一個），遠端聽寫才標得出是哪台主機。
+- 所有 ssh 都加 `BatchMode=yes`、`ConnectTimeout=15`、`ControlMaster=no`，目的地前加 `--`；轉發另加 `ControlPath=none`。
 - 驗證失敗、主機金鑰沒確認不再無限重試。
-- 白名單的數字只收 ASCII（參考實作的 `\d` 也收其他文字的數字）。
+- 白名單的數字只收 ASCII（舊腳本的 `\d` 也收其他文字的數字）。
 - client 連不上時的訊息改成「連不上 Mac：Saymend 的遠端連線沒有開著，或 SSH 連線中斷」，原本是「…saymend-remote 沒有在執行…」。`連不上 Mac` 開頭、exit 碼與 JSON 形狀都不變。
-- client 檔只留 client 的部分，`connect`／`uninstall` 子指令移除了，那些改在設定頁操作。
+- client 檔只留 client 的部分，`connect`／`uninstall` 子指令移除了，改在設定頁操作。
+- 同一個橋接 socket 同時最多 16 個請求。
 
-## 8. 驗證紀錄（2026-11-28，`feat/remote-bridge`）
+## 8. 驗證紀錄
+
+### 實機驗收（2026-11-28，Eugene，#95 與 #96 合併後重新打包的 app）
+
+下面六項都通過：
+
+- 設定頁從 `~/.ssh/config` 挑主機（真的設定檔）。
+- 連上一台 Ubuntu 主機。
+- 在遠端執行 `/saymend status`。
+- 遠端發起的聽寫：HUD 顯示來源主機，文字回到遠端。
+- 朗讀從 Mac 的喇叭出聲。
+- 聽寫進行中關掉開關，麥克風立刻關閉。
+
+### 自動化測試（2026-11-28，`feat/remote-bridge`，PR #96）
 
 - `swift test` 全綠（SaymendCore 1065、SaymendControl 55、SaymendApp 170，含預設跳過的 harness）。新測試：
   - `RemoteBridgeProtocolTests`：白名單、請求解析、frame 形狀、紀錄摘要、主機參數、ssh config 解析。
@@ -158,8 +183,18 @@ client 的原始檔是這個 repo 的 `Resources/remote/saymend_remote.py`，打
 - code review 後補的修正：上面的連線共用處理、16 條上限、「測試」的臨時轉發在 app 結束時也會收掉並記 pid、寫入 socket 時不持有狀態鎖（對端不讀時，關開關不會卡住 main thread）、pipe 寫入不觸發 SIGPIPE。這幾項各有測試，拿掉修正就會失敗（mutation 4 項）。
 - mutation 11 項全部被抓到：9 項由斷言直接抓到；「測試鈕用完不收轉發」會讓產品碼卡住，測試以逾時失敗；「孤兒清理不比對啟動時間」一開始沒抓到，原因是斷言太早，補上等待後才抓到。
 - 設定頁畫面：以 `RemoteSettingsSnapshot`（預設跳過，`SAYMEND_SNAPSHOT_DIR=<資料夾>`）畫成 PNG 檢查過版面。
-- **沒驗的**：
-  - 沒有連過真的遠端主機；SSH 只用假的 ssh 模擬。
-  - 沒有在執行中的打包版 app 上實機點過設定頁。
-  - 沒有實機聽寫過遠端發起的錄音。
-  - `~/.ssh/config` 只用測試檔驗過解析，沒有讀過真的設定。
+
+### 還沒實機驗的
+
+設定頁的這三個按鈕還沒有在實機上試過，只有自動化測試（用假的 ssh）：
+
+- 「測試」。
+- 「app 啟動時自動連線」。
+- 「移除遠端的 client」。
+
+另外，下面這些情況只有自動化測試，實機上沒有刻意觸發過：
+
+- 網路斷線後自動重連。
+- 驗證失敗、主機金鑰沒確認時的錯誤顯示。
+- 結束 app 時收掉 ssh。
+- app 當掉後，下次啟動清理留下的 ssh。

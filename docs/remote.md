@@ -53,11 +53,11 @@ Requirements:
 - A client that disconnects midway (killed, SSH dropped) = cancel: the matching dictation on the Mac is discarded and the microphone is closed.
 - Whitelist (section 4): only fixed requests are accepted; nothing else is run on the remote's behalf.
 
-The client's source is `Resources/remote/saymend_remote.py` in this repo. Packaging puts it in `Saymend.app/Contents/Resources/remote/`, and the app installs it on the host on every connect, so updating the app updates the remote client too. The file holds only the client; the Mac side lives in the app.
+The client's source is `Resources/remote/saymend_remote.py` in this repo. Packaging puts it in `Saymend.app/Contents/Resources/remote/`, and the app installs it on the host on every connect, so updating the app updates the remote client too. The file holds only the client; the Mac side lives in the app. For its history, see section 7.
 
 ## 3. Wire format (remote client ⇄ bridge)
 
-Same as `saymend_remote.py` in claude-code-mods, so existing clients keep working:
+This repo is the source of truth: the bridge side is `Sources/SaymendCore/Remote/RemoteBridgeProtocol.swift`, and the client side is `Resources/remote/saymend_remote.py`. Change both together when the format changes; the app reinstalls the client on every connect, so the two never stay out of step for long.
 
 - Unix socket, NDJSON, UTF-8. One request per connection (the first line):
   - `{"v":1,"cmd":"saymend","args":["dictate","--json","--silence-ms","1500"]}`
@@ -69,14 +69,14 @@ Same as `saymend_remote.py` in claude-code-mods, so existing clients keep workin
 
 ## 4. Whitelist
 
-Same as the reference implementation, except numbers must be ASCII digits (stricter):
+Defined by `RemoteBridgeProtocol.validateSaymendArgs`; only the subcommands and arguments the saymend-voice mod uses are allowed:
 
 | Request | Accepted arguments |
 |---|---|
 | `saymend status` | `--json` |
 | `saymend stop` / `cancel` / `--version` | `--json` |
 | `saymend events` | `--json`, `--presence <tag>` / `--presence=<tag>` (tag is `[a-z0-9_-]{1,32}`) |
-| `saymend dictate` | `--json`, `--polish`, and `--max-seconds` / `--silence-ms` / `--no-speech-seconds` followed by a number (`N` or `N.N`; `--flag=N` also works) |
+| `saymend dictate` | `--json`, `--polish`, and `--max-seconds` / `--silence-ms` / `--no-speech-seconds` followed by a number (ASCII digits only, `N` or `N.N`; `--flag=N` also works) |
 | `say` | `voice`: letters, digits, underscore, space and `.()-`, 1–64 characters, not starting with `-`; the text goes through stdin |
 
 Any other subcommand or argument is rejected and never reaches the control interface.
@@ -107,7 +107,7 @@ Any other subcommand or argument is rejected and never reaches the control inter
   4. Cancelling reuses an already-tested path: client disconnect → `CLIRunner.interrupt()`. For dictate this asks the app to cancel on the same connection, just like the CLI on SIGINT. If the app doesn't confirm within 2 seconds, the control connection is cut, and the app cancels because of the disconnect.
   - `say` still runs `/usr/bin/say` (text via stdin), so voices and behaviour match macOS `say` exactly. On client disconnect it gets SIGTERM, then SIGKILL after 3 seconds.
 - **ssh commands** (`<common>` is `-o BatchMode=yes -o ConnectTimeout=15 -o ControlMaster=no`, plus `-p` / `-l` for manual hosts):
-  - Install: `ssh <common> -- <host> "sh -c '<install steps>'"`, with the client file sent on stdin. The install steps are identical to the reference implementation: create the 0700 directory, write the client, create the two symlinks, remove a leftover `bridge.sock`, and report `$HOME` or a missing python3.
+  - Install: `ssh <common> -- <host> "sh -c '<install steps>'"`, with the client file sent on stdin. The install steps (`RemoteClientInstall.installScript`): create the 0700 directory, write the client, create the two symlinks, remove a leftover `bridge.sock`, and report `$HOME` or a missing python3.
   - Forward: `ssh <common> -o ControlPath=none -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -R <remote home>/.saymend-remote/bridge.sock:<local socket> -- <host>`
   - Check: `ssh <common> -- <host> '<remote home>/.saymend-remote/bin/saymend' status --json`, up to 5 times, 1 second apart.
   - Uninstall: `ssh <common> -- <host> "sh -c '<uninstall steps>'"`. The directory is kept if it holds other files.
@@ -123,17 +123,42 @@ Any other subcommand or argument is rejected and never reaches the control inter
 - Each connection opens three SSH connections (install, forward, check). Install and check can reuse a master you already have open; the forward is always a new connection.
 - Each host accepts at most 16 concurrent requests; extra connections are closed right away, so a runaway remote can't exhaust the app's file descriptors.
 
-## 7. Differences from the reference implementation (`saymend_remote.py connect`)
+## 7. History: the original Python bridge
 
-- The Mac side is now the app; no python3 or terminal window needed. The remote client's wire format, location and behaviour are unchanged.
-- One local socket per host (the reference used one shared socket), which is what lets remote dictations be labelled with the host.
-- Every ssh call adds `BatchMode=yes` and `ConnectTimeout=15`, with `--` before the destination.
+Before this moved into the app, the Mac side was a Python script: `mods/saymend-voice/remote/saymend_remote.py` in claude-code-mods. The same file was also the remote client; running `saymend_remote.py connect <host>` in a Mac terminal was the bridge, and the window had to stay open.
+
+Since the move, that file and its tests have been removed from claude-code-mods; they last exist in that repo at commit `fdeb73d`, and the mod's README now points to this document. The wire format, whitelist and install steps are defined by this repo (sections 3, 4 and 6); there's no need to consult the old file.
+
+These were kept deliberately compatible, so hosts set up with the old script need nothing special:
+
+- The client's location, file name and two symlinks are unchanged, and so is the wire format. On a host the old script set up, the app overwrites the install in place when it connects.
+- The behaviour of `saymend` / `say`, and the exit codes and JSON shapes when the Mac is unreachable, are unchanged.
+
+What people who used the old script will notice:
+
+- The Mac side no longer needs python3 or a terminal window.
+- One local socket per host (the old script shared one across hosts), which is what lets remote dictations be labelled with the host.
+- Every ssh call adds `BatchMode=yes`, `ConnectTimeout=15` and `ControlMaster=no`, with `--` before the destination; the forward also adds `ControlPath=none`.
 - Authentication failures and unconfirmed host keys are no longer retried forever.
-- Whitelisted numbers must be ASCII (the reference's `\d` also accepted digits from other scripts).
+- Whitelisted numbers must be ASCII (the old script's `\d` also accepted digits from other scripts).
 - The unreachable message is now "連不上 Mac：Saymend 的遠端連線沒有開著，或 SSH 連線中斷" (instead of "…saymend-remote 沒有在執行…"). It still starts with `連不上 Mac`, and the exit codes and JSON shapes are unchanged.
 - The client file keeps only the client; the `connect` / `uninstall` subcommands are gone (that's the settings tab now).
+- At most 16 concurrent requests per bridge socket.
 
-## 8. Verification record (2026-11-28, `feat/remote-bridge`)
+## 8. Verification record
+
+### On the real machine (2026-11-28, Eugene, the app rebuilt after #95 and #96 were merged)
+
+All six passed:
+
+- Picking a host from `~/.ssh/config` in the settings tab (the real config file).
+- Connecting to an Ubuntu host.
+- Running `/saymend status` on the remote host.
+- Remote-triggered dictation: the HUD showed the source host, and the text came back to the remote host.
+- Speech played through the Mac's speaker.
+- Turning the switch off during a dictation closed the microphone immediately.
+
+### Automated tests (2026-11-28, `feat/remote-bridge`, PR #96)
 
 - `swift test` all green (SaymendCore 1065, SaymendControl 55, SaymendApp 170, including harnesses skipped by default). New tests:
   - `RemoteBridgeProtocolTests`: whitelist, request parsing, frame shapes, log summaries, host arguments, ssh config parsing.
@@ -160,8 +185,18 @@ Any other subcommand or argument is rejected and never reaches the control inter
 - Fixes added after code review: the connection-sharing handling above, the 16-request cap, the Test button's temporary forward being stopped on quit and recorded in a pid file, socket writes no longer holding the state lock (so turning a switch off can't stall the main thread when the peer stops reading), and no SIGPIPE from pipe writes. Each has a test that fails when the fix is removed (4 mutations).
 - All 11 mutations were caught: 9 by assertions directly. "Test button leaves the forward running" makes the production code hang, so the test fails by timeout. "Orphan cleanup ignores the start time" was missed at first because the assertion ran too early; adding a wait fixed that.
 - Settings UI: rendered to PNG with `RemoteSettingsSnapshot` (skipped by default; `SAYMEND_SNAPSHOT_DIR=<dir>`) to check the layout.
-- **Not verified**:
-  - No real remote host was used; SSH was only simulated with the fake ssh.
-  - The settings tab was not clicked through in a running packaged app.
-  - No real remotely-triggered dictation with a real microphone.
-  - `~/.ssh/config` parsing was only verified against test files, never a real config.
+
+### Not yet verified on the real machine
+
+These three settings-tab buttons haven't been tried on the real machine; they only have automated tests (with the fake ssh):
+
+- **Test**.
+- **Connect when the app starts**.
+- **Remove the remote client**.
+
+These situations also only have automated tests and haven't been deliberately triggered on the real machine:
+
+- Reconnecting after a network drop.
+- The error shown for an authentication failure or an unconfirmed host key.
+- Stopping ssh when the app quits.
+- Cleaning up a leftover ssh on the next launch after a crash.

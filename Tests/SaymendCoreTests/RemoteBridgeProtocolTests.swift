@@ -3,7 +3,7 @@ import Testing
 @testable import SaymendCore
 
 @Suite struct RemoteBridgeProtocolTests {
-    /// 和參考實作（claude-code-mods 的 test_saymend_remote.py）同一組案例
+    /// saymend-voice mod 實際會送的指令組合
     @Test func whitelistAcceptsWhatTheModUses() {
         for args in [
             ["status", "--json"], ["events", "--json"], ["events", "--json", "--presence", "loop"],
@@ -21,7 +21,7 @@ import Testing
             ["dictate", "--silence-ms", "abc"], ["dictate", "--max-seconds=-1"], ["status", "--polish"],
             ["status", "--presence", "loop"], ["events", "--presence"], ["events", "--presence", "LOOP; rm -rf"],
             ["status", "--max-seconds", "3"],
-            // 比參考實作嚴：只收 ASCII 數字、不收 1.、.5
+            // 只收 ASCII 數字，不收 1.、.5
             ["dictate", "--max-seconds", "١٢"], ["dictate", "--max-seconds", "1."], ["dictate", "--max-seconds", ".5"],
             ["dictate", "--help"], ["--help"], ["dictate", "--json", "--polish=yes"],
         ] {
@@ -70,7 +70,7 @@ import Testing
         #expect(RemoteBridgeRequest.saymend(args: ["dictate", "--json"]).logSummary == "saymend dictate")
     }
 
-    /// 遠端的 Python client 逐行 json.loads：形狀要和參考實作一致
+    /// 遠端的 Python client（Resources/remote/saymend_remote.py）逐行 json.loads：形狀要和它讀的一致
     @Test func framesMatchTheClientFormat() {
         #expect(RemoteBridgeFrame.out("a\n").encoded() == #"{"out":"a\n"}"#)
         #expect(RemoteBridgeFrame.err("saymend: 中文\n").encoded() == #"{"err":"saymend: 中文\n"}"#)

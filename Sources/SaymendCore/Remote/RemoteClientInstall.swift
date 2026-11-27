@@ -8,8 +8,9 @@ public enum RemoteClientInstall {
     public static let socketName = "bridge.sock"
     public static let clientFileName = "saymend_remote.py"
 
-    /// 遠端的安裝步驟（與參考實作相同）。整段包在 `sh -c '…'` 裡，所以內容不能出現單引號。
-    /// client 的內容從 stdin 送進去。
+    /// 遠端的安裝步驟。整段包在 `sh -c '…'` 裡，所以內容不能出現單引號；client 的內容從 stdin 送進去。
+    /// 位置與檔名沿用舊版 Python 橋接（claude-code-mods 的 `saymend_remote.py connect`，已移除，
+    /// 最後存在於該 repo 的 commit fdeb73d）：它裝過的主機會被原地覆蓋，不留兩份。
     public static let installScript =
         #"set -e; d="$HOME/.saymend-remote"; mkdir -p "$d/bin"; chmod 700 "$d"; "#
         + #"cat > "$d/saymend_remote.py.new"; mv "$d/saymend_remote.py.new" "$d/saymend_remote.py"; "#
