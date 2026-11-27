@@ -6,13 +6,14 @@ public enum CLICommand: Equatable, Sendable {
     case dictate(DictateOptions, json: Bool)
     case stop(json: Bool)
     case cancel(json: Bool)
-    case events(json: Bool)
+    /// `presence`：`--presence <tag>`，這條 events 連線開著的期間宣告這個 tag
+    case events(presence: String?, json: Bool)
     case version(json: Bool)
     case help
 
     public var json: Bool {
         switch self {
-        case .status(let j), .dictate(_, let j), .stop(let j), .cancel(let j), .events(let j), .version(let j): return j
+        case .status(let j), .dictate(_, let j), .stop(let j), .cancel(let j), .events(_, let j), .version(let j): return j
         case .help: return false
         }
     }
@@ -29,12 +30,14 @@ public enum CLIArguments {
         用法：saymend <指令> [選項]
 
         指令：
-          status [--json]                 app 狀態（state／source／modelReady）
+          status [--json]                 app 狀態（state／source／modelReady／presence）
           dictate [--json] [--max-seconds N] [--silence-ms N] [--no-speech-seconds N] [--polish]
                                           開始一段 CLI 來源的聽寫，阻塞到結束；結果只回給呼叫端、不上屏
           stop [--json]                   結束目前 CLI 聽寫並定稿
           cancel [--json]                 丟棄目前 CLI 聽寫
-          events [--json]                 長駐串流所有來源的狀態變化
+          events [--json] [--presence <tag>]
+                                          長駐串流所有來源的狀態變化（含 presence 各 tag 的連線數）；
+                                          --presence：連線開著的期間宣告這個 tag，tag 為 [a-z0-9_-]{1,32}
           --version [--json]              CLI／app／協定版本
 
         exit code：0 成功、1 一般錯誤、2 用法錯誤、3 app 未執行、4 忙碌／無可停的聽寫、
@@ -63,8 +66,7 @@ public enum CLIArguments {
             try rejectUnknown(rest[...], allowed: ["--json"], fail: fail)
             return .cancel(json: json)
         case "events":
-            try rejectUnknown(rest[...], allowed: ["--json"], fail: fail)
-            return .events(json: json)
+            return .events(presence: try parseEvents(rest, fail: fail), json: json)
         case "dictate":
             return .dictate(try parseDictate(rest, fail: fail), json: json)
         default:
@@ -75,6 +77,35 @@ public enum CLIArguments {
     private static func rejectUnknown(_ args: ArraySlice<String>, allowed: Set<String>,
                                       fail: (String) -> CLIUsageError) throws {
         for a in args where !allowed.contains(a) { throw fail("未知選項：\(a)") }
+    }
+
+    /// `--presence <tag>` 與 `--presence=<tag>` 都收。回傳宣告的 tag（沒帶＝nil）。
+    private static func parseEvents(_ args: [String], fail: (String) -> CLIUsageError) throws -> String? {
+        var presence: String?
+        var i = 0
+        while i < args.count {
+            let raw = args[i]
+            if raw == "--json" {
+                i += 1
+                continue
+            }
+            let tag: String
+            if raw == "--presence" {
+                i += 1
+                // 下一個參數是選項（例如 `--presence --json`）＝漏了 tag。tag 的字元集含 `-`，不擋的話 `--json` 會被當成 tag。
+                guard i < args.count, !args[i].hasPrefix("--") else { throw fail("--presence 缺少 tag") }
+                tag = args[i]
+            } else if raw.hasPrefix("--presence=") {
+                tag = String(raw.dropFirst("--presence=".count))
+            } else {
+                throw fail("未知選項：\(raw)")
+            }
+            guard presence == nil else { throw fail("--presence 只能指定一次") }
+            guard ControlPresence.isValidTag(tag) else { throw fail("--presence 的 tag 必須符合 [a-z0-9_-]{1,32}：\(tag)") }
+            presence = tag
+            i += 1
+        }
+        return presence
     }
 
     /// 數值選項同時接受 `--flag N` 與 `--flag=N`。

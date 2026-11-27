@@ -91,13 +91,13 @@ func waitUntil(_ timeout: Double = 5, _ condition: () -> Bool) async -> Bool {
         let (dir, path) = makeSocketPath()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let handler = ScriptedHandler()
-        handler.reply = { _ in [.status(state: .idle, source: nil, modelReady: true)] }
+        handler.reply = { _ in [.status(state: .idle, source: nil, modelReady: true, presence: [:])] }
         let server = ControlServer(socketPath: path, handler: handler)
         try server.start()
         defer { server.stop() }
 
         let lines = await exchange(path: path, send: [ControlRequest.status.encoded()])
-        #expect(lines == [#"{"v":1,"type":"status","state":"idle","source":null,"modelReady":true}"#])
+        #expect(lines == [#"{"v":1,"type":"status","state":"idle","source":null,"modelReady":true,"presence":{}}"#])
         #expect(handler.requests == [.status])
         #expect(await waitUntil { handler.closedCount == 1 }, "每條連線恰通知一次關閉")
     }
@@ -199,11 +199,11 @@ func waitUntil(_ timeout: Double = 5, _ condition: () -> Bool) async -> Bool {
         let (dir, path) = makeSocketPath()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let handler = ScriptedHandler()
-        handler.reply = { _ in [.state(state: .idle, source: nil, at: Date())] }   // 非終局：連線保持開著
+        handler.reply = { _ in [.state(state: .idle, source: nil, presence: [:], at: Date())] }   // 非終局：連線保持開著
         let server = ControlServer(socketPath: path, handler: handler)
         try server.start()
 
-        async let lines = exchange(path: path, send: [ControlRequest.events.encoded()])
+        async let lines = exchange(path: path, send: [ControlRequest.events(presence: nil).encoded()])
         #expect(await waitUntil { handler.requests.count == 1 })
         server.stop()
         let received = await lines
