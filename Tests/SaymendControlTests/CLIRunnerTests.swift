@@ -40,10 +40,26 @@ final class CapturedOutput: @unchecked Sendable {
     }
 
     @Test func statusJSONMatchesTheContract() async throws {
-        try await withServer({ _ in [.status(state: .recording, source: .hotkey, modelReady: true)] }) { path, _ in
+        try await withServer({ _ in [.status(state: .recording, source: .hotkey, modelReady: true, presence: ["loop": 2])] }) { path, _ in
             let (code, o) = await run(path, ["status", "--json"])
             #expect(code == 0)
-            #expect(o.out == [#"{"v":1,"app":"running","state":"recording","source":"hotkey","modelReady":true}"#])
+            #expect(o.out == [#"{"v":1,"app":"running","state":"recording","source":"hotkey","modelReady":true,"presence":{"loop":2}}"#])
+            let (textCode, t) = await run(path, ["status"])
+            #expect(textCode == 0)
+            #expect(t.out == ["Saymend 執行中｜狀態 recording｜來源 hotkey｜模型已就緒｜presence loop=2"])
+        }
+        try await withServer({ _ in [.status(state: .idle, source: nil, modelReady: true, presence: [:])] }) { path, _ in
+            let (_, o) = await run(path, ["status", "--json"])
+            #expect(o.out == [#"{"v":1,"app":"running","state":"idle","source":null,"modelReady":true,"presence":{}}"#])
+        }
+    }
+
+    /// bundle 已更新、但執行中的還是舊版 app（不懂 presence）：照實不輸出 presence，不假裝成 `{}`
+    @Test func statusFromAnAppWithoutPresenceOmitsTheField() async throws {
+        try await withServer({ _ in [.status(state: .idle, source: nil, modelReady: true, presence: nil)] }) { path, _ in
+            let (code, o) = await run(path, ["status", "--json"])
+            #expect(code == 0)
+            #expect(o.out == [#"{"v":1,"app":"running","state":"idle","source":null,"modelReady":true}"#])
         }
     }
 
@@ -119,7 +135,7 @@ final class CapturedOutput: @unchecked Sendable {
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let handler = ScriptedHandler()
         let at = Date(timeIntervalSince1970: 1_795_000_000)
-        handler.reply = { _ in [.state(state: .idle, source: nil, at: at)] }
+        handler.reply = { _ in [.state(state: .idle, source: nil, presence: [:], at: at)] }
         let server = ControlServer(socketPath: path, handler: handler)
         try server.start()
 
@@ -127,15 +143,70 @@ final class CapturedOutput: @unchecked Sendable {
         let runner = CLIRunner(socketPath: path, output: captured.output, cliVersion: "1", terminate: { _ in })
         async let exit = background { runner.run(["events", "--json"]) }
         #expect(await waitUntil { handler.peers.count == 1 })
-        handler.peers[0].send(.state(state: .recording, source: .cli, at: at))
+        #expect(handler.requests == [.events(presence: nil)], "沒帶 --presence：請求不帶 presence")
+        handler.peers[0].send(.state(state: .recording, source: .cli, presence: ["loop": 1], at: at))
         #expect(await waitUntil { captured.out.count == 2 })
         server.stop()                                   // app 結束
         #expect(await exit == 3)
         #expect(captured.out.prefix(2) == [
-            #"{"v":1,"type":"state","state":"idle","source":null,"at":"2026-11-18T11:06:40.000Z"}"#,
-            #"{"v":1,"type":"state","state":"recording","source":"cli","at":"2026-11-18T11:06:40.000Z"}"#,
+            #"{"v":1,"type":"state","state":"idle","source":null,"presence":{},"at":"2026-11-18T11:06:40.000Z"}"#,
+            #"{"v":1,"type":"state","state":"recording","source":"cli","presence":{"loop":1},"at":"2026-11-18T11:06:40.000Z"}"#,
         ])
         #expect(captured.out.last?.contains(#""code":"not_running""#) == true)
+    }
+
+    @Test func eventsWithPresenceDeclaresTheTagOnTheWire() async throws {
+        let at = Date(timeIntervalSince1970: 1_795_000_000)
+        try await withServer({ _ in [.state(state: .idle, source: nil, presence: ["loop": 1], at: at)] }) { path, handler in
+            let captured = CapturedOutput()
+            let runner = CLIRunner(socketPath: path, output: captured.output, cliVersion: "1", terminate: { _ in })
+            async let exit = background { runner.run(["events", "--json", "--presence", "loop"]) }
+            #expect(await waitUntil { captured.out.count == 1 })
+            #expect(handler.requests == [.events(presence: "loop")])
+            #expect(captured.out == [
+                #"{"v":1,"type":"state","state":"idle","source":null,"presence":{"loop":1},"at":"2026-11-18T11:06:40.000Z"}"#,
+            ])
+            handler.peers[0].close()
+            #expect(await exit == 3)
+        }
+    }
+
+    @Test func eventsTextModeAppendsPresenceWhenThereIsAny() async throws {
+        let at = Date(timeIntervalSince1970: 1_795_000_000)
+        try await withServer({ _ in [.state(state: .idle, source: nil, presence: [:], at: at)] }) { path, handler in
+            let captured = CapturedOutput()
+            let runner = CLIRunner(socketPath: path, output: captured.output, cliVersion: "1", terminate: { _ in })
+            async let exit = background { runner.run(["events", "--presence=loop"]) }
+            #expect(await waitUntil { handler.peers.count == 1 })
+            handler.peers[0].send(.state(state: .idle, source: nil, presence: ["loop": 2, "x": 1], at: at))
+            #expect(await waitUntil { captured.out.count == 2 })
+            handler.peers[0].close()
+            #expect(await exit == 3)
+            #expect(captured.out == ["2026-11-18T11:06:40.000Z idle -",
+                                     "2026-11-18T11:06:40.000Z idle - loop=2,x=1"])
+        }
+    }
+
+    /// 舊版 app 送來沒有 presence 的 state：照實轉出、不補 `{}`
+    @Test func eventsFromAnAppWithoutPresenceOmitTheField() async throws {
+        let at = Date(timeIntervalSince1970: 1_795_000_000)
+        try await withServer({ _ in [.state(state: .idle, source: nil, presence: nil, at: at)] }) { path, handler in
+            let captured = CapturedOutput()
+            let runner = CLIRunner(socketPath: path, output: captured.output, cliVersion: "1", terminate: { _ in })
+            async let exit = background { runner.run(["events", "--json", "--presence", "loop"]) }
+            #expect(await waitUntil { captured.out.count == 1 })
+            #expect(captured.out == [#"{"v":1,"type":"state","state":"idle","source":null,"at":"2026-11-18T11:06:40.000Z"}"#])
+            handler.peers[0].close()
+            #expect(await exit == 3)
+        }
+    }
+
+    @Test func invalidPresenceExits2WithoutConnecting() async {
+        let (code, o) = await run("/nonexistent/x.sock", ["events", "--json", "--presence", "Loop"])
+        #expect(code == 2)
+        #expect(o.out.count == 1)
+        #expect(o.out.first?.hasPrefix(#"{"v":1,"type":"error","code":"usage""#) == true)
+        #expect(o.err.contains { $0.contains("--presence <tag>") }, "stderr 附上用法說明")
     }
 
     /// SIGINT：runner 在 dictate 連線上送 cancel，app 回 cancelled，exit 5。

@@ -21,12 +21,13 @@ mod ──(執行)──▶ saymend CLI ──(unix socket, NDJSON v1)──▶ 
 輸出一行後結束：
 
 ```json
-{"v":1,"app":"running","state":"idle","source":null,"modelReady":true}
+{"v":1,"app":"running","state":"idle","source":null,"modelReady":true,"presence":{"loop":1}}
 ```
 
 - `state`：`idle`｜`recording`（麥克風開著）｜`transcribing`（麥克風已關、辨識引擎還在處理）｜`polishing`（語言模型潤飾在途）
 - `source`：`hotkey`｜`cli`｜`null`（閒置時）。CLI 聽寫進行中以 CLI 為準。
 - `modelReady`：只有本機 WhisperKit 引擎有「模型還沒載入」的狀態；系統內建（SpeechAnalyzer）與 Whisper 遠端一律 `true`。
+- `presence`：各 tag 目前宣告中的 events 連線數，與 `events` 的 `presence` 是同一份計數（見下方 `events`）。
 - 熱鍵聽寫結束後的 8 秒延續窗對外算 `idle`（麥克風是關的）。
 - app 沒在跑：輸出 `{"v":1,"app":"not_running"}`，exit 3。
 - 不加 `--json`：印一行人讀的狀態。
@@ -90,29 +91,41 @@ mod ──(執行)──▶ saymend CLI ──(unix socket, NDJSON v1)──▶ 
 
 丟棄目前的 CLI 聽寫（任何階段：錄音、辨識、潤飾），等待中的 `dictate` 以 exit 5 結束。不影響熱鍵聽寫。成功 exit 0（`--json` 輸出 `{"v":1,"type":"ok"}`）；沒有 CLI 聽寫 → exit 4（`nothing_to_stop`）。
 
-### `saymend events --json`
+### `saymend events --json [--presence <tag>]`
 
-長駐串流，涵蓋**所有來源**（熱鍵與 CLI）的狀態變化：
+長駐串流，涵蓋**所有來源**（熱鍵與 CLI）的狀態變化，以及 presence 的連線數變化：
 
 ```json
-{"v":1,"type":"state","state":"idle","source":null,"at":"2026-11-26T14:30:37.469Z"}
-{"v":1,"type":"state","state":"recording","source":"hotkey","at":"2026-11-26T14:35:57.731Z"}
+{"v":1,"type":"state","state":"idle","source":null,"presence":{},"at":"2026-11-26T14:30:37.469Z"}
+{"v":1,"type":"state","state":"recording","source":"hotkey","presence":{},"at":"2026-11-26T14:35:57.731Z"}
+{"v":1,"type":"state","state":"recording","source":"hotkey","presence":{"loop":1},"at":"2026-11-26T14:36:02.118Z"}
 ```
 
 - 連上後第一行是當下快照，之後每次變化一行。`state`／`source` 同 `status`；`at` 為 ISO 8601（UTC、毫秒）。
-- 同一瞬間連跳的狀態會合併，只送最後的結果；值沒變不送。
+- `presence`：各 tag 目前宣告中的 events 連線數。只列數量大於 0 的 tag（依 tag 排序），沒有就是 `{}`。
+- 同一瞬間連跳的變化會合併，只送最後的結果；`state`、`source`、`presence` **都沒變**才不送——presence 的數量變了，即使 state／source 沒變，也會對所有 events 連線（含沒宣告 tag 的）送一行。
+- `--presence <tag>`（也收 `--presence=<tag>`）：這條 events 連線開著的期間，代表「有一個 client 宣告了這個 tag」。
+  - tag：`[a-z0-9_-]{1,32}`。不合法 → 用法錯誤（exit 2），不會連到 app。一條連線只宣告一個 tag，重複指定也是 exit 2。`--presence` 後面緊接著 `--` 開頭的參數（例如 `--presence --json`）視為漏了 tag。
+  - 連上後的第一行快照就包含自己：宣告 `loop` 的連線，第一行的 `presence.loop` 至少是 1。
+  - 以連線存活為準，沒有心跳或逾時：CLI 結束、被 kill（含 `kill -9`）或 app 發現對方斷線，就不再計入，其他連線隨即收到減少後的數量。同一條連線只算一次。
+  - app 只計數、不解讀 tag 的意思。
+  - 不帶 `--presence` 的 events 連線行為不變，也不計入任何 tag。
+- 相容性（presence 自 0.2.0 起）：
+  - 舊版 CLI（0.1.0）不認得 `--presence`，回 exit 2（`usage`）；mod 可據此退回不帶這個參數。
+  - 新版 CLI 接上還沒重開的舊版 app（例如 bundle 已重新打包、執行中的仍是舊行程）：舊 app 照收請求但不計數，`state` 與 `status` 的輸出**沒有 `presence` 欄位**（CLI 不會補成 `{}`）。欄位缺席＝執行中的 app 不支援 presence。
+  - 舊版 CLI 讀新版 app：照常輸出，只是沒有 `presence` 欄位。
 - app 結束 → 串流結束：`--json` 時先輸出一行 `{"v":1,"type":"error","code":"not_running",…}`，exit 3。
-- 不加 `--json`：每行 `<at> <state> <source|->`。
+- 不加 `--json`：每行 `<at> <state> <source|->`，presence 不為空時再接 ` <tag>=<n>,…`（例：`… idle - loop=2`）。
 
 ### `saymend --version [--json]`
 
 ```
-saymend CLI 0.1.0
-Saymend.app 0.1.0
+saymend CLI 0.2.0
+Saymend.app 0.2.0
 protocol v1
 ```
 
-`--json`：`{"v":1,"cli":"0.1.0","app":"0.1.0","protocol":1}`。CLI 版本從它所在的 app bundle 的 Info.plist 讀（與 app 同一份）。app 沒在跑時 `app` 為 `null`（文字版印「（未執行）」），仍 exit 0。
+`--json`：`{"v":1,"cli":"0.2.0","app":"0.2.0","protocol":1}`。CLI 版本從它所在的 app bundle 的 Info.plist 讀（與 app 同一份）。app 沒在跑時 `app` 為 `null`（文字版印「（未執行）」），仍 exit 0。
 
 ### Exit codes
 
@@ -135,8 +148,10 @@ protocol v1
 - socket：`~/Library/Application Support/Saymend/control.sock`（環境變數 `SAYMEND_CONTROL_SOCKET` 可覆寫，app 與 CLI 用同一個解析）。
 - 框架：NDJSON，UTF-8，`\n` 分行，一行上限 64 KiB。每個物件帶 `"v":1`；**版本先驗**，不符一律回 `unsupported_version` 並關閉連線。
 - 一條連線一個請求（第一行）。`dictate` 連線之後可以再送 `{"v":1,"cmd":"cancel"}`（CLI 收到 SIGINT／SIGTERM 時送），其他後續行一律忽略。CLI 一定先寫出 `dictate` 才可能送這個 `cancel`——第一行的 `cancel` 是獨立的 `saymend cancel`，會取消**任何**進行中的 CLI 聽寫。
-- 請求：`{"v":1,"cmd":"status|version|stop|cancel|events"}`；`{"v":1,"cmd":"dictate","maxSeconds":120,"silenceMs":0,"noSpeechSeconds":0,"polish":false}`（欄位可省略＝預設值；不合法回 `usage`）。
-- 回覆：`status`（`{"v":1,"type":"status","state":…,"source":…,"modelReady":…}`）、`version`（`{"v":1,"type":"version","app":"0.1.0","protocol":1}`）、`started`、`partial`、`final`、`state`、`ok`、`error`。`status`／`version`／`ok`／`final`／`error` 之後 app 關閉連線；`events` 不關。
+- 請求：`{"v":1,"cmd":"status|version|stop|cancel|events"}`；`{"v":1,"cmd":"events","presence":"loop"}`（`presence` 可省略或為 `null`＝不宣告；不是字串或不符 `[a-z0-9_-]{1,32}` 回 `usage` 並關閉連線）；`{"v":1,"cmd":"dictate","maxSeconds":120,"silenceMs":0,"noSpeechSeconds":0,"polish":false}`（欄位可省略＝預設值；不合法回 `usage`）。
+- 回覆：`status`（`{"v":1,"type":"status","state":…,"source":…,"modelReady":…,"presence":{…}}`）、`version`（`{"v":1,"type":"version","app":"0.2.0","protocol":1}`）、`started`、`partial`、`final`、`state`（`{"v":1,"type":"state","state":…,"source":…,"presence":{…},"at":…}`）、`ok`、`error`。`status`／`version`／`ok`／`final`／`error` 之後 app 關閉連線；`events` 不關。
+- `presence` 是協定裡唯一的巢狀物件，值一律是整數。app 一律送；0.1.0 的 app 不送，解碼端把「欄位不存在」當成「對端不支援」，不當成 `{}`。
+- presence 是往上相容的新增：沒有新的指令或訊息類型，協定版本仍是 v1。
 
 ### 安全邊界
 
@@ -187,3 +202,12 @@ CLI 聽寫與熱鍵聽寫共用同一組麥克風、辨識引擎與 HUD（辨識
   - 人聲最大位準 1.0（頂到上限）；環境噪音底線 0.066～0.113，自適應門檻 0.165～0.282。
   - 同一期間另有一次由 `saymend cancel` 取消的聽寫（端點判斷尚未判定開口就被取消，不計入上面的 10 段）。
 - **沒驗的**：`--polish` 沒有在實機上驗過，只有單元測試。
+
+## 5. 驗證紀錄：presence（2026-11-27，`feat/control-presence`）
+
+- 單元測試：`swift test` 全綠（SaymendCore 1016 項，含預設跳過的 harness；SaymendControl 54 項；SaymendApp 167 項）。
+  - `Tests/SaymendControlTests/`：`events` 請求帶／不帶 `presence` 的字面形狀、不合法 tag 一律 malformed；`state`／`status` 含 `presence` 的字面形狀（只列大於 0、依 tag 排序）、0.1.0 app 不送 presence 時解成「不存在」且不補 `{}`；`--presence` 兩種寫法與任意順序、各種不合法輸入都是 exit 2；真 socket 的 CLI 輸出（JSON 與文字版）。
+  - `Tests/SaymendCoreTests/ControlServiceTests.swift`：宣告者第一行就看得到自己、不宣告的連線不計數也不觸發廣播、presence 變化會廣播給所有連線（state／source 沒變也送）、斷線遞減並廣播、同一個 turn 內連上又斷不送一閃而過的值、同一條連線只算一次、`status` 帶 presence。
+  - `Tests/SaymendCoreTests/ControlPresenceSocketTests.swift`：真 socket＋真 `ControlServer`＋真 `ControlService`，斷線經 server 偵測 EOF → `peerClosed` 的真實路徑遞減；線上送不合法 tag 回 `usage` 且不計數。
+- 真 CLI 行程（預設跳過的 `ControlPresenceCLIProcessHarness`；`SAYMEND_CLI_BINARY=<新版 CLI> SAYMEND_OLD_CLI_BINARY=<0.1.0 CLI>`）：起兩個 `saymend events --json --presence loop` 與一個不宣告的觀察者，觀察者看到 `{}` → `{"loop":2}`；`kill -9` 其中一個 → `{"loop":1}`；另一個收 SIGTERM（exit 5）→ `{}`；`status --json` 帶 `"presence":{}`；不合法 tag exit 2。0.1.0 的 CLI：`events --json --presence loop` exit 2；`events --json` 接新版 app 照常輸出、沒有 `presence` 欄位。
+- **沒驗的**：沒有在執行中的 Saymend.app（實機打包版）上驗；沒有接 mod 驗證它的退回路徑。

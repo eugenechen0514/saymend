@@ -8,13 +8,26 @@ import SaymendControl
 public final class ControlService: ControlRequestHandler {
     private final class Subscriber {
         let peer: any ControlPeer
+        /// 這條 events 連線宣告的 tag（`--presence`）；nil＝不計入任何 tag
+        let presence: String?
         var last: Snapshot?
-        init(peer: any ControlPeer) { self.peer = peer }
+        init(peer: any ControlPeer, presence: String?) {
+            self.peer = peer
+            self.presence = presence
+        }
     }
 
     public struct Snapshot: Equatable, Sendable {
         public let state: ControlState
         public let source: ControlSource?
+        /// 各 tag 目前的連線數（只含大於 0 的）
+        public let presence: ControlPresence.Counts
+
+        public init(state: ControlState, source: ControlSource?, presence: ControlPresence.Counts = [:]) {
+            self.state = state
+            self.source = source
+            self.presence = presence
+        }
     }
 
     private let cli: CLIDictationController
@@ -50,22 +63,38 @@ public final class ControlService: ControlRequestHandler {
     }
 
     /// 目前的對外狀態。CLI 聽寫進行中以它為準；否則看熱鍵聽寫；都沒有＝idle、沒有來源。
+    /// presence 與聽寫狀態無關，一律附上。
     public func snapshot() -> Snapshot {
+        let (state, source) = dictationState()
+        return Snapshot(state: state, source: source, presence: presenceCounts())
+    }
+
+    private func dictationState() -> (ControlState, ControlSource?) {
         switch cli.phase {
-        case .recording: return Snapshot(state: .recording, source: .cli)
-        case .transcribing: return Snapshot(state: .transcribing, source: .cli)
-        case .polishing: return Snapshot(state: .polishing, source: .cli)
+        case .recording: return (.recording, .cli)
+        case .transcribing: return (.transcribing, .cli)
+        case .polishing: return (.polishing, .cli)
         case .idle: break
         }
         switch hotkeyActivity() {
-        case .recording: return Snapshot(state: .recording, source: .hotkey)
-        case .transcribing: return Snapshot(state: .transcribing, source: .hotkey)
-        case .polishing: return Snapshot(state: .polishing, source: .hotkey)
-        case .idle: return Snapshot(state: .idle, source: nil)
+        case .recording: return (.recording, .hotkey)
+        case .transcribing: return (.transcribing, .hotkey)
+        case .polishing: return (.polishing, .hotkey)
+        case .idle: return (.idle, nil)
         }
     }
 
-    /// 兩個狀態機的任一個可能變了。合併到下一個 turn 才算、只送給「上次收到的值不同」的訂閱者。
+    /// 以目前開著的 events 連線為準：每條宣告 tag 的連線算一個。訂閱表以連線為鍵，同一條連線不會算兩次。
+    private func presenceCounts() -> ControlPresence.Counts {
+        var counts: ControlPresence.Counts = [:]
+        for sub in subscribers.values {
+            if let tag = sub.presence { counts[tag, default: 0] += 1 }
+        }
+        return counts
+    }
+
+    /// 兩個狀態機的任一個可能變了，或 presence 的連線數變了。
+    /// 合併到下一個 turn 才算、只送給「上次收到的值不同」（state、source、presence 任一不同）的訂閱者。
     public func activityChanged() {
         guard !changeScheduled else { return }
         changeScheduled = true
@@ -82,7 +111,7 @@ public final class ControlService: ControlRequestHandler {
             let snap = snapshot()
             Task { [modelReady] in
                 let ready = await modelReady()
-                peer.send(.status(state: snap.state, source: snap.source, modelReady: ready))
+                peer.send(.status(state: snap.state, source: snap.source, modelReady: ready, presence: snap.presence))
                 peer.close()
             }
         case .version:
@@ -102,12 +131,15 @@ public final class ControlService: ControlRequestHandler {
                 peer.send(.error(code: .nothingToStop, message: "目前沒有 CLI 聽寫"))
             }
             peer.close()
-        case .events:
-            let sub = Subscriber(peer: peer)
+        case .events(let presence):
+            let sub = Subscriber(peer: peer, presence: presence)
             subscribers[ObjectIdentifier(peer)] = sub
+            // 先登記再取快照：宣告 tag 的連線第一行就看得到自己
             let snap = snapshot()
             sub.last = snap
-            peer.send(.state(state: snap.state, source: snap.source, at: now()))
+            peer.send(.state(state: snap.state, source: snap.source, presence: snap.presence, at: now()))
+            // 其他連線看到的 presence 變了；新連線的 last 已是最新值，合併廣播時不會重送給它
+            if presence != nil { activityChanged() }
         case .dictate(let options):
             // 先判忙碌再認領：已有別條連線在等結果時，不得把「斷線就取消」的認領搶過來
             guard !cli.isActive else {
@@ -144,7 +176,9 @@ public final class ControlService: ControlRequestHandler {
 
     public func peerClosed(_ peer: any ControlPeer) {
         let id = ObjectIdentifier(peer)
-        subscribers.removeValue(forKey: id)
+        if let sub = subscribers.removeValue(forKey: id), sub.presence != nil {
+            activityChanged()   // 宣告 tag 的連線斷了：presence 少一個，通知其餘訂閱者
+        }
         if dictatePeer == id {
             dictatePeer = nil
             if cli.isActive {
@@ -165,7 +199,7 @@ public final class ControlService: ControlRequestHandler {
         let at = now()
         for sub in subscribers.values where sub.last != snap {
             sub.last = snap
-            sub.peer.send(.state(state: snap.state, source: snap.source, at: at))
+            sub.peer.send(.state(state: snap.state, source: snap.source, presence: snap.presence, at: at))
         }
     }
 }

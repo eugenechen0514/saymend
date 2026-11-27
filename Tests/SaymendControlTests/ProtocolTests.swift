@@ -20,13 +20,20 @@ import Testing
     }
 
     @Test func parseDistinguishesBoolFromNumber() throws {
-        let line = try JSONLine.parse(#"{"a":true,"b":1,"c":1.5,"d":null,"e":"x","f":{"nested":1}}"#)
+        let line = try JSONLine.parse(#"{"a":true,"b":1,"c":1.5,"d":null,"e":"x","f":{"nested":1},"g":[1,2]}"#)
         #expect(line["a"] == .bool(true))
         #expect(line["b"] == .int(1))
         #expect(line["c"] == .double(1.5))
         #expect(line["d"] == .null)
         #expect(line["e"] == .string("x"))
-        #expect(line["f"] == nil, "巢狀物件不在協定裡，當成沒有這個欄位")
+        #expect(line["f"] == .object(JSONLine([("nested", .int(1))])), "巢狀物件（presence 用）解成 .object")
+        #expect(line["g"] == nil, "陣列不在協定裡，當成沒有這個欄位")
+    }
+
+    @Test func nestedObjectsEncodeInInsertionOrder() {
+        let line = JSONLine([("v", .int(1)), ("presence", .object(JSONLine([("loop", .int(2)), ("a", .int(1))]))),
+                             ("empty", .object(JSONLine()))])
+        #expect(line.encoded() == #"{"v":1,"presence":{"loop":2,"a":1},"empty":{}}"#)
     }
 
     @Test func parseRejectsNonObjects() {
@@ -44,7 +51,7 @@ import Testing
 @Suite struct ControlProtocolTests {
     @Test func everyRequestRoundTrips() throws {
         let requests: [ControlRequest] = [
-            .status, .version, .stop, .cancel, .events,
+            .status, .version, .stop, .cancel, .events(presence: nil), .events(presence: "loop"),
             .dictate(DictateOptions()),
             .dictate(DictateOptions(maxSeconds: 30.5, silenceMs: 1200, noSpeechSeconds: 8, polish: true)),
         ]
@@ -94,19 +101,75 @@ import Testing
             (.partial("你好"), #"{"v":1,"type":"partial","text":"你好"}"#),
             (.final(text: "你好。", raw: "你好", durationMs: 1234),
              #"{"v":1,"type":"final","text":"你好。","raw":"你好","durationMs":1234}"#),
-            (.state(state: .recording, source: .hotkey, at: at),
-             #"{"v":1,"type":"state","state":"recording","source":"hotkey","at":"2026-11-18T11:06:40.123Z"}"#),
-            (.state(state: .idle, source: nil, at: at),
+            (.state(state: .recording, source: .hotkey, presence: [:], at: at),
+             #"{"v":1,"type":"state","state":"recording","source":"hotkey","presence":{},"at":"2026-11-18T11:06:40.123Z"}"#),
+            (.state(state: .idle, source: nil, presence: ["loop": 2], at: at),
+             #"{"v":1,"type":"state","state":"idle","source":null,"presence":{"loop":2},"at":"2026-11-18T11:06:40.123Z"}"#),
+            // 舊版 app（0.1.0）不送 presence：解成 nil，再編回去也不出現這個欄位
+            (.state(state: .idle, source: nil, presence: nil, at: at),
              #"{"v":1,"type":"state","state":"idle","source":null,"at":"2026-11-18T11:06:40.123Z"}"#),
             (.error(code: .busy, message: "忙"), #"{"v":1,"type":"error","code":"busy","message":"忙"}"#),
             (.ok, #"{"v":1,"type":"ok"}"#),
-            (.status(state: .polishing, source: .cli, modelReady: false),
-             #"{"v":1,"type":"status","state":"polishing","source":"cli","modelReady":false}"#),
+            (.status(state: .polishing, source: .cli, modelReady: false, presence: [:]),
+             #"{"v":1,"type":"status","state":"polishing","source":"cli","modelReady":false,"presence":{}}"#),
+            (.status(state: .idle, source: nil, modelReady: true, presence: ["loop": 1]),
+             #"{"v":1,"type":"status","state":"idle","source":null,"modelReady":true,"presence":{"loop":1}}"#),
+            (.status(state: .idle, source: nil, modelReady: true, presence: nil),
+             #"{"v":1,"type":"status","state":"idle","source":null,"modelReady":true}"#),
             (.version(app: "0.1.0"), #"{"v":1,"type":"version","app":"0.1.0","protocol":1}"#),
         ]
         for (message, expected) in cases {
             #expect(message.encoded() == expected)
             #expect((try? ControlMessage.decode(expected)) == message, "\(expected) 要能解回同一則訊息")
+        }
+    }
+
+    // MARK: - presence
+
+    @Test func eventsRequestCarriesPresenceOnlyWhenDeclared() throws {
+        #expect(ControlRequest.events(presence: nil).encoded() == #"{"v":1,"cmd":"events"}"#)
+        #expect(ControlRequest.events(presence: "loop").encoded() == #"{"v":1,"cmd":"events","presence":"loop"}"#)
+        #expect(try ControlRequest.decode(#"{"v":1,"cmd":"events"}"#) == .events(presence: nil))
+        #expect(try ControlRequest.decode(#"{"v":1,"cmd":"events","presence":null}"#) == .events(presence: nil))
+        #expect(try ControlRequest.decode(#"{"v":1,"cmd":"events","presence":"a-b_9"}"#) == .events(presence: "a-b_9"))
+        let longest = String(repeating: "x", count: 32)
+        #expect(try ControlRequest.decode(#"{"v":1,"cmd":"events","presence":"\#(longest)"}"#) == .events(presence: longest))
+    }
+
+    @Test func invalidPresenceInTheRequestIsMalformed() {
+        let tooLong = String(repeating: "x", count: 33)
+        for value in [#""""#, #""LOOP""#, #""a b""#, #""迴圈""#, #""a.b""#, #""a/b""#, "\"\(tooLong)\"",
+                      "1", "true", #"{"loop":1}"#] {
+            let text = #"{"v":1,"cmd":"events","presence":"# + value + "}"
+            #expect(throws: ControlRequest.DecodeError.self, "\(text)") { try ControlRequest.decode(text) }
+        }
+    }
+
+    @Test func tagCharsetIsLowercaseDigitsUnderscoreAndDash() {
+        for ok in ["loop", "a", "0", "_", "-", "a-b_c9", String(repeating: "z", count: 32)] {
+            #expect(ControlPresence.isValidTag(ok), "\(ok)")
+        }
+        for bad in ["", "Loop", "a b", "a.b", "ä", "迴圈", "a\n", String(repeating: "z", count: 33)] {
+            #expect(!ControlPresence.isValidTag(bad), "\(bad)")
+        }
+    }
+
+    /// 只列數量大於 0 的 tag、依 tag 排序（輸出可重現）
+    @Test func presenceListsOnlyPositiveCountsSortedByTag() {
+        let at = Date(timeIntervalSince1970: 1_795_000_000.123)
+        let m = ControlMessage.state(state: .idle, source: nil, presence: ["zeta": 1, "loop": 2, "gone": 0], at: at)
+        #expect(m.encoded()
+                == #"{"v":1,"type":"state","state":"idle","source":null,"presence":{"loop":2,"zeta":1},"at":"2026-11-18T11:06:40.123Z"}"#)
+        #expect(ControlPresence.jsonValue(["gone": 0]) == .object(JSONLine()))
+    }
+
+    @Test func malformedPresenceInMessagesIsRejected() {
+        for presence in [#""loop""#, #"{"loop":"2"}"#, #"{"loop":1.5}"#, "1"] {
+            let state = #"{"v":1,"type":"state","state":"idle","source":null,"presence":"# + presence
+                + #","at":"2026-11-18T11:06:40.123Z"}"#
+            #expect(throws: ControlRequest.DecodeError.self, "\(state)") { try ControlMessage.decode(state) }
+            let status = #"{"v":1,"type":"status","state":"idle","source":null,"modelReady":true,"presence":"# + presence + "}"
+            #expect(throws: ControlRequest.DecodeError.self, "\(status)") { try ControlMessage.decode(status) }
         }
     }
 
@@ -141,7 +204,8 @@ import Testing
         #expect(try CLIArguments.parse(["status"]) == .status(json: false))
         #expect(try CLIArguments.parse(["stop"]) == .stop(json: false))
         #expect(try CLIArguments.parse(["cancel", "--json"]) == .cancel(json: true))
-        #expect(try CLIArguments.parse(["events", "--json"]) == .events(json: true))
+        #expect(try CLIArguments.parse(["events", "--json"]) == .events(presence: nil, json: true))
+        #expect(try CLIArguments.parse(["events"]) == .events(presence: nil, json: false))
         #expect(try CLIArguments.parse(["--version"]) == .version(json: false))
         #expect(try CLIArguments.parse(["--version", "--json"]) == .version(json: true))
         #expect(try CLIArguments.parse(["--help"]) == .help)
@@ -154,6 +218,41 @@ import Testing
                                         "--no-speech-seconds", "8", "--polish"]) == .dictate(expected, json: true))
         #expect(try CLIArguments.parse(["dictate", "--max-seconds=30", "--silence-ms=1200",
                                         "--no-speech-seconds=8", "--polish"]) == .dictate(expected, json: false))
+    }
+
+    @Test func parsesEventsPresenceInBothFormsAndAnyOrder() throws {
+        let expected = CLICommand.events(presence: "loop", json: true)
+        #expect(try CLIArguments.parse(["events", "--json", "--presence", "loop"]) == expected)
+        #expect(try CLIArguments.parse(["events", "--presence", "loop", "--json"]) == expected)
+        #expect(try CLIArguments.parse(["events", "--presence=loop", "--json"]) == expected)
+        #expect(try CLIArguments.parse(["events", "--presence", "a-b_9"]) == .events(presence: "a-b_9", json: false))
+        #expect(try CLIArguments.parse(["events", "--presence=-x"]) == .events(presence: "-x", json: false),
+                "= 形式的 tag 可以以 - 開頭（字元集允許）")
+    }
+
+    /// 不合法的 tag 一律是用法錯誤（exit 2）——mod 靠這點判斷舊版 CLI 以外的錯誤，也靠它在舊版 CLI 上退回
+    @Test func invalidPresenceIsAUsageError() {
+        let bad: [[String]] = [
+            ["events", "--presence"], ["events", "--presence", "LOOP"], ["events", "--presence", ""],
+            ["events", "--presence="], ["events", "--presence", String(repeating: "x", count: 33)],
+            ["events", "--presence", "a b"], ["events", "--presence", "迴圈"],
+            ["events", "--presence", "--json"],                       // 漏了 tag：`--json` 不得被當成 tag
+            ["events", "--presence", "loop", "--presence", "other"],  // 一條連線只宣告一個 tag
+            ["events", "--presence", "loop", "extra"], ["events", "--verbose"],
+            ["status", "--presence", "loop"],                         // 只有 events 收 --presence
+            ["dictate", "--presence", "loop"],
+        ]
+        for args in bad {
+            #expect(throws: CLIUsageError.self, "\(args)") { try CLIArguments.parse(args) }
+        }
+        do {
+            _ = try CLIArguments.parse(["events", "--json", "--presence", "BAD"])
+            Issue.record("應該丟用法錯誤")
+        } catch let e as CLIUsageError {
+            #expect(e.json)
+        } catch {
+            Issue.record("錯誤型別不對：\(error)")
+        }
     }
 
     @Test func usageErrorsRememberWhetherJSONWasAsked() {

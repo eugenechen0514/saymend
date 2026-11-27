@@ -21,12 +21,13 @@ Every `--json` output is NDJSON: one JSON object per line, flushed immediately a
 Prints one line and exits:
 
 ```json
-{"v":1,"app":"running","state":"idle","source":null,"modelReady":true}
+{"v":1,"app":"running","state":"idle","source":null,"modelReady":true,"presence":{"loop":1}}
 ```
 
 - `state`: `idle` | `recording` (microphone on) | `transcribing` (microphone off, recognition engine still working) | `polishing` (language-model polishing in flight)
 - `source`: `hotkey` | `cli` | `null` (when idle). While a CLI dictation is in progress, the CLI takes precedence.
 - `modelReady`: only the local WhisperKit engine has a "model not loaded yet" state; the built-in engine (SpeechAnalyzer) and Whisper remote always report `true`.
+- `presence`: the number of `events` connections currently declaring each tag — the same count as `presence` in `events` (see `events` below).
 - The 8-second continuation window after a hotkey dictation counts as `idle` externally (the microphone is off).
 - App not running: prints `{"v":1,"app":"not_running"}` and exits 3.
 - Without `--json`: prints one human-readable status line.
@@ -90,29 +91,41 @@ Ends the CLI dictation that is currently **recording** and finalizes it; the tex
 
 Discards the current CLI dictation (at any stage: recording, transcribing, polishing); the waiting `dictate` exits 5. It doesn't affect hotkey dictation. On success it exits 0 (`--json` prints `{"v":1,"type":"ok"}`); if there is no CLI dictation → exit 4 (`nothing_to_stop`).
 
-### `saymend events --json`
+### `saymend events --json [--presence <tag>]`
 
-A long-running stream of state changes from **all sources** (hotkey and CLI):
+A long-running stream of state changes from **all sources** (hotkey and CLI), plus changes in the presence counts:
 
 ```json
-{"v":1,"type":"state","state":"idle","source":null,"at":"2026-11-26T14:30:37.469Z"}
-{"v":1,"type":"state","state":"recording","source":"hotkey","at":"2026-11-26T14:35:57.731Z"}
+{"v":1,"type":"state","state":"idle","source":null,"presence":{},"at":"2026-11-26T14:30:37.469Z"}
+{"v":1,"type":"state","state":"recording","source":"hotkey","presence":{},"at":"2026-11-26T14:35:57.731Z"}
+{"v":1,"type":"state","state":"recording","source":"hotkey","presence":{"loop":1},"at":"2026-11-26T14:36:02.118Z"}
 ```
 
 - The first line after connecting is a snapshot of the current state, followed by one line per change. `state` / `source` are the same as in `status`; `at` is ISO 8601 (UTC, milliseconds).
-- Several state changes within the same instant are coalesced and only the final result is sent; unchanged values are not sent.
+- `presence`: the number of `events` connections currently declaring each tag. Only tags with a count above 0 are listed (sorted by tag); with none, it is `{}`.
+- Several changes within the same instant are coalesced and only the final result is sent; a line is skipped only when `state`, `source`, **and** `presence` are all unchanged — when a presence count changes, every `events` connection (including ones that declare no tag) gets a new line even if state / source didn't change.
+- `--presence <tag>` (`--presence=<tag>` also works): while this `events` connection stays open, it means "one client has declared this tag".
+  - tag: `[a-z0-9_-]{1,32}`. An invalid tag is a usage error (exit 2) and never connects to the app. One connection declares one tag; giving `--presence` twice is also exit 2. If the argument right after `--presence` starts with `--` (for example `--presence --json`), the tag counts as missing.
+  - The snapshot on the first line already includes the connection itself: a connection declaring `loop` sees `presence.loop` of at least 1 on its first line.
+  - Liveness is the connection itself — no heartbeats, no timeouts: when the CLI exits, is killed (including `kill -9`), or the app finds the peer gone, it stops counting, and the other connections immediately get the decreased count. A connection is counted once.
+  - The app only counts; it doesn't interpret what a tag means.
+  - `events` connections without `--presence` behave exactly as before and count toward no tag.
+- Compatibility (presence exists since 0.2.0):
+  - An old CLI (0.1.0) doesn't know `--presence` and exits 2 (`usage`); a mod can use that to fall back to omitting it.
+  - A new CLI talking to an old app that hasn't been restarted (for example the bundle was rebuilt but the running process is still the old one): the old app accepts the request but doesn't count, and `state` / `status` output has **no `presence` field** (the CLI doesn't fill in `{}`). A missing field means the running app doesn't support presence.
+  - An old CLI reading a new app: output as usual, just without the `presence` field.
 - When the app quits, the stream ends: with `--json` it first prints one `{"v":1,"type":"error","code":"not_running",…}` line, then exits 3.
-- Without `--json`: each line is `<at> <state> <source|->`.
+- Without `--json`: each line is `<at> <state> <source|->`, followed by ` <tag>=<n>,…` when presence isn't empty (e.g. `… idle - loop=2`).
 
 ### `saymend --version [--json]`
 
 ```
-saymend CLI 0.1.0
-Saymend.app 0.1.0
+saymend CLI 0.2.0
+Saymend.app 0.2.0
 protocol v1
 ```
 
-`--json`: `{"v":1,"cli":"0.1.0","app":"0.1.0","protocol":1}`. The CLI version is read from the Info.plist of the app bundle it lives in (the same one as the app). When the app isn't running, `app` is `null` (the text form prints "（未執行）", i.e. not running), and it still exits 0.
+`--json`: `{"v":1,"cli":"0.2.0","app":"0.2.0","protocol":1}`. The CLI version is read from the Info.plist of the app bundle it lives in (the same one as the app). When the app isn't running, `app` is `null` (the text form prints "（未執行）", i.e. not running), and it still exits 0.
 
 ### Exit codes
 
@@ -135,8 +148,10 @@ On error with `--json`, one extra line `{"v":1,"type":"error","code":"…","mess
 - Socket: `~/Library/Application Support/Saymend/control.sock` (the environment variable `SAYMEND_CONTROL_SOCKET` overrides it; the app and the CLI use the same resolution).
 - Framing: NDJSON, UTF-8, lines separated by `\n`, 64 KiB per line at most. Every object carries `"v":1`; **the version is checked first**, and any mismatch is answered with `unsupported_version` and the connection is closed.
 - One request per connection (the first line). After `dictate`, the connection may also send `{"v":1,"cmd":"cancel"}` (sent by the CLI when it receives SIGINT / SIGTERM); any other follow-up line is ignored. The CLI always writes `dictate` before it can send this `cancel` — a `cancel` as the first line is a standalone `saymend cancel`, which cancels **any** CLI dictation in progress.
-- Requests: `{"v":1,"cmd":"status|version|stop|cancel|events"}`; `{"v":1,"cmd":"dictate","maxSeconds":120,"silenceMs":0,"noSpeechSeconds":0,"polish":false}` (fields may be omitted = default value; invalid values get `usage`).
-- Replies: `status` (`{"v":1,"type":"status","state":…,"source":…,"modelReady":…}`), `version` (`{"v":1,"type":"version","app":"0.1.0","protocol":1}`), `started`, `partial`, `final`, `state`, `ok`, `error`. After `status` / `version` / `ok` / `final` / `error`, the app closes the connection; `events` stays open.
+- Requests: `{"v":1,"cmd":"status|version|stop|cancel|events"}`; `{"v":1,"cmd":"events","presence":"loop"}` (`presence` may be omitted or `null` = no declaration; a non-string or anything not matching `[a-z0-9_-]{1,32}` gets `usage` and the connection is closed); `{"v":1,"cmd":"dictate","maxSeconds":120,"silenceMs":0,"noSpeechSeconds":0,"polish":false}` (fields may be omitted = default value; invalid values get `usage`).
+- Replies: `status` (`{"v":1,"type":"status","state":…,"source":…,"modelReady":…,"presence":{…}}`), `version` (`{"v":1,"type":"version","app":"0.2.0","protocol":1}`), `started`, `partial`, `final`, `state` (`{"v":1,"type":"state","state":…,"source":…,"presence":{…},"at":…}`), `ok`, `error`. After `status` / `version` / `ok` / `final` / `error`, the app closes the connection; `events` stays open.
+- `presence` is the only nested object in the protocol, and its values are always integers. The app always sends it; a 0.1.0 app doesn't, and decoders treat a missing field as "the peer doesn't support it", not as `{}`.
+- presence is a backward-compatible addition: no new command or message type, so the protocol version stays v1.
 
 ### Security boundaries
 
@@ -187,3 +202,12 @@ Recorded according to the existing "記錄聽寫歷史" (record dictation histor
   - Maximum voice level 1.0 (hit the ceiling); ambient noise floor 0.066–0.113, adaptive threshold 0.165–0.282.
   - In the same period there was one more dictation cancelled by `saymend cancel` (cancelled before endpoint detection had detected speech; not counted among the 10 above).
 - **Not verified**: `--polish` has not been verified on the real machine; it has unit tests only.
+
+## 5. Verification record: presence (2026-11-27, `feat/control-presence`)
+
+- Unit tests: `swift test` all green (SaymendCore 1016 tests, including the harnesses that are skipped by default; SaymendControl 54; SaymendApp 167).
+  - `Tests/SaymendControlTests/`: literal shapes of the `events` request with and without `presence`, every invalid tag is malformed; literal shapes of `state` / `status` with `presence` (only counts above 0, sorted by tag), and a 0.1.0 app that sends no presence decodes as "missing" and is never filled in with `{}`; both `--presence` forms in any order, and every invalid input is exit 2; CLI output over a real socket (JSON and text form).
+  - `Tests/SaymendCoreTests/ControlServiceTests.swift`: a declaring connection sees itself on its first line; connections without a tag don't count and trigger no broadcast; presence changes are broadcast to every connection (even when state / source didn't change); disconnecting decrements and broadcasts; connecting and disconnecting within one turn sends no transient value; one connection counts once; `status` carries presence.
+  - `Tests/SaymendCoreTests/ControlPresenceSocketTests.swift`: real socket + real `ControlServer` + real `ControlService`; disconnects decrement through the real path (the server sees EOF → `peerClosed`); an invalid tag on the wire gets `usage` and isn't counted.
+- Real CLI processes (`ControlPresenceCLIProcessHarness`, skipped by default; `SAYMEND_CLI_BINARY=<new CLI> SAYMEND_OLD_CLI_BINARY=<0.1.0 CLI>`): two `saymend events --json --presence loop` processes plus an observer without a tag; the observer sees `{}` → `{"loop":2}`; `kill -9` on one → `{"loop":1}`; SIGTERM on the other (exit 5) → `{}`; `status --json` carries `"presence":{}`; an invalid tag exits 2. The 0.1.0 CLI: `events --json --presence loop` exits 2; `events --json` against the new app prints as usual, without a `presence` field.
+- **Not verified**: not run against a running Saymend.app (a packaged build on the real machine); the mod's fallback path was not exercised.

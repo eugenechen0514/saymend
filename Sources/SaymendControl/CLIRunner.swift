@@ -65,7 +65,7 @@ public final class CLIRunner {
         case .status(let json): return runStatus(json: json)
         case .stop(let json): return runSimple(.stop, json: json)
         case .cancel(let json): return runSimple(.cancel, json: json)
-        case .events(let json): return runEvents(json: json)
+        case .events(let presence, let json): return runEvents(presence: presence, json: json)
         case .dictate(let options, let json): return runDictate(options, json: json)
         }
     }
@@ -113,14 +113,19 @@ public final class CLIRunner {
         UnixSocket.setReceiveTimeout(fd, seconds: Self.replyTimeout)
         guard UnixSocket.writeLine(fd, ControlRequest.status.encoded()) else { return lostApp(json: json) }
         switch readReply(fd) {
-        case .message(.status(let state, let source, let modelReady)):
+        case .message(.status(let state, let source, let modelReady, let presence)):
             if json {
-                output.out(JSONLine([("v", .int(ControlProtocol.version)), ("app", .string("running")),
+                var line = JSONLine([("v", .int(ControlProtocol.version)), ("app", .string("running")),
                                      ("state", .string(state.rawValue)),
                                      ("source", source.map { .string($0.rawValue) } ?? .null),
-                                     ("modelReady", .bool(modelReady))]).encoded())
+                                     ("modelReady", .bool(modelReady))])
+                // 舊版 app 不送 presence：照實不輸出這個欄位，不假裝成 `{}`
+                if let presence { line.set("presence", ControlPresence.jsonValue(presence)) }
+                output.out(line.encoded())
             } else {
-                output.out("Saymend 執行中｜狀態 \(state.rawValue)｜來源 \(source?.rawValue ?? "—")｜模型\(modelReady ? "已就緒" : "未就緒")")
+                var text = "Saymend 執行中｜狀態 \(state.rawValue)｜來源 \(source?.rawValue ?? "—")｜模型\(modelReady ? "已就緒" : "未就緒")"
+                if let presence { text += "｜presence \(Self.presenceText(presence) ?? "—")" }
+                output.out(text)
             }
             return ControlExitCode.success
         case .message(.error(let code, let message)):
@@ -177,11 +182,11 @@ public final class CLIRunner {
         return ControlExitCode.success
     }
 
-    private func runEvents(json: Bool) -> Int32 {
+    private func runEvents(presence: String?, json: Bool) -> Int32 {
         let fd: Int32
         do { fd = try connect(socketPath) } catch { return connectFailure(error, json: json) }
         defer { close(fd) }
-        guard UnixSocket.writeLine(fd, ControlRequest.events.encoded()) else { return lostApp(json: json) }
+        guard UnixSocket.writeLine(fd, ControlRequest.events(presence: presence).encoded()) else { return lostApp(json: json) }
         let reader = LineReader(fd: fd)
         while true {
             let line: String?
@@ -189,11 +194,13 @@ public final class CLIRunner {
             guard let line else { return lostApp(json: json) }   // app 結束＝串流結束、exit 3
             guard let message = try? ControlMessage.decode(line) else { continue }
             switch message {
-            case .state(let state, let source, let at):
+            case .state(let state, let source, let presence, let at):
                 if json {
                     output.out(message.encoded())
                 } else {
-                    output.out("\(ControlTimestamp.format(at)) \(state.rawValue) \(source?.rawValue ?? "-")")
+                    var text = "\(ControlTimestamp.format(at)) \(state.rawValue) \(source?.rawValue ?? "-")"
+                    if let presence, let p = Self.presenceText(presence) { text += " \(p)" }
+                    output.out(text)
                 }
             case .error(let code, let msg):
                 emitError(code, msg, json: json)
@@ -257,6 +264,12 @@ public final class CLIRunner {
     }
 
     // MARK: - 共用
+
+    /// 人讀格式：`loop=2,other=1`（依 tag 排序、只列大於 0 的）；沒有任何 tag 回 nil。
+    static func presenceText(_ counts: ControlPresence.Counts) -> String? {
+        let parts = counts.keys.sorted().compactMap { tag in counts[tag].flatMap { $0 > 0 ? "\(tag)=\($0)" : nil } }
+        return parts.isEmpty ? nil : parts.joined(separator: ",")
+    }
 
     private var dictateIsActive: Bool {
         lock.lock(); defer { lock.unlock() }

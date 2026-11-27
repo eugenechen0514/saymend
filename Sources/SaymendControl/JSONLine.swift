@@ -1,13 +1,15 @@
 import Foundation
 
-/// NDJSON 一行裡的值。只收契約用得到的純量型別——巢狀物件與陣列在協定裡不存在，
-/// 解析時遇到就當成沒有這個欄位（fail closed：拿不到值的欄位由呼叫端套預設或報錯）。
+/// NDJSON 一行裡的值。只收契約用得到的型別：純量，加上巢狀物件（`presence` 的 tag → 連線數）。
+/// 陣列在協定裡不存在，解析時遇到就當成沒有這個欄位（fail closed：拿不到值的欄位由呼叫端套預設或報錯）。
 public enum JSONValue: Equatable, Sendable {
     case string(String)
     case int(Int)
     case double(Double)
     case bool(Bool)
     case null
+    /// 巢狀物件。與最外層一樣依加入順序輸出。
+    indirect case object(JSONLine)
 
     public var stringValue: String? {
         if case .string(let s) = self { return s }
@@ -33,6 +35,11 @@ public enum JSONValue: Equatable, Sendable {
 
     public var boolValue: Bool? {
         if case .bool(let b) = self { return b }
+        return nil
+    }
+
+    public var objectValue: JSONLine? {
+        if case .object(let o) = self { return o }
         return nil
     }
 }
@@ -87,13 +94,17 @@ public struct JSONLine: Equatable, Sendable {
         case notJSONObject
     }
 
-    /// 解析一行。最外層必須是物件；巢狀值略過（見 `JSONValue`）。
+    /// 解析一行。最外層必須是物件；巢狀物件解成 `.object`，陣列略過（見 `JSONValue`）。
     public static func parse(_ line: String) throws -> JSONLine {
         guard let data = line.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data, options: []),
               let dict = object as? [String: Any] else {
             throw ParseError.notJSONObject
         }
+        return Self.object(from: dict)
+    }
+
+    private static func object(from dict: [String: Any]) -> JSONLine {
         var result = JSONLine()
         // 字典沒有順序；依鍵排序只為了讓解析結果可重現（測試比對用），不代表線上順序。
         for key in dict.keys.sorted() {
@@ -108,6 +119,8 @@ public struct JSONLine: Equatable, Sendable {
             return .null
         case let s as String:
             return .string(s)
+        case let d as [String: Any]:
+            return .object(Self.object(from: d))
         case let n as NSNumber:
             // NSNumber 同時裝 Bool 與數字：只能看底層型別判別，否則 `true` 會變成 1。
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return .bool(n.boolValue) }
@@ -127,6 +140,7 @@ public struct JSONLine: Equatable, Sendable {
             return d.rounded() == d && abs(d) < 1e15 ? String(Int(d)) : String(d)
         case .bool(let b): return b ? "true" : "false"
         case .null: return "null"
+        case .object(let o): return o.encoded()
         }
     }
 

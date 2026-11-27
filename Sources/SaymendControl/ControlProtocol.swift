@@ -46,6 +46,46 @@ public enum ControlSource: String, Equatable, Sendable, CaseIterable {
     case cli
 }
 
+/// presence：client 以 `saymend events --presence <tag>` 宣告「我在」，那條 events 連線開著的期間算一個。
+/// app 只計數、不懂 tag 的意思；以連線存活為準（不用心跳或逾時），同一條連線只算一次。
+public enum ControlPresence {
+    /// 各 tag 目前的連線數。
+    public typealias Counts = [String: Int]
+
+    public static let maxTagLength = 32
+
+    /// `[a-z0-9_-]{1,32}`
+    public static func isValidTag(_ tag: String) -> Bool {
+        guard !tag.isEmpty, tag.utf8.count <= maxTagLength else { return false }
+        return tag.utf8.allSatisfy { b in
+            (b >= UInt8(ascii: "a") && b <= UInt8(ascii: "z")) || (b >= UInt8(ascii: "0") && b <= UInt8(ascii: "9"))
+                || b == UInt8(ascii: "_") || b == UInt8(ascii: "-")
+        }
+    }
+
+    /// 編成 JSON 物件：只列數量大於 0 的 tag（沒有就是 `{}`），依 tag 排序讓輸出可重現。
+    public static func jsonValue(_ counts: Counts) -> JSONValue {
+        var object = JSONLine()
+        for tag in counts.keys.sorted() {
+            guard let n = counts[tag], n > 0 else { continue }
+            object.set(tag, .int(n))
+        }
+        return .object(object)
+    }
+
+    /// 解 `presence` 欄位。欄位不存在＝nil（舊版 app 不送這個欄位）；型別錯誤丟 malformed。
+    static func decode(_ value: JSONValue?) throws -> Counts? {
+        guard let value else { return nil }
+        guard let object = value.objectValue else { throw ControlRequest.DecodeError.malformed("presence 不是物件") }
+        var counts: Counts = [:]
+        for field in object.fields {
+            guard let n = field.value.intValue else { throw ControlRequest.DecodeError.malformed("presence.\(field.key) 不是整數") }
+            counts[field.key] = n
+        }
+        return counts
+    }
+}
+
 /// CLI 的 exit code（契約 v1）。
 public enum ControlExitCode {
     public static let success: Int32 = 0
@@ -140,7 +180,8 @@ public enum ControlRequest: Equatable, Sendable {
     case dictate(DictateOptions)
     case stop
     case cancel
-    case events
+    /// `presence`：這條連線宣告的 tag（nil＝不宣告，不計入任何 tag）
+    case events(presence: String?)
 
     public enum DecodeError: Error, Equatable {
         case malformed(String)
@@ -154,7 +195,9 @@ public enum ControlRequest: Equatable, Sendable {
         case .version: line.set("cmd", .string("version"))
         case .stop: line.set("cmd", .string("stop"))
         case .cancel: line.set("cmd", .string("cancel"))
-        case .events: line.set("cmd", .string("events"))
+        case .events(let presence):
+            line.set("cmd", .string("events"))
+            if let presence { line.set("presence", .string(presence)) }
         case .dictate(let o):
             line.set("cmd", .string("dictate"))
             line.set("maxSeconds", .double(o.maxSeconds))
@@ -177,7 +220,14 @@ public enum ControlRequest: Equatable, Sendable {
         case "version": return .version
         case "stop": return .stop
         case "cancel": return .cancel
-        case "events": return .events
+        case "events":
+            switch line["presence"] {
+            case nil, .null?: return .events(presence: nil)
+            case .string(let tag)?:
+                guard ControlPresence.isValidTag(tag) else { throw DecodeError.malformed("presence 必須符合 [a-z0-9_-]{1,32}") }
+                return .events(presence: tag)
+            default: throw DecodeError.malformed("presence 不是字串")
+            }
         case "dictate":
             var o = DictateOptions()
             if let x = line["maxSeconds"] { guard let d = x.doubleValue else { throw DecodeError.malformed("maxSeconds 不是數字") }; o.maxSeconds = d }
@@ -193,13 +243,15 @@ public enum ControlRequest: Equatable, Sendable {
 }
 
 /// app → client 的訊息。
+///
+/// `presence`：app 一律送（沒有就是 `{}`）；解碼時欄位不存在＝nil，代表對端是不懂 presence 的舊版 app。
 public enum ControlMessage: Equatable, Sendable {
-    case status(state: ControlState, source: ControlSource?, modelReady: Bool)
+    case status(state: ControlState, source: ControlSource?, modelReady: Bool, presence: ControlPresence.Counts?)
     case version(app: String)
     case started
     case partial(String)
     case final(text: String, raw: String, durationMs: Int)
-    case state(state: ControlState, source: ControlSource?, at: Date)
+    case state(state: ControlState, source: ControlSource?, presence: ControlPresence.Counts?, at: Date)
     /// `stop`／`cancel` 成功
     case ok
     case error(code: ControlErrorCode, message: String)
@@ -207,11 +259,12 @@ public enum ControlMessage: Equatable, Sendable {
     public func jsonLine() -> JSONLine {
         var line = JSONLine([("v", .int(ControlProtocol.version))])
         switch self {
-        case .status(let state, let source, let modelReady):
+        case .status(let state, let source, let modelReady, let presence):
             line.set("type", .string("status"))
             line.set("state", .string(state.rawValue))
             line.set("source", source.map { .string($0.rawValue) } ?? .null)
             line.set("modelReady", .bool(modelReady))
+            if let presence { line.set("presence", ControlPresence.jsonValue(presence)) }
         case .version(let app):
             line.set("type", .string("version"))
             line.set("app", .string(app))
@@ -226,10 +279,11 @@ public enum ControlMessage: Equatable, Sendable {
             line.set("text", .string(text))
             line.set("raw", .string(raw))
             line.set("durationMs", .int(durationMs))
-        case .state(let state, let source, let at):
+        case .state(let state, let source, let presence, let at):
             line.set("type", .string("state"))
             line.set("state", .string(state.rawValue))
             line.set("source", source.map { .string($0.rawValue) } ?? .null)
+            if let presence { line.set("presence", ControlPresence.jsonValue(presence)) }
             line.set("at", .string(ControlTimestamp.format(at)))
         case .ok:
             line.set("type", .string("ok"))
@@ -269,7 +323,8 @@ public enum ControlMessage: Equatable, Sendable {
         switch try str("type") {
         case "status":
             guard let ready = line["modelReady"]?.boolValue else { throw ControlRequest.DecodeError.malformed("缺少 modelReady") }
-            return .status(state: try state(), source: try source(), modelReady: ready)
+            return .status(state: try state(), source: try source(), modelReady: ready,
+                           presence: try ControlPresence.decode(line["presence"]))
         case "version":
             return .version(app: try str("app"))
         case "started":
@@ -281,7 +336,8 @@ public enum ControlMessage: Equatable, Sendable {
             return .final(text: try str("text"), raw: try str("raw"), durationMs: ms)
         case "state":
             guard let at = ControlTimestamp.parse(try str("at")) else { throw ControlRequest.DecodeError.malformed("at 不是 ISO 8601") }
-            return .state(state: try state(), source: try source(), at: at)
+            return .state(state: try state(), source: try source(),
+                          presence: try ControlPresence.decode(line["presence"]), at: at)
         case "ok":
             return .ok
         case "error":

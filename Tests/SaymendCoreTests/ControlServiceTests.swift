@@ -9,7 +9,11 @@ final class FakePeer: ControlPeer {
     func send(_ message: ControlMessage) { sent.append(message) }
     func close() { closeCount += 1 }
     var states: [(ControlState, ControlSource?)] {
-        sent.compactMap { if case .state(let s, let src, _) = $0 { return (s, src) }; return nil }
+        sent.compactMap { if case .state(let s, let src, _, _) = $0 { return (s, src) }; return nil }
+    }
+    /// 每行 state 的 presence（app 一律送，nil 代表測試失敗）
+    var presences: [ControlPresence.Counts?] {
+        sent.compactMap { if case .state(_, _, let p, _) = $0 { return p }; return nil }
     }
 }
 
@@ -61,7 +65,7 @@ func makeService(modelReady: Bool = true) -> ServiceHarness {
         h.service.handle(.status, peer: peer)
         let deadline = Date().addingTimeInterval(3)
         while peer.closeCount == 0, Date() < deadline { try? await Task.sleep(for: .milliseconds(5)) }
-        #expect(peer.sent == [.status(state: .recording, source: .hotkey, modelReady: false)])
+        #expect(peer.sent == [.status(state: .recording, source: .hotkey, modelReady: false, presence: [:])])
         #expect(peer.closeCount == 1)
     }
 
@@ -191,7 +195,7 @@ func makeService(modelReady: Bool = true) -> ServiceHarness {
     @Test func eventsSendASnapshotFirstThenOnlyRealChanges() {
         let h = makeService()
         let sub = FakePeer()
-        h.service.handle(.events, peer: sub)
+        h.service.handle(.events(presence: nil), peer: sub)
         #expect(sub.states.map(\.0) == [.idle])
         #expect(sub.closeCount == 0, "長駐串流不關")
 
@@ -213,7 +217,7 @@ func makeService(modelReady: Bool = true) -> ServiceHarness {
     @Test func transientStatesWithinOneTurnAreNotBroadcast() {
         let h = makeService()
         let sub = FakePeer()
-        h.service.handle(.events, peer: sub)
+        h.service.handle(.events(presence: nil), peer: sub)
         h.hotkey.activity = .recording
         h.service.activityChanged()
         h.hotkey.activity = .idle
@@ -224,7 +228,7 @@ func makeService(modelReady: Bool = true) -> ServiceHarness {
     @Test func cliDictationShowsUpInEventsWithCLISource() {
         let h = makeService()
         let sub = FakePeer()
-        h.service.handle(.events, peer: sub)
+        h.service.handle(.events(presence: nil), peer: sub)
         h.service.handle(.dictate(DictateOptions()), peer: FakePeer())
         h.scheduler.run()
         h.cli.c.stop()
@@ -239,7 +243,7 @@ func makeService(modelReady: Bool = true) -> ServiceHarness {
     @Test func closedSubscribersStopReceiving() {
         let h = makeService()
         let sub = FakePeer()
-        h.service.handle(.events, peer: sub)
+        h.service.handle(.events(presence: nil), peer: sub)
         #expect(h.service.subscriberCount == 1)
         h.service.peerClosed(sub)
         #expect(h.service.subscriberCount == 0)
@@ -247,6 +251,120 @@ func makeService(modelReady: Bool = true) -> ServiceHarness {
         h.service.activityChanged()
         h.scheduler.run()
         #expect(sub.sent.count == 1)
+    }
+
+    // MARK: - presence
+
+    @Test func declaringConnectionSeesItselfInTheFirstSnapshot() {
+        let h = makeService()
+        let loop = FakePeer()
+        h.service.handle(.events(presence: "loop"), peer: loop)
+        #expect(loop.presences == [["loop": 1]])
+        let second = FakePeer()
+        h.service.handle(.events(presence: "loop"), peer: second)
+        #expect(second.presences == [["loop": 2]])
+    }
+
+    @Test func eventsWithoutPresenceDoNotCountAndDoNotBroadcast() {
+        let h = makeService()
+        let a = FakePeer()
+        h.service.handle(.events(presence: nil), peer: a)
+        let b = FakePeer()
+        h.service.handle(.events(presence: nil), peer: b)
+        #expect(h.scheduler.pending.isEmpty, "沒宣告 tag 的連線不影響 presence，不排廣播")
+        #expect(a.presences == [[:]])
+        #expect(b.presences == [[:]])
+        h.service.peerClosed(b)
+        #expect(h.scheduler.pending.isEmpty)
+        #expect(h.service.snapshot().presence == [:])
+    }
+
+    /// state／source 都沒變，presence 變了也要對所有 events 連線（含沒宣告 tag 的）送一行
+    @Test func presenceChangesAreBroadcastToEverySubscriber() {
+        let h = makeService()
+        let watcher = FakePeer()
+        h.service.handle(.events(presence: nil), peer: watcher)
+        let loop1 = FakePeer()
+        h.service.handle(.events(presence: "loop"), peer: loop1)
+        h.scheduler.run()
+        let loop2 = FakePeer()
+        h.service.handle(.events(presence: "loop"), peer: loop2)
+        h.scheduler.run()
+        let other = FakePeer()
+        h.service.handle(.events(presence: "other"), peer: other)
+        h.scheduler.run()
+        #expect(watcher.presences == [[:], ["loop": 1], ["loop": 2], ["loop": 2, "other": 1]])
+        #expect(watcher.states.map(\.0) == [.idle, .idle, .idle, .idle], "只有 presence 變")
+        #expect(loop1.presences == [["loop": 1], ["loop": 2], ["loop": 2, "other": 1]], "宣告者自己的第一行不重送")
+        #expect(loop2.presences == [["loop": 2], ["loop": 2, "other": 1]])
+        #expect(other.presences == [["loop": 2, "other": 1]])
+    }
+
+    @Test func closingADeclaringConnectionDecrementsAndBroadcasts() {
+        let h = makeService()
+        let watcher = FakePeer()
+        h.service.handle(.events(presence: nil), peer: watcher)
+        let loop1 = FakePeer()
+        let loop2 = FakePeer()
+        h.service.handle(.events(presence: "loop"), peer: loop1)
+        h.service.handle(.events(presence: "loop"), peer: loop2)
+        h.scheduler.run()
+        #expect(watcher.presences.last == ["loop": 2])
+
+        h.service.peerClosed(loop1)                       // CLI 被 kill／斷線
+        h.scheduler.run()
+        #expect(watcher.presences.last == ["loop": 1])
+        #expect(loop2.presences.last == ["loop": 1])
+        #expect(loop1.presences.last == ["loop": 2], "已關的連線不再收到")
+
+        h.service.peerClosed(loop2)
+        h.scheduler.run()
+        #expect(watcher.presences.last == [:], "數量歸零的 tag 不列出")
+        #expect(h.service.snapshot().presence == [:])
+    }
+
+    /// 同一個 turn 裡連上又斷：presence 淨值沒變，不送一閃而過的值
+    @Test func connectAndDisconnectWithinOneTurnIsNotBroadcast() {
+        let h = makeService()
+        let watcher = FakePeer()
+        h.service.handle(.events(presence: nil), peer: watcher)
+        let flaky = FakePeer()
+        h.service.handle(.events(presence: "loop"), peer: flaky)
+        h.service.peerClosed(flaky)
+        h.scheduler.run()
+        #expect(watcher.presences == [[:]])
+    }
+
+    /// 同一條連線只算一次：後續行（即使又是 events）一律忽略
+    @Test func aConnectionCountsOnlyOnce() {
+        let h = makeService()
+        let loop = FakePeer()
+        h.service.handle(.events(presence: "loop"), peer: loop)
+        h.service.handleFollowUp(.events(presence: "loop"), peer: loop)
+        h.service.handleFollowUp(.events(presence: "other"), peer: loop)
+        #expect(h.service.snapshot().presence == ["loop": 1])
+    }
+
+    @Test func presenceRidesAlongWithStateChanges() {
+        let h = makeService()
+        let loop = FakePeer()
+        h.service.handle(.events(presence: "loop"), peer: loop)
+        h.hotkey.activity = .recording
+        h.service.activityChanged()
+        h.scheduler.run()
+        #expect(loop.sent.last.map { if case .state(let s, let src, let p, _) = $0 { return s == .recording && src == .hotkey && p == ["loop": 1] }; return false } == true)
+    }
+
+    @Test func statusReportsPresence() async {
+        let h = makeService()
+        h.service.handle(.events(presence: "loop"), peer: FakePeer())
+        h.service.handle(.events(presence: "loop"), peer: FakePeer())
+        h.service.handle(.events(presence: nil), peer: FakePeer())
+        let peer = FakePeer()
+        h.service.handle(.status, peer: peer)
+        let deadline = Date().addingTimeInterval(3)
+        while peer.closeCount == 0, Date() < deadline { try? await Task.sleep(for: .milliseconds(5)) }
+        #expect(peer.sent == [.status(state: .idle, source: nil, modelReady: true, presence: ["loop": 2])])
     }
 }
 
