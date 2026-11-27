@@ -463,25 +463,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func refreshStatus() {
-        let next: String
-        if let cli = cliDictation, cli.isActive {
-            // 遠端主機經橋接發起的標出主機名稱（docs/remote.md）
-            let who = cli.activeOrigin.map { "遠端 \($0) " } ?? "CLI "
-            switch cli.phase {
-            case .recording: next = "\(who)聽寫中"
-            case .transcribing: next = "\(who)聽寫辨識中"
-            case .polishing: next = "\(who)聽寫潤飾中"
-            case .idle: next = "待機"
-            }
-            if statusLine != next { statusLine = next }
-            return
-        }
-        switch controller.phase {
-        case .idle:
-            next = controller.isLingering ? "可修正（延續窗）" : "待機"
-        case .listening(.hold): next = "聽寫中（按住）"
-        case .listening(.locked): next = "聽寫中（鎖定）"
-        }
+        // 文字與 HUD 共用（StatusText）：同一個狀態只有一種說法
+        let next = MenuStatusText.make(.init(
+            cliPhase: cliDictation?.phase ?? .idle,
+            cliOrigin: cliDictation?.activeOrigin,       // 遠端主機經橋接發起的標出主機名稱（docs/remote.md）
+            hotkeyPhase: controller.phase,
+            isLingering: controller.isLingering,
+            isTargetingSelection: controller.isTargetingSelection))
         // 只在真的變動時才寫回：statusLine 是 @Published，每次賦值（即使值相同）都會觸發
         // objectWillChange。0.25s tick 每輪都呼叫本函式，若無條件賦值，閒置時每 250ms 就
         // 讓觀察 delegate 的 MenuBarExtra 內容重建一次，開著的子選單會被立刻關掉（閃退）。

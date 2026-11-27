@@ -86,11 +86,11 @@ When each CLI dictation ends, the app writes a numbers-only summary line to the 
 
 ### `saymend stop [--json]`
 
-Ends the CLI dictation that is currently **recording** and finalizes it; the text goes to the waiting `dictate`. On success it exits 0 (`--json` prints `{"v":1,"type":"ok"}`). If no CLI dictation is recording (including one that is already transcribing) → exit 4 with `code` `nothing_to_stop`.
+Ends the CLI dictation that is currently **listening** (microphone on) and finalizes it; the text goes to the waiting `dictate`. On success it exits 0 (`--json` prints `{"v":1,"type":"ok"}`). If no CLI dictation is listening (one that is already transcribing doesn't count) → exit 4 with `code` `nothing_to_stop`.
 
 ### `saymend cancel [--json]`
 
-Discards the current CLI dictation (at any stage: recording, transcribing, polishing); the waiting `dictate` exits 5. It doesn't affect hotkey dictation. On success it exits 0 (`--json` prints `{"v":1,"type":"ok"}`); if there is no CLI dictation → exit 4 (`nothing_to_stop`).
+Discards the current CLI dictation (at any stage: listening, transcribing, polishing); the waiting `dictate` exits 5. It doesn't affect hotkey dictation. On success it exits 0 (`--json` prints `{"v":1,"type":"ok"}`); if there is no CLI dictation → exit 4 (`nothing_to_stop`).
 
 ### `saymend events --json [--presence <tag>]`
 
@@ -162,7 +162,7 @@ This interface can turn on the microphone from another process, so:
 2. Its directory is **0700** and must be owned by the current user; otherwise the app refuses to start the control interface. If the directory at the default path is looser, it is tightened to 0700 at startup; for a path overridden with `SAYMEND_CONTROL_SOCKET`, the app **does not change the permissions of an existing directory on your behalf** (it might be your home directory) and refuses to start if they are looser than 0700.
 3. Every connection is checked with `getpeereid` right after accept; if the uid differs, the connection is closed immediately without sending a single byte. The CLI also verifies the server's uid (defense in depth).
 4. A **dead** socket at the path (left behind by a crashed app) is removed and recreated; if someone is listening (another Saymend is running), the app doesn't take it over and only logs it; a file that isn't a socket is never deleted.
-5. **Recording is always visible**: while a CLI dictation is recording, the HUD shows a red microphone + level bar + "CLI 聽寫中｜Esc 取消" (CLI dictation in progress | Esc to cancel), in the same floating bar as hotkey dictation. A dictation started by a remote host through the bridge shows "遠端 <host> 聽寫中｜Esc 取消" (remote <host> dictating | Esc to cancel) instead ([remote.md](remote.md)).
+5. **Dictation is always visible**: while a CLI dictation is listening, the HUD shows a red microphone + level bar + "CLI 聽寫中｜Esc 取消" (CLI dictation in progress | Esc to cancel), in the same floating bar as hotkey dictation. A dictation started by a remote host through the bridge shows "遠端 <host> 聽寫中｜Esc 取消" (remote <host> dictating | Esc to cancel) instead ([remote.md](remote.md)).
 
 ## 3. Relationship with hotkey dictation
 
@@ -170,9 +170,9 @@ CLI dictation and hotkey dictation share the same microphone, recognition engine
 
 | Situation | Behavior |
 |---|---|
-| Hotkey dictation is recording, draining, or queued, or the previous sentence's polishing is still in flight | `dictate` → exit 4 (`busy`) |
-| The 8-second continuation window after a hotkey dictation (no polishing in flight) | `dictate` starts normally and **archives the continuation window** (same as user activity): the CLI's text won't go into that field, so it isn't a continuation; without archiving, the window's expiry would also take down the HUD of the recording CLI dictation |
-| Hotkey pressed while the CLI is recording | **Ends the recording and finalizes** (like tapping the hotkey during locked dictation); the text goes to the waiting `dictate`; hotkey dictation does **not** start |
+| Hotkey dictation is listening, draining, or queued, or the previous sentence's polishing is still in flight | `dictate` → exit 4 (`busy`) |
+| The 8-second continuation window after a hotkey dictation (no polishing in flight) | `dictate` starts normally and **archives the continuation window** (same as user activity): the CLI's text won't go into that field, so it isn't a continuation; without archiving, the window's expiry would also take down the HUD of the listening CLI dictation |
+| Hotkey pressed while the CLI is listening | **Ends the dictation and finalizes** (like tapping the hotkey during locked dictation); the text goes to the waiting `dictate`; hotkey dictation does **not** start |
 | Hotkey pressed while the CLI is transcribing / polishing | Only shows the notice "CLI 聽寫處理中" (CLI dictation is processing); hotkey dictation doesn't start |
 | Esc at any stage of a CLI dictation | **Cancels and discards** (`dictate` exits 5). Esc is swallowed and not passed to the frontmost app — the same as pressing Esc during hotkey dictation |
 | Typing, clicking, or switching apps during a CLI dictation | No effect (CLI text isn't inserted, so there is nothing to freeze) |
@@ -181,7 +181,7 @@ The behavior of hotkey dictation, spoken corrections, and the password-field har
 
 ### The password-field rule (spec §5.3) doesn't apply to CLI dictation
 
-§5.3 is triggered when "the **target** of the dictation is the focused password field": the reason for refusing is that the text would be typed into that field, hence "don't record, don't send to the LLM, don't keep history". A CLI dictation has no target field — by construction its result can't reach any field (this path has no inserter at all and doesn't touch the clipboard), so where the focus is has nothing to do with where the user's words are going. Applying the rule would only make the hands-free loop fail at random whenever focus happens to sit in some password field (for example a 1Password unlock box), without buying any protection. See ADR 0005 for details.
+§5.3 is triggered when "the **target** of the dictation is the focused password field": the reason for refusing is that the text would be typed into that field, hence "don't record, don't send to the LLM, don't keep history". A CLI dictation has no target field — by construction its result can't reach any field (this path has no inserter at all and doesn't touch the clipboard), so where the focus is has nothing to do with where the user's words are going. Applying the rule would only make the saymend-voice mod's loop mode (reads the reply aloud, then listens and sends automatically) fail at random whenever focus happens to sit in some password field (for example a 1Password unlock box), without buying any protection. See ADR 0005 for details.
 
 ### History
 
@@ -189,15 +189,15 @@ Recorded according to the existing "記錄聽寫歷史" (record dictation histor
 
 - Normal finalization: one `cliRaw` row (without polishing) or the polishing result kind (`newContent` / `degraded` …); the session's final text = the `text` returned to the caller.
 - Cancelled or failed after text was recognized: one `outcomeDropped` row, described as `cli:<code>`.
-- **Attempts with no content at all (gave up because nobody spoke) don't create a session**: a hands-free loop opens such dictations over and over, and one blank record each time would flood the history.
+- **Attempts with no content at all (gave up because nobody spoke) don't create a session**: the mod's loop mode opens such dictations over and over, and one blank record each time would flood the history.
 - Caption hallucinations (canned subtitle phrases Whisper produces when there is no voice) are excluded from the result just as in hotkey dictation, and recorded as one `insertSkipped` / `captionHallucination` row.
 
 ## 4. Verification record (2026-11-26, `feat/control-cli`)
 
 - Unit tests: `swift test` all green (SaymendCore 1005 tests, including 1 real-audio harness that is skipped by default; SaymendControl 41; SaymendApp 167). Tests for the new logic are in `Tests/SaymendControlTests/` (literal protocol shapes, options, real-socket server / client / permissions / uid rejection / CLI exit codes) and `Tests/SaymendCoreTests/{EndpointDetector,CLIDictationController,ControlService}Tests.swift`.
 - Real-audio harness (skipped by default, `CLIDictationLiveHarness`): 7.2 seconds of Chinese speech synthesized with `say -v Meijia`, fed in real time with ambient noise padding before and after into the real WhisperKit (small) engine, with `--silence-ms 1200`: pauses within the sentence weren't cut off, and it finalized automatically about 0.5 s after the speech ended (threshold + tick); `raw` is Simplified Chinese, and `text` was converted to Traditional Chinese by OpenCC.
-- On the real machine (running Saymend.app, built-in recognition engine, real microphone): `status`, `events` (both hotkey and CLI sources), `--version`, `dictate` with `--max-seconds` / `--no-speech-seconds`, `stop` / `cancel` from another process, SIGINT, SIGTERM, `kill -9` of the CLI; `dictate` returns 4 while the hotkey is recording or draining, starts normally during the continuation window, the hotkey finalizes a recording CLI dictation, and Esc cancels it; socket 0600 / directory 0700. Whether the microphone was on was confirmed with CoreAudio's per-process property (`kAudioProcessPropertyIsRunningInput`): after every way of ending (including `kill -9`), Saymend stopped capturing audio.
-- Real person on the real machine (Eugene in person, through the Claude Code mod; built-in recognition engine, external headset microphone, `--silence-ms 1500`, part of it in the hands-free loop with `--no-speech-seconds 10`): the complete path of speaking → automatic end on silence → text back to the CLI. The following is taken only from the history database and app log metadata, without any spoken content:
+- On the real machine (running Saymend.app, built-in recognition engine, real microphone): `status`, `events` (both hotkey and CLI sources), `--version`, `dictate` with `--max-seconds` / `--no-speech-seconds`, `stop` / `cancel` from another process, SIGINT, SIGTERM, `kill -9` of the CLI; `dictate` returns 4 while hotkey dictation is listening or draining, starts normally during the continuation window, the hotkey finalizes a listening CLI dictation, and Esc cancels it; socket 0600 / directory 0700. Whether the microphone was on was confirmed with CoreAudio's per-process property (`kAudioProcessPropertyIsRunningInput`): after every way of ending (including `kill -9`), Saymend stopped capturing audio.
+- Real person on the real machine (Eugene in person, through the Claude Code mod; built-in recognition engine, external headset microphone, `--silence-ms 1500`, part of it in loop mode with `--no-speech-seconds 10`): the complete path of speaking → automatic end on silence → text back to the CLI. The following is taken only from the history database and app log metadata, without any spoken content:
   - 2026-11-26 14:52–15:19 (UTC), 10 CLI dictations in total (`history_session.targetKind = cli`), each with final text (`cliRaw`).
   - All 10 recordings ended because of `silence` (automatic end on silence), with recording lengths of 5.9–32.1 seconds; the longest, 32-second one wasn't cut off mid-sentence.
   - Maximum voice level 1.0 (hit the ceiling); ambient noise floor 0.066–0.113, adaptive threshold 0.165–0.282.

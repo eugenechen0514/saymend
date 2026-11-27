@@ -86,11 +86,11 @@ mod ──(執行)──▶ saymend CLI ──(unix socket, NDJSON v1)──▶ 
 
 ### `saymend stop [--json]`
 
-結束目前**錄音中**的 CLI 聽寫並定稿，文字交給正在等待的 `dictate`。成功 exit 0（`--json` 輸出 `{"v":1,"type":"ok"}`）。沒有錄音中的 CLI 聽寫（含已經在辨識中）→ exit 4，`code` 為 `nothing_to_stop`。
+結束目前**聽寫中**（麥克風開著）的 CLI 聽寫並定稿，文字交給正在等待的 `dictate`。成功 exit 0（`--json` 輸出 `{"v":1,"type":"ok"}`）。沒有聽寫中的 CLI 聽寫（已經在辨識的也不算）→ exit 4，`code` 為 `nothing_to_stop`。
 
 ### `saymend cancel [--json]`
 
-丟棄目前的 CLI 聽寫（任何階段：錄音、辨識、潤飾），等待中的 `dictate` 以 exit 5 結束。不影響熱鍵聽寫。成功 exit 0（`--json` 輸出 `{"v":1,"type":"ok"}`）；沒有 CLI 聽寫 → exit 4（`nothing_to_stop`）。
+丟棄目前的 CLI 聽寫（任何階段：聽寫中、辨識中、潤飾中），等待中的 `dictate` 以 exit 5 結束。不影響熱鍵聽寫。成功 exit 0（`--json` 輸出 `{"v":1,"type":"ok"}`）；沒有 CLI 聽寫 → exit 4（`nothing_to_stop`）。
 
 ### `saymend events --json [--presence <tag>]`
 
@@ -162,7 +162,7 @@ protocol v1
 2. 所在目錄 **0700**，且必須是目前使用者擁有，否則 app 拒絕啟動控制介面。預設路徑的目錄原本較寬鬆時，啟動時收緊成 0700；用 `SAYMEND_CONTROL_SOCKET` 覆寫的路徑**不替使用者改既有目錄的權限**（可能是家目錄），比 0700 寬就拒絕啟動。
 3. 每條連線 accept 之後立刻 `getpeereid`，uid 不同就直接關閉，一個位元組都不回。CLI 端也驗 server 的 uid（縱深防禦）。
 4. 路徑上若是**死掉的** socket（app 當掉留下的）就清掉重建；有人在 listen（另一個 Saymend 在跑）就不搶、只記 log；不是 socket 的檔案一律不刪。
-5. **錄音一定看得見**：CLI 聽寫錄音時 HUD 顯示紅色麥克風＋音量條＋「CLI 聽寫中｜Esc 取消」，與熱鍵聽寫同一個浮條。遠端主機經橋接發起的聽寫改顯示「遠端 <主機> 聽寫中｜Esc 取消」（[remote_tw.md](remote_tw.md)）。
+5. **聽寫一定看得見**：CLI 聽寫中 HUD 顯示紅色麥克風＋音量條＋「CLI 聽寫中｜Esc 取消」，與熱鍵聽寫同一個浮條。遠端主機經橋接發起的聽寫改顯示「遠端 <主機> 聽寫中｜Esc 取消」（[remote_tw.md](remote_tw.md)）。
 
 ## 3. 與熱鍵聽寫的關係
 
@@ -170,9 +170,9 @@ CLI 聽寫與熱鍵聽寫共用同一組麥克風、辨識引擎與 HUD（辨識
 
 | 情境 | 行為 |
 |---|---|
-| 熱鍵聽寫錄音中、排空中、排隊中，或上一句潤飾還在途 | `dictate` → exit 4（`busy`） |
-| 熱鍵聽寫結束後的 8 秒延續窗（沒有在途潤飾） | `dictate` 照常開始，並**封存延續窗**（同使用者活動）：CLI 的文字不會進那個欄位，不是延續；不封存的話延續窗到期會把 CLI 錄音中的 HUD 一起收掉 |
-| CLI 錄音中按熱鍵 | **結束錄音並定稿**（同鎖定聽寫時點一下熱鍵），文字交給等待中的 `dictate`；**不**開始熱鍵聽寫 |
+| 熱鍵聽寫中、排空中、排隊中，或上一句潤飾還在途 | `dictate` → exit 4（`busy`） |
+| 熱鍵聽寫結束後的 8 秒延續窗（沒有在途潤飾） | `dictate` 照常開始，並**封存延續窗**（同使用者活動）：CLI 的文字不會進那個欄位，不是延續；不封存的話延續窗到期會把 CLI 聽寫中的 HUD 一起收掉 |
+| CLI 聽寫中按熱鍵 | **結束聽寫並定稿**（同鎖定聽寫時點一下熱鍵），文字交給等待中的 `dictate`；**不**開始熱鍵聽寫 |
 | CLI 辨識／潤飾中按熱鍵 | 只提示「CLI 聽寫處理中」，不開始熱鍵聽寫 |
 | CLI 聽寫任何階段按 Esc | **取消並丟棄**（`dictate` exit 5）。Esc 被吞掉、不傳給前景 App——與熱鍵聽寫中按 Esc 一致 |
 | CLI 聽寫中打字、點滑鼠、切 App | 不影響（CLI 的文字不上屏，沒有東西要凍結） |
@@ -181,7 +181,7 @@ CLI 聽寫與熱鍵聽寫共用同一組麥克風、辨識引擎與 HUD（辨識
 
 ### 密碼欄位規則（規格 §5.3）不適用於 CLI 聽寫
 
-§5.3 的觸發條件是「聽寫的**目標**是聚焦中的密碼欄」：拒絕的理由是文字會被打進那個欄位，所以「不錄音、不送 LLM、不留歷史」。CLI 聽寫沒有目標欄位——結果在構造上就到不了任何欄位（這條路上根本沒有 inserter、不碰剪貼簿），焦點在哪裡和使用者說的話要去哪裡無關。套用它只會讓免手動迴圈在焦點剛好停在某個密碼欄（例如 1Password 解鎖框）時隨機失敗，換不到任何保護。詳見 ADR 0005。
+§5.3 的觸發條件是「聽寫的**目標**是聚焦中的密碼欄」：拒絕的理由是文字會被打進那個欄位，所以「不錄音、不送 LLM、不留歷史」。CLI 聽寫沒有目標欄位——結果在構造上就到不了任何欄位（這條路上根本沒有 inserter、不碰剪貼簿），焦點在哪裡和使用者說的話要去哪裡無關。套用它只會讓 saymend-voice mod 的 loop 模式（朗讀後自動聆聽並送出）在焦點剛好停在某個密碼欄（例如 1Password 解鎖框）時隨機失敗，換不到任何保護。詳見 ADR 0005。
 
 ### 歷史紀錄
 
@@ -189,15 +189,15 @@ CLI 聽寫與熱鍵聽寫共用同一組麥克風、辨識引擎與 HUD（辨識
 
 - 正常定稿：一列 `cliRaw`（不潤飾）或潤飾的結果類別（`newContent`／`degraded`…），session 的最終文字＝回給呼叫端的 `text`。
 - 取消、失敗但已辨識出文字：一列 `outcomeDropped`，說明 `cli:<code>`。
-- **沒有任何內容的嘗試（沒人說話就放棄）不開 session**：免手動迴圈會反覆開這種聽寫，每次一筆空白紀錄會把歷史洗掉。
+- **沒有任何內容的嘗試（沒人說話就放棄）不開 session**：mod 的 loop 模式會反覆開這種聽寫，每次一筆空白紀錄會把歷史洗掉。
 - 字幕幻覺（Whisper 在沒人聲時解出的罐頭語）與熱鍵聽寫同樣不算進結果，記一列 `insertSkipped`／`captionHallucination`。
 
 ## 4. 驗證紀錄（2026-11-26，`feat/control-cli`）
 
 - 單元測試：`swift test` 全綠（SaymendCore 1005 項，含 1 項預設跳過的實音訊 harness；SaymendControl 41 項；SaymendApp 167 項）。新邏輯的測試在 `Tests/SaymendControlTests/`（協定字面形狀、參數、真 socket 的 server／client／權限／uid 拒絕／CLI exit code）與 `Tests/SaymendCoreTests/{EndpointDetector,CLIDictationController,ControlService}Tests.swift`。
 - 實音訊 harness（預設跳過，`CLIDictationLiveHarness`）：`say -v Meijia` 合成的 7.2 秒中文語音，以即時速度、前後墊環境噪音餵進真的 WhisperKit（small）引擎，`--silence-ms 1200`：句中停頓沒被切斷，說完後約 0.5 秒（門檻＋tick）自動定稿；`raw` 簡體、`text` 經 OpenCC 轉繁。
-- 實機（執行中的 Saymend.app、系統內建辨識引擎、真麥克風）：`status`、`events`（熱鍵與 CLI 兩種來源）、`--version`、`dictate` 的 `--max-seconds`／`--no-speech-seconds`、另一行程 `stop`／`cancel`、SIGINT、SIGTERM、`kill -9` CLI；熱鍵錄音中與排空中 `dictate` 回 4、延續窗中 `dictate` 照常開始、CLI 錄音中按熱鍵定稿、按 Esc 取消；socket 0600／目錄 0700。麥克風開關以 CoreAudio 的 per-process 屬性（`kAudioProcessPropertyIsRunningInput`）確認：每一種結束方式（含 `kill -9`）之後 Saymend 都不再收音。
-- 真人實機（Eugene 本人，經 Claude Code 的 mod；系統內建辨識引擎、外接耳機麥克風、`--silence-ms 1500`，部分帶 `--no-speech-seconds 10` 的免手動迴圈）：說話 → 靜音自動結束 → 文字回到 CLI 的完整路徑。以下只取自歷史資料庫與 app log 的 metadata，不含說話內容：
+- 實機（執行中的 Saymend.app、系統內建辨識引擎、真麥克風）：`status`、`events`（熱鍵與 CLI 兩種來源）、`--version`、`dictate` 的 `--max-seconds`／`--no-speech-seconds`、另一行程 `stop`／`cancel`、SIGINT、SIGTERM、`kill -9` CLI；熱鍵聽寫中與排空中 `dictate` 回 4、延續窗中 `dictate` 照常開始、CLI 聽寫中按熱鍵定稿、按 Esc 取消；socket 0600／目錄 0700。麥克風開關以 CoreAudio 的 per-process 屬性（`kAudioProcessPropertyIsRunningInput`）確認：每一種結束方式（含 `kill -9`）之後 Saymend 都不再收音。
+- 真人實機（Eugene 本人，經 Claude Code 的 mod；系統內建辨識引擎、外接耳機麥克風、`--silence-ms 1500`，部分在帶 `--no-speech-seconds 10` 的 loop 模式下）：說話 → 靜音自動結束 → 文字回到 CLI 的完整路徑。以下只取自歷史資料庫與 app log 的 metadata，不含說話內容：
   - 2026-11-26 14:52～15:19（UTC）共 10 段 CLI 聽寫（`history_session.targetKind = cli`），每一段都有最終文字（`cliRaw`）。
   - 10 段的錄音結束原因全部是 `silence`（靜音自動結束），錄音長度 5.9～32.1 秒；最長那段 32 秒的話沒有在句中被切斷。
   - 人聲最大位準 1.0（頂到上限）；環境噪音底線 0.066～0.113，自適應門檻 0.165～0.282。

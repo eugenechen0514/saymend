@@ -32,7 +32,7 @@ struct PrivacySettingsTab: View {
                     LabeledContent("語音辨識", value: "本機（WhisperKit），不出機器")
                 }
                 LabeledContent("LLM 端點", value: settings.llmBaseURLString)
-                LabeledContent("送出的內容", value: "轉錄文字、session 全文／選取文字、游標前後文、OCR 螢幕參考、詞彙表、前景 App 名稱、你的自訂規則與 per-app 追加規則")
+                LabeledContent("送出的內容", value: "轉錄文字、本次聽寫的全文／選取文字、游標前後文、OCR 螢幕參考、詞彙表、前景 App 名稱、你的自訂規則與 per-app 追加規則")
                 Text("使用本地端點（Ollama／LM Studio／MLX）時，以上內容皆不出機器。")
                     .font(.caption).foregroundStyle(.secondary)
             }

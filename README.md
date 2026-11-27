@@ -23,7 +23,7 @@ A macOS voice input tool: the draft is done the moment you finish speaking, and 
 
 On first launch, allow Accessibility, Microphone, and Speech Recognition. The app is signed with the local Apple Development certificate —
 the signing identity is stable, so the existing Accessibility permission survives rebuilds (only when no Apple Development certificate is found does it fall back to ad-hoc signing; ad-hoc signing invalidates the permission on every re-sign, so you have to grant it again).
-Packaging also puts the `saymend` CLI into `Saymend.app/Contents/Helpers/` and creates the symlink `~/.local/bin/saymend` (set `SAYMEND_SKIP_CLI_LINK=1` to skip it; see "Voice loop with Claude Code" below for what it's for).
+Packaging also puts the `saymend` CLI into `Saymend.app/Contents/Helpers/` and creates the symlink `~/.local/bin/saymend` (set `SAYMEND_SKIP_CLI_LINK=1` to skip it; see "With Claude Code" below for what it's for).
 
 ## Usage
 - Hold Right Cmd and speak; release to polish and insert the text. A short press toggles locked dictation; another short press ends it.
@@ -39,9 +39,9 @@ Packaging also puts the `saymend` CLI into `Saymend.app/Contents/Helpers/` and c
 - **Dictation history (M4)**: SQLite records sessions / transcripts / results, which you can review and copy in Settings; it can be turned off, and the retention period (in days) is configurable.
 - **Selectable core modes (M5)**: 4 built-in modes (plain dictation cleanup / verbatim transcript / answering assistant / concise + formal rewrite) plus create/edit/delete for custom modes; quick switching from the menu bar, per-app binding, and a global default. Resolution priority: this dictation > per-app > global > built-in.
 
-## Voice loop with Claude Code (saymend-voice)
+## With Claude Code (saymend-voice)
 
-Saymend can serve as voice input for Claude Code: paired with macOS `say` reading the replies aloud, it forms a "speak → send to Claude Code → hear the reply" loop, built on Saymend's local control interface and the `saymend` CLI (see the contract in [docs/control-interface.md](docs/control-interface.md)). For the Claude Code mod, how to install it, and full details, see [`saymend-voice`](https://github.com/eugenechen0514/claude-code-mods/tree/main/mods/saymend-voice).
+Saymend can serve as voice input for Claude Code: paired with macOS `say` reading the replies aloud, it forms a "speak → send to Claude Code → read the reply aloud" flow, built on Saymend's local control interface and the `saymend` CLI (see the contract in [docs/control-interface.md](docs/control-interface.md)). For the Claude Code mod, how to install it, and full details, see [`saymend-voice`](https://github.com/eugenechen0514/claude-code-mods/tree/main/mods/saymend-voice).
 
 ## Core modes and safety boundaries
 

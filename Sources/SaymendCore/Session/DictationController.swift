@@ -82,6 +82,12 @@ public final class DictationController {
         }
     }
 
+    /// 這一段是否以選取文字為目標（HUD 顯示「改寫選取中」；選單列跟著顯示同一句）。
+    public var isTargetingSelection: Bool {
+        if case .selectionPending = sessionTarget { return true }
+        return false
+    }
+
     /// 麥克風是否正在為使用者錄音（`.listening`，或 issue #85 排隊中且還沒放開）。焦點監看只在這段期間有意義。
     private var isRecording: Bool {
         if case .listening = internalPhase { return true }

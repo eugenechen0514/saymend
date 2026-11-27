@@ -39,9 +39,9 @@ macOS 語音輸入工具：說完即成稿，改稿用嘴不用滑鼠（M1 為�
 - **聽寫歷史（M4）**：SQLite 記錄 session／轉錄／結果，設定頁回查複製；可關閉、可設保留天數。
 - **可選核心模式（M5）**：4 內建模式（純聽寫整理／逐字稿／可回答・助理／精簡+正式改寫）＋自訂模式 CRUD；選單列快速切換、per-app 綁定、全域預設。解析優先序：本次聽寫 > per-app > 全域 > 內建。
 
-## 搭配 Claude Code：語音迴圈（saymend-voice）
+## 搭配 Claude Code（saymend-voice）
 
-Saymend 可以當 Claude Code 的語音輸入：搭配 macOS 的 `say` 朗讀回覆，組成「說話 → 送進 Claude Code → 回覆唸出來」的迴圈，靠的是 Saymend 的本機控制介面與 `saymend` CLI（契約見 [docs/control-interface_tw.md](docs/control-interface_tw.md)）。Claude Code 那一側的 mod、安裝方式與完整說明請見 [`saymend-voice`](https://github.com/eugenechen0514/claude-code-mods/tree/main/mods/saymend-voice)。
+Saymend 可以當 Claude Code 的語音輸入：搭配 macOS 的 `say` 朗讀回覆，組成「說話 → 送進 Claude Code → 朗讀回覆」的流程，靠的是 Saymend 的本機控制介面與 `saymend` CLI（契約見 [docs/control-interface_tw.md](docs/control-interface_tw.md)）。Claude Code 那一側的 mod、安裝方式與完整說明請見 [`saymend-voice`](https://github.com/eugenechen0514/claude-code-mods/tree/main/mods/saymend-voice)。
 
 ## 核心模式與安全邊界
 
