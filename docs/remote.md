@@ -147,9 +147,9 @@ What people who used the old script will notice:
 
 ## 8. Verification record
 
-### On the real machine (2026-11-28, Eugene, the app rebuilt after #95 and #96 were merged)
+### On the real machine (2026-11-28, Eugene)
 
-All six passed:
+With the app rebuilt after #95 and #96 were merged, all six passed:
 
 - Picking a host from `~/.ssh/config` in the settings tab (the real config file).
 - Connecting to an Ubuntu host.
@@ -157,6 +157,12 @@ All six passed:
 - Remote-triggered dictation: the HUD showed the source host, and the text came back to the remote host.
 - Text read aloud through the Mac's speaker.
 - Turning the switch off during a dictation closed the microphone immediately.
+
+Later, the three settings-tab buttons were tried against the same Ubuntu host, and each responded correctly:
+
+- **Test**.
+- **Connect when the app starts**.
+- **Remove the remote client**.
 
 ### Automated tests (2026-11-28, `feat/remote-bridge`, PR #96)
 
@@ -188,13 +194,7 @@ All six passed:
 
 ### Not yet verified on the real machine
 
-These three settings-tab buttons haven't been tried on the real machine; they only have automated tests (with the fake ssh):
-
-- **Test**.
-- **Connect when the app starts**.
-- **Remove the remote client**.
-
-These situations also only have automated tests and haven't been deliberately triggered on the real machine:
+These situations only have automated tests and haven't been deliberately triggered on the real machine:
 
 - Reconnecting after a network drop.
 - The error shown for an authentication failure or an unconfirmed host key.
