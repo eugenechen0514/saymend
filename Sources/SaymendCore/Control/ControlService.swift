@@ -121,7 +121,7 @@ public final class ControlService: ControlRequestHandler {
             if cli.stop() {
                 peer.send(.ok)
             } else {
-                peer.send(.error(code: .nothingToStop, message: "目前沒有錄音中的 CLI 聽寫"))
+                peer.send(.error(code: .nothingToStop, message: "目前沒有可以結束的 CLI 聽寫（只有聽寫中的才能 stop）"))
             }
             peer.close()
         case .cancel:

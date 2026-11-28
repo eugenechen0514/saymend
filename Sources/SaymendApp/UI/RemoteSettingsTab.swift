@@ -5,7 +5,7 @@ import SaymendCore
 enum RemoteSettingsText {
     static let securityTitle = "安全性"
     /// 必須明講的界線（docs/remote.md「安全性」）
-    static let securityWarning = "連線開著時，遠端主機上以同一個帳號執行的任何程式（以及那台主機的 root）都能叫這台 Mac 聽寫並拿到文字，也能讓喇叭說話。只連你信任的主機，不要用多人共用的帳號。"
+    static let securityWarning = "連線開著時，遠端主機上以同一個帳號執行的任何程式（以及那台主機的 root）都能叫這台 Mac 聽寫並拿到文字，也能讓這台 Mac 朗讀文字。只連你信任的主機，不要用多人共用的帳號。"
     static let securityDetails = [
         "不存密碼、不存金鑰：一律呼叫系統的 ssh，用你自己的 ~/.ssh/config、ssh-agent 與金鑰。Saymend 不會詢問密碼，終端機要能免密碼 ssh 登入才連得上。",
         "遠端發起的聽寫，浮條會顯示主機名稱；按 Esc 可以取消。",

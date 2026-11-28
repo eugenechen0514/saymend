@@ -45,7 +45,7 @@ struct VocabSettingsTab: View {
                 Button("匯入 JSON…") { importJSON() }
                 Button("匯出 JSON…") { exportJSON() }
                 Spacer()
-                Text("注入：LLM prompt（永遠）＋ASR 語音偏置（下個 session 生效）")
+                Text("注入：LLM prompt（永遠）＋ASR 語音偏置（下次聽寫生效）")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

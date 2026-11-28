@@ -2,7 +2,7 @@
 
 English | [繁體中文](remote_tw.md)
 
-When Claude Code runs on a host you reach over SSH (Linux works too), the saymend-voice mod runs a client on that host, which goes back through SSH to dictate and speak on this Mac:
+When Claude Code runs on a host you reach over SSH (Linux works too), the saymend-voice mod runs a client on that host, which goes back through SSH to dictate and read aloud on this Mac:
 
 ```
 Remote  Claude Code (mod) ──▶ ~/.saymend-remote/bin/saymend, bin/say (client)
@@ -83,7 +83,7 @@ Any other subcommand or argument is rejected and never reaches the control inter
 
 ## 5. Security
 
-- **Only connect to hosts you trust, and don't use shared accounts.** While a connection is on, any program running under the same account on the remote host (and that host's root) can make this Mac dictate and get the text back, or make its speaker talk. The settings tab says this too.
+- **Only connect to hosts you trust, and don't use shared accounts.** While a connection is on, any program running under the same account on the remote host (and that host's root) can make this Mac dictate and get the text back, or make it read text aloud. The settings tab says this too.
 - No passwords or keys are stored. Saymend always runs the system `/usr/bin/ssh` with your own `~/.ssh/config`, ssh-agent and keys. Every call adds `-o BatchMode=yes`, so it never hangs on a password prompt; the reason for an authentication failure is shown on that host's row. The destination always follows `--`, so a host name can never be taken as an ssh option. SSH is the only supported method for now.
 - A dictation triggered remotely shows "遠端 <host> 聽寫中｜Esc 取消" (remote <host> dictating | Esc to cancel) in the HUD, distinct from the local "CLI 聽寫中" (CLI dictating). The History tab's App column shows "遠端 <host>（saymend）".
   - This works because each host has its own local socket, and requests enter through an in-app control connection that is tagged with the host name.
@@ -92,7 +92,7 @@ Any other subcommand or argument is rejected and never reaches the control inter
   - The Mac bridge socket is `~/Library/Application Support/Saymend/remote/<id>.sock`, mode 0600, in a 0700 directory. The connecting peer's uid must be your own.
   - The remote `~/.saymend-remote` is 0700; sshd creates the socket there.
   - No TCP port is opened on the remote host.
-- The log (`log stream --predicate 'subsystem == "io.saymend.app" AND category == "remote"'`) holds only command names, character counts for speech, and exit codes — **never dictated or spoken content**.
+- The log (`log stream --predicate 'subsystem == "io.saymend.app" AND category == "remote"'`) holds only command names, character counts for text read aloud, and exit codes — **never dictated text or the text read aloud**.
 - Turning a switch off or quitting Saymend:
   - ssh exits, the bridge socket is removed, and every in-flight remote request is cut.
   - An in-flight remote dictation is cancelled and the microphone closed.
@@ -155,7 +155,7 @@ All six passed:
 - Connecting to an Ubuntu host.
 - Running `/saymend status` on the remote host.
 - Remote-triggered dictation: the HUD showed the source host, and the text came back to the remote host.
-- Speech played through the Mac's speaker.
+- Text read aloud through the Mac's speaker.
 - Turning the switch off during a dictation closed the microphone immediately.
 
 ### Automated tests (2026-11-28, `feat/remote-bridge`, PR #96)

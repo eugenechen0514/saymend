@@ -13,12 +13,6 @@ final class HUDModel: ObservableObject {
 
 /// 螢幕下緣浮條（規格 §3.1）：模式、音量、volatile 預覽、通知
 struct HUDView: View {
-    /// CLI 來源聽寫的標籤。遠端橋接發起的寫出主機名稱，和本機 CLI 分得開。
-    static func cliListeningLabel(loadingModel: Bool, origin: String?) -> String {
-        let who = origin.map { "遠端 \($0) 聽寫中" } ?? "CLI 聽寫中"
-        return loadingModel ? "\(who)（載入模型中…）｜Esc 取消" : "\(who)｜Esc 取消"
-    }
-
     @ObservedObject var model: HUDModel
 
     var body: some View {
@@ -30,7 +24,7 @@ struct HUDView: View {
                 Image(systemName: "mic.fill")
                     .foregroundStyle(.red)
                 LevelBar(level: model.level)
-                Text(mode == .locked ? "鎖定聽寫" : "聽寫中")
+                Text(StatusText.listening(locked: mode == .locked))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if !volatile.isEmpty {
@@ -51,7 +45,7 @@ struct HUDView: View {
             case .noSpeechDetected(let mode):
                 Image(systemName: "mic.slash.fill")
                     .foregroundStyle(.orange)
-                Text(mode == .locked ? "鎖定聽寫" : "聽寫中")
+                Text(StatusText.listening(locked: mode == .locked))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("沒偵測到語音——麥克風可能太遠")
@@ -62,7 +56,7 @@ struct HUDView: View {
                 Image(systemName: "character.cursor.ibeam")
                     .foregroundStyle(.orange)
                 LevelBar(level: model.level)
-                Text("改寫選取中")
+                Text(StatusText.selectionListening)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if !volatile.isEmpty {
@@ -77,7 +71,7 @@ struct HUDView: View {
                 Image(systemName: "mic.fill")      // 錄音一律是紅色麥克風；來源寫在文字裡
                     .foregroundStyle(.red)
                 LevelBar(level: model.level)
-                Text(HUDView.cliListeningLabel(loadingModel: loadingModel, origin: origin))
+                Text(StatusText.cliListening(loadingModel: loadingModel, origin: origin))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if !volatile.isEmpty {
@@ -89,14 +83,14 @@ struct HUDView: View {
             case .lingering:
                 Image(systemName: "clock.arrow.circlepath")
                     .foregroundStyle(.secondary)
-                Text("可修正（8 秒內可續說／復原）")
+                Text(StatusText.lingering)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 UndoPill(action: model.onUndoTap)
             case .transcribing:
                 Image(systemName: "hourglass")
                     .foregroundStyle(.secondary)
-                Text("辨識中…")
+                Text(StatusText.transcribing)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             // issue #17：加上已等待秒數。載入期間 App 的 CPU 幾乎是 0%，一行不動的字
