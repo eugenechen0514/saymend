@@ -467,6 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let next = MenuStatusText.make(.init(
             cliPhase: cliDictation?.phase ?? .idle,
             cliOrigin: cliDictation?.activeOrigin,       // 遠端主機經橋接發起的標出主機名稱（docs/remote.md）
+            hotkeyActivity: controller.activity,         // 與契約的 state 同一個來源
             hotkeyPhase: controller.phase,
             isLingering: controller.isLingering,
             isTargetingSelection: controller.isTargetingSelection))

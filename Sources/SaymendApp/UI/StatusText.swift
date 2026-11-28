@@ -25,10 +25,15 @@ enum StatusText {
 }
 
 /// 選單列第一行的狀態。CLI 聽寫進行中以它為準，否則看熱鍵聽寫。
+///
+/// 熱鍵聽寫看的是 `DictationController.activity`——和控制介面契約的 state（`saymend status`／`events`）同一個來源，
+/// 所以放開熱鍵後在辨識、潤飾時，選單列顯示「辨識中…」「潤飾中…」，不會是「待機」。
+/// `phase` 只用來分出「鎖定」：放開後 `phase` 已經回到 idle，拿它判斷就會漏掉辨識與潤飾。
 enum MenuStatusText {
     struct Input: Equatable {
         var cliPhase: CLIDictationController.Phase = .idle
         var cliOrigin: String?
+        var hotkeyActivity: DictationActivity = .idle
         var hotkeyPhase: DictationController.Phase = .idle
         var isLingering = false
         var isTargetingSelection = false
@@ -42,11 +47,18 @@ enum MenuStatusText {
         case .polishing: return who + StatusText.polishing
         case .idle: break
         }
-        switch i.hotkeyPhase {
+        switch i.hotkeyActivity {
+        case .recording:
+            if i.isTargetingSelection { return StatusText.selectionListening }
+            if case .listening(.locked) = i.hotkeyPhase { return StatusText.listening(locked: true) }
+            return StatusText.listening(locked: false)
+        case .transcribing:
+            return StatusText.transcribing
+        case .polishing:
+            // 8 秒可修正期間若上一句還在潤飾，契約報 polishing；選單列跟著契約
+            return StatusText.polishing
         case .idle:
             return i.isLingering ? StatusText.lingering : StatusText.idle
-        case .listening(let mode):
-            return i.isTargetingSelection ? StatusText.selectionListening : StatusText.listening(locked: mode == .locked)
         }
     }
 }
